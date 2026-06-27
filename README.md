@@ -140,12 +140,13 @@ git push origin v0.1.0
 
 The release workflow validates that all three project versions match the tag, performs the complete Release build and smoke test, and publishes:
 
+- A generated changelog grouped from Conventional Commit messages since the previous version.
 - A portable Windows ZIP with the managed connector runtimes.
 - An MSI installer.
 - An NSIS setup executable.
 - SHA-256 checksums for every downloadable asset.
 
-Versions below `1.0.0` are published as GitHub prereleases. An existing tag can be republished manually from the **Release** workflow if an earlier run failed before creating the GitHub Release.
+The generated changelog becomes the GitHub Release description and is also attached as `CHANGELOG.md`. Versions below `1.0.0` are published as GitHub prereleases. An existing tag can be republished manually from the **Release** workflow; its notes and assets are updated in place.
 
 ## Local data
 

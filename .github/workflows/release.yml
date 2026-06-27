@@ -112,6 +112,17 @@ jobs:
           -File Tools\Package-NinjaCrawlerRelease.ps1
           -Version ${{ steps.version.outputs.version }}
 
+      - name: Generate changelog
+        shell: pwsh
+        run: |
+          powershell -ExecutionPolicy Bypass `
+            -File Tools\New-NinjaCrawlerChangelog.ps1 `
+            -Version "${{ steps.version.outputs.version }}" `
+            -CurrentRef "${{ steps.version.outputs.tag }}" `
+            -CurrentTag "${{ steps.version.outputs.tag }}" `
+            -Repository "${{ github.repository }}" `
+            -OutputPath "release\CHANGELOG.md"
+
       - name: Upload release build artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -135,12 +146,18 @@ jobs:
 
           & gh release view $env:RELEASE_TAG *> $null
           if ($LASTEXITCODE -eq 0) {
+            & gh release edit $env:RELEASE_TAG `
+              --title "NinjaCrawler $env:RELEASE_VERSION" `
+              --notes-file release\CHANGELOG.md
+            if ($LASTEXITCODE -ne 0) {
+              throw "GitHub Release notes update failed."
+            }
             & gh release upload $env:RELEASE_TAG @assets --clobber
           } else {
             $arguments = @(
               'release', 'create', $env:RELEASE_TAG
               '--verify-tag'
-              '--generate-notes'
+              '--notes-file', 'release\CHANGELOG.md'
               '--title', "NinjaCrawler $env:RELEASE_VERSION"
             )
             if ($env:IS_PRERELEASE -eq 'True') {
