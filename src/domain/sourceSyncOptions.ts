@@ -134,6 +134,7 @@ export function createInstagramSourceSyncOptions(
       ?? DEFAULT_INSTAGRAM_SOURCE_SYNC_OPTIONS.placeExtractedImageIntoVideoFolder,
     downloadText: overrides?.downloadText ?? DEFAULT_INSTAGRAM_SOURCE_SYNC_OPTIONS.downloadText,
     downloadTextPosts: overrides?.downloadTextPosts ?? DEFAULT_INSTAGRAM_SOURCE_SYNC_OPTIONS.downloadTextPosts,
+    targetStoryMediaId: normalizedTextValue(overrides?.targetStoryMediaId),
     textSpecialFolder: overrides?.textSpecialFolder ?? DEFAULT_INSTAGRAM_SOURCE_SYNC_OPTIONS.textSpecialFolder,
     specialPath: normalizedTextValue(overrides?.specialPath),
     usernameOverride: normalizedTextValue(overrides?.usernameOverride),

@@ -319,6 +319,7 @@ fn build_instagram_identity_probe_request(
         date_to_timestamp: None,
         media_file_naming_mode: instagram_connector::InstagramMediaFileNamingMode::PresetNewDefault,
         media_file_naming_template: None,
+        target_story_media_id: None,
     }
 }
 

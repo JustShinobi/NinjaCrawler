@@ -95,6 +95,7 @@ pub struct InstagramConnectorRequest {
     pub date_to_timestamp: Option<i64>,
     pub media_file_naming_mode: InstagramMediaFileNamingMode,
     pub media_file_naming_template: Option<String>,
+    pub target_story_media_id: Option<String>,
 }
 
 #[derive(Clone)]
@@ -537,7 +538,55 @@ where
     let total_sections = enabled_section_count(&effective_request.sections);
     let mut completed_discovery_sections = 0usize;
 
-    if effective_request.sections.timeline {
+    if let Some(target_story_media_id) = effective_request
+        .target_story_media_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+    {
+        ensure_sync_not_cancelled(&should_cancel)?;
+        report_profile_phase_progress(
+            &mut progress,
+            "Discovering story",
+            "Selected story: loading item".to_string(),
+            Some(0),
+            Some(0),
+            true,
+        );
+        match discover_target_story_manifest_section(
+            &mut client,
+            &effective_request,
+            &profile,
+            &target_story_media_id,
+            &mut manifest,
+        ) {
+            Ok(()) => {
+                completed_discovery_sections += 1;
+                report_profile_phase_progress(
+                    &mut progress,
+                    "Discovering story",
+                    "Selected story: discovery complete".to_string(),
+                    Some(0),
+                    discovery_progress_percent(completed_discovery_sections, 1),
+                    false,
+                );
+            }
+            Err(error) => {
+                handle_section_error(
+                    error,
+                    effective_request.skip_errors,
+                    effective_request.ignore_stories_560_errors,
+                    effective_request.use_gql,
+                    "stories_user",
+                    &mut section_errors,
+                    &mut validation_error,
+                    &mut auth_disabled_sections,
+                    &mut rate_limited,
+                )?;
+            }
+        }
+    } else if effective_request.sections.timeline {
         ensure_sync_not_cancelled(&should_cancel)?;
         report_profile_phase_progress(
             &mut progress,
@@ -596,7 +645,7 @@ where
         }
     }
 
-    if effective_request.sections.reels {
+    if effective_request.target_story_media_id.is_none() && effective_request.sections.reels {
         ensure_sync_not_cancelled(&should_cancel)?;
         report_profile_phase_progress(
             &mut progress,
@@ -654,7 +703,7 @@ where
         }
     }
 
-    if effective_request.sections.stories {
+    if effective_request.target_story_media_id.is_none() && effective_request.sections.stories {
         ensure_sync_not_cancelled(&should_cancel)?;
         report_profile_phase_progress(
             &mut progress,
@@ -694,7 +743,8 @@ where
         }
     }
 
-    if effective_request.sections.stories_user {
+    if effective_request.target_story_media_id.is_none() && effective_request.sections.stories_user
+    {
         ensure_sync_not_cancelled(&should_cancel)?;
         report_profile_phase_progress(
             &mut progress,
@@ -734,7 +784,7 @@ where
         }
     }
 
-    if effective_request.sections.tagged {
+    if effective_request.target_story_media_id.is_none() && effective_request.sections.tagged {
         ensure_sync_not_cancelled(&should_cancel)?;
         report_profile_phase_progress(
             &mut progress,
@@ -1102,7 +1152,9 @@ where
                 let known_in_ledger = request
                     .ledger_media_keys
                     .contains(&asset.provider_media_key)
-                    || request.ledger_relative_paths.contains(&base_relative_path_key);
+                    || request
+                        .ledger_relative_paths
+                        .contains(&base_relative_path_key);
                 let should_skip_existing = if request.missing_only {
                     known_in_filesystem
                 } else {
@@ -1364,6 +1416,51 @@ fn discover_user_stories_manifest_section(
     manifest.sections.push(build_manifest_section(
         "stories_user",
         section_label("stories_user").to_string(),
+        request.profile_root.join("Stories (user)"),
+        items,
+        Some(&profile.user_id),
+    ));
+
+    Ok(())
+}
+
+fn discover_target_story_manifest_section(
+    client: &mut InstagramClient,
+    request: &InstagramConnectorRequest,
+    profile: &UserProfile,
+    story_media_id: &str,
+    manifest: &mut InstagramSyncManifest,
+) -> Result<(), String> {
+    let media_id = story_media_id.trim();
+    if media_id.is_empty() || !media_id.chars().all(|value| value.is_ascii_digit()) {
+        return Err("Selected Instagram story id is invalid.".to_string());
+    }
+
+    let payload = client.get_json(
+        &format!("https://i.instagram.com/api/v1/media/{media_id}/info/"),
+        Some(&format!(
+            "https://www.instagram.com/stories/{}/{media_id}/",
+            request.username
+        )),
+    )?;
+    let item = payload
+        .get("items")
+        .and_then(Value::as_array)
+        .and_then(|entries| entries.first())
+        .cloned()
+        .or_else(|| payload.get("item").cloned())
+        .ok_or_else(|| "Selected Instagram story was not found.".to_string())?;
+
+    if let Some(owner_id) = item_owner_user_id(&item) {
+        if owner_id != profile.user_id {
+            return Err("Selected Instagram story belongs to a different profile.".to_string());
+        }
+    }
+
+    let items = hydrate_story_items_if_needed(client, vec![item]);
+    manifest.sections.push(build_manifest_section(
+        "stories_user",
+        "Selected story".to_string(),
         request.profile_root.join("Stories (user)"),
         items,
         Some(&profile.user_id),
@@ -1667,6 +1764,13 @@ fn hydrate_story_items_if_needed(client: &mut InstagramClient, items: Vec<Value>
                 .unwrap_or(item)
         })
         .collect()
+}
+
+fn item_owner_user_id(item: &Value) -> Option<String> {
+    string_from_value(item.pointer("/user/pk"))
+        .or_else(|| string_from_value(item.pointer("/user/id")))
+        .or_else(|| string_from_value(item.pointer("/owner/pk")))
+        .or_else(|| string_from_value(item.pointer("/owner/id")))
 }
 
 fn media_item_has_downloadable_media(item: &Value) -> bool {
@@ -3474,8 +3578,14 @@ mod tests {
             ..Default::default()
         };
         let fallback = public_identity_headers(&empty);
-        assert_eq!(fallback.app_id.as_deref(), Some(super::INSTAGRAM_PUBLIC_APP_ID));
-        assert_eq!(fallback.asbd_id.as_deref(), Some(super::INSTAGRAM_PUBLIC_ASBD_ID));
+        assert_eq!(
+            fallback.app_id.as_deref(),
+            Some(super::INSTAGRAM_PUBLIC_APP_ID)
+        );
+        assert_eq!(
+            fallback.asbd_id.as_deref(),
+            Some(super::INSTAGRAM_PUBLIC_ASBD_ID)
+        );
     }
 
     fn sample_request() -> InstagramConnectorRequest {
@@ -3511,6 +3621,7 @@ mod tests {
             date_to_timestamp: None,
             media_file_naming_mode: InstagramMediaFileNamingMode::PresetNewDefault,
             media_file_naming_template: None,
+            target_story_media_id: None,
         }
     }
 
