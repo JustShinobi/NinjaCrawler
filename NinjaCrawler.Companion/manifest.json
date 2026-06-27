@@ -1,0 +1,19 @@
+{
+  "manifest_version": 3,
+  "name": "NinjaCrawler Companion",
+  "description": "Adds and syncs supported social profiles with NinjaCrawler from the current browser tab.",
+  "version": "0.1.0",
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "NinjaCrawler Companion"
+  },
+  "background": {
+    "service_worker": "src/background.js",
+    "type": "module"
+  },
+  "permissions": ["activeTab", "storage", "tabs"],
+  "host_permissions": [
+    "http://127.0.0.1:47219/*",
+    "http://localhost:47219/*"
+  ]
+}

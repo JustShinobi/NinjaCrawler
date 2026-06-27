@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>NinjaCrawler Companion</title>
+    <link rel="stylesheet" href="src/popup.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <header class="header">
+        <div>
+          <h1>NinjaCrawler Companion</h1>
+          <p id="profileSummary" class="summary">Loading...</p>
+        </div>
+        <span id="statusPill" class="status neutral">...</span>
+      </header>
+
+      <section id="unsupportedPanel" class="panel hidden">
+        <h2>Unsupported Tab</h2>
+        <p class="muted">Open a supported profile tab.</p>
+      </section>
+
+      <section id="offlinePanel" class="panel hidden">
+        <h2>Desktop Offline</h2>
+        <p class="muted">Start NinjaCrawler and keep it running.</p>
+      </section>
+
+      <form id="profileForm" class="panel hidden">
+        <div id="existingBanner" class="banner hidden">
+          <strong>Already added</strong>
+          <span id="existingMeta"></span>
+        </div>
+
+        <div class="actions">
+          <button id="syncButton" type="button" class="secondary hidden">Sync</button>
+          <button id="addButton" type="button" class="primary">Add in NinjaCrawler</button>
+        </div>
+
+        <p id="message" class="message" aria-live="polite"></p>
+      </form>
+    </main>
+
+    <script type="module" src="src/popup.js"></script>
+  </body>
+</html>
