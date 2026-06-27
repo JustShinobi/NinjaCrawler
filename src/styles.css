@@ -9571,6 +9571,36 @@ p {
   color: var(--accent-contrast, var(--text));
 }
 
+.profile-view-sections {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+}
+
+.profile-view-sections button {
+  appearance: none;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface-input);
+  color: var(--muted);
+  font: inherit;
+  font-size: 0.74rem;
+  letter-spacing: 0.02em;
+  padding: 0.28rem 0.7rem;
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease, border-color 0.12s ease;
+}
+
+.profile-view-sections button:hover {
+  color: var(--text);
+}
+
+.profile-view-sections button.is-active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-contrast);
+}
+
 .profile-view-density {
   display: inline-flex;
   align-items: center;

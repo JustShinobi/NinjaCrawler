@@ -112,7 +112,11 @@ struct LegacyInstagramReconciliationRecord {
     alias_keys: Vec<(String, String)>,
     file_sha256: Option<String>,
     provider_post_key: String,
+    /// Normalized (lowercased) shortcode used for dedupe/aliases.
     provider_post_code: Option<String>,
+    /// Shortcode preserving original casing, used to rebuild the post URL
+    /// (Instagram shortcodes are case-sensitive).
+    provider_post_code_cased: Option<String>,
     media_type: String,
     media_section: String,
 }
@@ -1798,16 +1802,29 @@ fn is_profile_image_file(file_name: &str) -> bool {
 }
 
 /// Monta o link original do post (nível do post — depende do tipo final).
-fn build_post_url(provider: &str, handle: &str, post_id: &str, is_video: bool) -> Option<String> {
+fn build_post_url(
+    provider: &str,
+    handle: &str,
+    post_id: Option<&str>,
+    is_video: bool,
+    post_code: Option<&str>,
+) -> Option<String> {
     let handle = handle.trim().trim_start_matches('@');
     match provider {
         // TikTok separa vídeo (`/video/`) de foto-slideshow (`/photo/`).
-        "tiktok" => Some(format!(
-            "https://www.tiktok.com/@{handle}/{}/{post_id}",
-            if is_video { "video" } else { "photo" }
-        )),
-        "twitter" => Some(format!("https://x.com/{handle}/status/{post_id}")),
-        // Instagram: o shortcode não vem do nome; o link cai para o perfil.
+        "tiktok" => post_id.map(|post_id| {
+            format!(
+                "https://www.tiktok.com/@{handle}/{}/{post_id}",
+                if is_video { "video" } else { "photo" }
+            )
+        }),
+        "twitter" => post_id.map(|post_id| format!("https://x.com/{handle}/status/{post_id}")),
+        // Instagram usa o shortcode (case-sensitive) reconstruído pelo ledger;
+        // sem ele o link cai para o perfil.
+        "instagram" => post_code
+            .map(str::trim)
+            .filter(|code| !code.is_empty())
+            .map(|code| format!("https://www.instagram.com/p/{code}/")),
         _ => None,
     }
 }
@@ -1901,6 +1918,106 @@ struct GalleryPostAcc {
     media_type: String,
     section: String,
     files: Vec<(Option<usize>, MediaGalleryFile)>,
+    /// Authoritative metadata joined from the sync ledger by relative path
+    /// (preferred over the values derived from the file name).
+    ledger_post_key: Option<String>,
+    ledger_post_code: Option<String>,
+    ledger_section: Option<String>,
+    ledger_captured_at: Option<i64>,
+}
+
+/// Post link metadata joined from the per-provider media ledger, keyed by the
+/// (lowercased) relative path of each downloaded file.
+#[derive(Default, Clone)]
+struct GalleryMediaLedgerLink {
+    post_key: Option<String>,
+    post_code: Option<String>,
+    section: Option<String>,
+    captured_at: Option<i64>,
+}
+
+/// Loads the relative-path → link map used to rebuild post URLs and resolve the
+/// feed/reels section. Instagram keeps its own ledger (with the case-sensitive
+/// shortcode); TikTok/Twitter share the provider-neutral ledger (with the post
+/// key and capture time). Returns an empty map for legacy media without ledger
+/// rows — the gallery then falls back to file-name derivation.
+fn load_gallery_media_ledger_links(
+    connection: &Connection,
+    provider: &str,
+    source_id: &str,
+    profile_root: &Path,
+) -> HashMap<String, GalleryMediaLedgerLink> {
+    let mut links = HashMap::new();
+    if provider.eq_ignore_ascii_case("instagram") {
+        if let Ok(mut statement) = connection.prepare(
+            "SELECT relative_path, media_section, provider_post_code
+             FROM instagram_sync_media_ledger WHERE source_id = ?1",
+        ) {
+            let rows = statement.query_map(params![source_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            });
+            if let Ok(rows) = rows {
+                for row in rows.flatten() {
+                    let (relative_path, section, post_code) = row;
+                    links.insert(
+                        relative_path.to_ascii_lowercase(),
+                        GalleryMediaLedgerLink {
+                            post_key: None,
+                            post_code,
+                            section,
+                            captured_at: None,
+                        },
+                    );
+                }
+            }
+        }
+        // Fallback para imports legados (SCrawler) baixados ANTES do shortcode ser
+        // persistido no ledger: lê o código (casing original) direto do XML.
+        for (relative_path, (post_code, section)) in load_legacy_instagram_post_codes(profile_root) {
+            let entry = links.entry(relative_path).or_default();
+            if entry.post_code.is_none() {
+                entry.post_code = post_code;
+            }
+            if entry.section.is_none() {
+                entry.section = section;
+            }
+        }
+        return links;
+    }
+
+    let Ok(mut statement) = connection.prepare(
+        "SELECT relative_path, media_section, provider_post_key, captured_at
+         FROM provider_sync_media_ledger WHERE provider = ?1 AND source_id = ?2",
+    ) else {
+        return links;
+    };
+    let rows = statement.query_map(params![provider, source_id], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, Option<String>>(1)?,
+            row.get::<_, Option<String>>(2)?,
+            row.get::<_, Option<i64>>(3)?,
+        ))
+    });
+    if let Ok(rows) = rows {
+        for row in rows.flatten() {
+            let (relative_path, section, post_key, captured_at) = row;
+            links.insert(
+                relative_path.to_ascii_lowercase(),
+                GalleryMediaLedgerLink {
+                    post_key,
+                    post_code: None,
+                    section,
+                    captured_at,
+                },
+            );
+        }
+    }
+    links
 }
 
 /// Lista a mídia baixada de um perfil agrupada por post, com o link original
@@ -1952,6 +2069,12 @@ pub fn load_source_media_gallery(source_id: String) -> Result<SourceMediaGallery
         };
         let profile_root =
             resolved_source_media_output_root_with_connection(connection, layout, &source_profile)?;
+
+        // Post link/section metadata from the sync ledger, keyed by relative path
+        // (lowercased to match the gallery's own key). For Instagram this also
+        // merges shortcodes read from the legacy SCrawler XML.
+        let ledger_links =
+            load_gallery_media_ledger_links(connection, &provider, &source_id, &profile_root);
 
         let mut grouped: HashMap<String, GalleryPostAcc> = HashMap::new();
         let mut order: Vec<String> = Vec::new();
@@ -2007,6 +2130,8 @@ pub fn load_source_media_gallery(source_id: String) -> Result<SourceMediaGallery
                 "stories" | "reposts" | "video" => top_segment.clone(),
                 _ => "timeline".to_string(),
             };
+            // Liga ao ledger pelo relative_path (que no banco é lowercased).
+            let link = ledger_links.get(&relative_path.to_ascii_lowercase()).cloned();
             let file = MediaGalleryFile {
                 relative_path,
                 absolute_path: path.to_string_lossy().to_string(),
@@ -2020,6 +2145,10 @@ pub fn load_source_media_gallery(source_id: String) -> Result<SourceMediaGallery
                     media_type: derived.media_type.to_string(),
                     section,
                     files: Vec::new(),
+                    ledger_post_key: None,
+                    ledger_post_code: None,
+                    ledger_section: None,
+                    ledger_captured_at: None,
                 }
             });
             entry.files.push((derived.index, file));
@@ -2028,6 +2157,27 @@ pub fn load_source_media_gallery(source_id: String) -> Result<SourceMediaGallery
             }
             if entry.media_type == "image" && derived.media_type == "video" {
                 entry.media_type = "video".to_string();
+            }
+            // Primeiro arquivo do post que tiver dado de ledger define o link/seção.
+            if let Some(link) = link {
+                if entry.ledger_post_key.is_none() {
+                    if let Some(post_key) = link.post_key.filter(|value| !value.trim().is_empty()) {
+                        entry.ledger_post_key = Some(post_key);
+                    }
+                }
+                if entry.ledger_post_code.is_none() {
+                    if let Some(post_code) = link.post_code.filter(|value| !value.trim().is_empty()) {
+                        entry.ledger_post_code = Some(post_code);
+                    }
+                }
+                if entry.ledger_section.is_none() {
+                    if let Some(section) = link.section.filter(|value| !value.trim().is_empty()) {
+                        entry.ledger_section = Some(section);
+                    }
+                }
+                if entry.ledger_captured_at.is_none() {
+                    entry.ledger_captured_at = link.captured_at;
+                }
             }
         }
 
@@ -2043,10 +2193,25 @@ pub fn load_source_media_gallery(source_id: String) -> Result<SourceMediaGallery
                 } else {
                     acc.media_type
                 };
-                let post_url = acc
-                    .post_id
+                // O id do ledger (autoridade do connector) tem prioridade sobre o
+                // derivado do nome; o shortcode do IG só vem do ledger.
+                let post_id_for_url = acc
+                    .ledger_post_key
                     .as_deref()
-                    .and_then(|id| build_post_url(&provider, &handle, id, is_video));
+                    .or(acc.post_id.as_deref());
+                let post_url = build_post_url(
+                    &provider,
+                    &handle,
+                    post_id_for_url,
+                    is_video,
+                    acc.ledger_post_code.as_deref(),
+                );
+                // Seção e data preferem o ledger; caem para o derivado do nome.
+                let section = acc
+                    .ledger_section
+                    .filter(|value| !value.trim().is_empty())
+                    .unwrap_or(acc.section);
+                let captured_at = acc.ledger_captured_at.or(acc.captured_at);
                 // Poster: o cover (vídeo) ou a 1ª imagem (slideshow).
                 let poster_path = acc
                     .post_id
@@ -2062,9 +2227,9 @@ pub fn load_source_media_gallery(source_id: String) -> Result<SourceMediaGallery
                 posts.push(MediaGalleryPost {
                     post_id: acc.post_id,
                     post_url,
-                    captured_at: acc.captured_at,
+                    captured_at,
                     media_type,
-                    section: acc.section,
+                    section,
                     poster_path,
                     files,
                 });
@@ -4843,18 +5008,56 @@ fn legacy_instagram_post_permalink(entry: &LegacyInstagramMediaXmlEntry) -> &str
         .unwrap_or(&entry.media_url)
 }
 
-fn extract_instagram_post_code_from_permalink(value: &str) -> Option<String> {
+/// Lightweight relative-path → (cased shortcode, section) map read straight from
+/// the legacy SCrawler `User_Instagram*_Data.xml`, used by ProfileView to rebuild
+/// post links for media imported BEFORE the shortcode was persisted in the media
+/// ledger. Unlike full reconciliation this skips per-file hashing/IO, so it is
+/// cheap enough to run on gallery load. Keys are lowercased to match the gallery.
+fn load_legacy_instagram_post_codes(
+    profile_root: &Path,
+) -> HashMap<String, (Option<String>, Option<String>)> {
+    let mut map = HashMap::new();
+    let Ok(Some(data_xml_path)) = find_user_instagram_data_xml(profile_root) else {
+        return map;
+    };
+    let Ok(entries) = parse_legacy_instagram_data_xml(&data_xml_path) else {
+        return map;
+    };
+    for entry in entries {
+        let relative_path =
+            legacy_instagram_candidate_relative_path(&entry.file_name, entry.special_folder.as_deref());
+        if relative_path.is_empty() {
+            continue;
+        }
+        let permalink = legacy_instagram_post_permalink(&entry);
+        let post_code = extract_instagram_post_code_from_permalink_cased(permalink);
+        let section = Some(infer_legacy_instagram_media_section(
+            entry.special_folder.as_deref(),
+            permalink,
+        ));
+        map.entry(relative_path).or_insert((post_code, section));
+    }
+    map
+}
+
+/// Extracts the post shortcode from a permalink preserving its original casing.
+/// Instagram shortcodes are case-sensitive, so the cased form is what feeds the
+/// reconstructed `instagram.com/p/<code>/` URL.
+fn extract_instagram_post_code_from_permalink_cased(value: &str) -> Option<String> {
     let normalized = value.trim();
     let marker = ["/p/", "/reel/", "/tv/"]
         .into_iter()
         .find(|marker| normalized.contains(marker))?;
     let tail = normalized.split_once(marker)?.1;
-    let code = tail
-        .split(['/', '?', '&', '#'])
+    tail.split(['/', '?', '&', '#'])
         .next()
         .map(str::trim)
-        .filter(|value| !value.is_empty())?;
-    Some(code.to_ascii_lowercase())
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn extract_instagram_post_code_from_permalink(value: &str) -> Option<String> {
+    extract_instagram_post_code_from_permalink_cased(value).map(|code| code.to_ascii_lowercase())
 }
 
 fn infer_legacy_instagram_media_section(special_folder: Option<&str>, permalink: &str) -> String {
@@ -4963,6 +5166,7 @@ fn collect_legacy_instagram_reconciliation_records(
         let permalink = legacy_instagram_post_permalink(&entry);
         let provider_post_key = normalize_instagram_post_ledger_key(&entry.provider_post_key);
         let provider_post_code = extract_instagram_post_code_from_permalink(permalink);
+        let provider_post_code_cased = extract_instagram_post_code_from_permalink_cased(permalink);
         let mut alias_keys = Vec::new();
         alias_keys.push((provider_media_key.clone(), "legacy_file_path".to_string()));
         for candidate in
@@ -4993,6 +5197,7 @@ fn collect_legacy_instagram_reconciliation_records(
             file_sha256,
             provider_post_key,
             provider_post_code,
+            provider_post_code_cased,
             media_type: media_type.to_string(),
             media_section: infer_legacy_instagram_media_section(
                 entry.special_folder.as_deref(),
@@ -11484,6 +11689,7 @@ fn ensure_instagram_sync_media_ledger_table(connection: &Connection) -> Result<(
                 media_type TEXT NOT NULL,
                 media_section TEXT NOT NULL,
                 relative_path TEXT NOT NULL,
+                provider_post_code TEXT,
                 first_seen_at TEXT NOT NULL,
                 last_seen_at TEXT NOT NULL,
                 PRIMARY KEY (source_id, provider_media_key, media_type),
@@ -11603,6 +11809,11 @@ fn upsert_instagram_media_ledger_entries(
         }
 
         let relative_path = normalize_instagram_relative_media_path(profile_root, &media.file_path);
+        let provider_post_code = media
+            .provider_post_code
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
         connection
             .execute(
                 "INSERT INTO instagram_sync_media_ledger (
@@ -11613,16 +11824,18 @@ fn upsert_instagram_media_ledger_entries(
                     media_type,
                     media_section,
                     relative_path,
+                    provider_post_code,
                     first_seen_at,
                     last_seen_at
                  )
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9)
                  ON CONFLICT(source_id, provider_media_key, media_type)
                  DO UPDATE SET
                     account_id = excluded.account_id,
                     source_handle = excluded.source_handle,
                     media_section = excluded.media_section,
                     relative_path = excluded.relative_path,
+                    provider_post_code = COALESCE(excluded.provider_post_code, instagram_sync_media_ledger.provider_post_code),
                     last_seen_at = excluded.last_seen_at",
                 params![
                     source_id,
@@ -11632,6 +11845,7 @@ fn upsert_instagram_media_ledger_entries(
                     &media.media_type,
                     &media.media_section,
                     relative_path,
+                    provider_post_code,
                     timestamp,
                 ],
             )
@@ -12283,6 +12497,7 @@ fn reconcile_instagram_scrawler_profile_ledgers_with_connection(
             media_type: record.media_type.clone(),
             media_section: record.media_section.clone(),
             provider_media_key: record.provider_media_key.clone(),
+            provider_post_code: record.provider_post_code_cased.clone(),
             captured_at_timestamp: None,
             final_file_name: record
                 .file_path
@@ -14247,14 +14462,55 @@ mod tests {
     #[test]
     fn build_post_url_tiktok_video_vs_photo_and_profile() {
         assert_eq!(
-            build_post_url("tiktok", "reeh_dmris", "7252779904704564486", true).as_deref(),
+            build_post_url("tiktok", "reeh_dmris", Some("7252779904704564486"), true, None)
+                .as_deref(),
             Some("https://www.tiktok.com/@reeh_dmris/video/7252779904704564486")
         );
         assert_eq!(
-            build_post_url("tiktok", "@reeh_dmris", "7315175620856581381", false).as_deref(),
+            build_post_url("tiktok", "@reeh_dmris", Some("7315175620856581381"), false, None)
+                .as_deref(),
             Some("https://www.tiktok.com/@reeh_dmris/photo/7315175620856581381")
         );
         assert_eq!(source_target_url("tiktok", "reeh_dmris"), "https://www.tiktok.com/@reeh_dmris");
+    }
+
+    #[test]
+    fn build_post_url_twitter_uses_status_id() {
+        assert_eq!(
+            build_post_url("twitter", "@someone", Some("1700000000000000001"), false, None)
+                .as_deref(),
+            Some("https://x.com/someone/status/1700000000000000001")
+        );
+        // Sem id não há link.
+        assert_eq!(build_post_url("twitter", "someone", None, false, None), None);
+    }
+
+    #[test]
+    fn build_post_url_instagram_uses_case_sensitive_shortcode() {
+        // O shortcode mantém o casing original (case-sensitive).
+        assert_eq!(
+            build_post_url("instagram", "someone", None, false, Some("CyAbC-1_x")).as_deref(),
+            Some("https://www.instagram.com/p/CyAbC-1_x/")
+        );
+        // Sem shortcode, sem link de post (cai para o perfil no front).
+        assert_eq!(
+            build_post_url("instagram", "someone", Some("123"), false, None),
+            None
+        );
+    }
+
+    #[test]
+    fn extract_instagram_post_code_preserves_casing_for_url() {
+        let permalink = "https://www.instagram.com/p/CyAbC-1_x/";
+        assert_eq!(
+            extract_instagram_post_code_from_permalink_cased(permalink).as_deref(),
+            Some("CyAbC-1_x")
+        );
+        // A variante normalizada (dedupe) continua lowercased.
+        assert_eq!(
+            extract_instagram_post_code_from_permalink(permalink).as_deref(),
+            Some("cyabc-1_x")
+        );
     }
 
     #[test]

@@ -51,6 +51,34 @@ function galleryFixture(): SourceMediaGallery {
   }
 }
 
+function instagramGalleryFixture(): SourceMediaGallery {
+  const day = Math.floor(Date.parse('2026-05-19T12:00:00Z') / 1000)
+  return {
+    sourceId: 'ig-1',
+    provider: 'instagram',
+    handle: 'bibiss.sz',
+    profileUrl: 'https://www.instagram.com/bibiss.sz/',
+    posts: [
+      {
+        postId: 'feed-1',
+        postUrl: 'https://www.instagram.com/p/CyAbC-1_x/',
+        capturedAt: day,
+        mediaType: 'image',
+        section: 'timeline',
+        files: [{ relativePath: 'feed.jpg', absolutePath: 'S:/ig/feed.jpg', mediaType: 'image' }],
+      },
+      {
+        postId: 'reel-1',
+        postUrl: 'https://www.instagram.com/p/DzReel99/',
+        capturedAt: day - 120,
+        mediaType: 'video',
+        section: 'reels',
+        files: [{ relativePath: 'reel.mp4', absolutePath: 'S:/ig/reel.mp4', mediaType: 'video' }],
+      },
+    ],
+  }
+}
+
 describe('ProfileViewPage', () => {
   beforeEach(() => {
     localStorage.clear()
@@ -116,6 +144,32 @@ describe('ProfileViewPage', () => {
     fireEvent.click(screen.getByRole('button', { name: /smaller thumbnails/i }))
     fireEvent.click(screen.getByRole('button', { name: /smaller thumbnails/i }))
     expect(localStorage.getItem('profileView.density')).toBe('1')
+  })
+
+  it('differentiates Instagram feed and reels with a section filter', async () => {
+    bridgeMocks.loadSourceMediaGallery.mockResolvedValue(instagramGalleryFixture())
+    render(<ProfileViewPage initialSourceId="ig-1" />)
+
+    // Filter chips: All + Feed + Reels (timeline is labelled "Feed" on Instagram).
+    expect(await screen.findByRole('button', { name: /^Feed$/ })).toBeTruthy()
+    const reelsChip = screen.getByRole('button', { name: /^Reels$/ })
+    // Both posts visible up front.
+    expect(screen.getAllByRole('button', { name: /open preview/i }).length).toBe(2)
+
+    // Filtering to Reels keeps only the reel post.
+    fireEvent.click(reelsChip)
+    expect(screen.getAllByRole('button', { name: /open preview/i }).length).toBe(1)
+    expect(reelsChip).toHaveProperty('ariaPressed', 'true')
+  })
+
+  it('rebuilds the Instagram post link from the shortcode', async () => {
+    bridgeMocks.loadSourceMediaGallery.mockResolvedValue(instagramGalleryFixture())
+    render(<ProfileViewPage initialSourceId="ig-1" />)
+    const onlineButtons = await screen.findAllByRole('button', { name: 'Online' })
+    fireEvent.click(onlineButtons[0])
+    await waitFor(() => {
+      expect(bridgeMocks.openExternalTarget).toHaveBeenCalledWith('https://www.instagram.com/p/CyAbC-1_x/')
+    })
   })
 
   it('opens the lightbox when a thumbnail is clicked', async () => {

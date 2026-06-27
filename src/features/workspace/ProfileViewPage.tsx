@@ -82,6 +82,43 @@ function isVideo(mediaType: string): boolean {
   return mediaType === 'video'
 }
 
+const SECTION_FILTER_ALL = 'all'
+
+/** Ordem estável dos chips de seção (feed antes de reels etc.). */
+const SECTION_ORDER = ['timeline', 'reels', 'stories', 'stories_user', 'tagged', 'reposts', 'video']
+
+/**
+ * Rótulo da seção. No Instagram, `timeline` é o Feed (distinto dos Reels, que
+ * são conteúdos diferentes); nos demais providers vira "Posts".
+ */
+function sectionLabel(provider: ProviderKey, section: string): string {
+  switch (section) {
+    case 'timeline':
+      return provider === 'instagram' ? 'Feed' : 'Posts'
+    case 'reels':
+      return 'Reels'
+    case 'stories':
+    case 'stories_user':
+      return 'Stories'
+    case 'tagged':
+      return 'Tagged'
+    case 'reposts':
+      return 'Reposts'
+    case 'video':
+      return 'Videos'
+    default:
+      return section.charAt(0).toUpperCase() + section.slice(1)
+  }
+}
+
+function sortSections(sections: string[]): string[] {
+  return [...sections].sort((a, b) => {
+    const ia = SECTION_ORDER.indexOf(a)
+    const ib = SECTION_ORDER.indexOf(b)
+    return (ia === -1 ? SECTION_ORDER.length : ia) - (ib === -1 ? SECTION_ORDER.length : ib)
+  })
+}
+
 export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
   const [sourceId, setSourceId] = useState<string | undefined>(initialSourceId)
   const [gallery, setGallery] = useState<SourceMediaGallery>()
@@ -91,6 +128,7 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
   const [lightboxIndex, setLightboxIndex] = useState<number>()
   const [viewMode, setViewMode] = useState<ViewMode>(readStoredMode)
   const [densityIndex, setDensityIndex] = useState<number>(readStoredDensity)
+  const [sectionFilter, setSectionFilter] = useState<string>(SECTION_FILTER_ALL)
 
   // Persiste as preferências de visualização.
   useEffect(() => {
@@ -144,11 +182,33 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
     }
   }, [sourceId, load])
 
-  const days = useMemo<DayGroup[]>(() => {
+  // Seções presentes (feed/reels/stories/…), em ordem estável.
+  const sections = useMemo<string[]>(() => {
     if (!gallery) return []
+    const present = new Set<string>()
+    for (const post of gallery.posts) {
+      present.add(post.section || 'timeline')
+    }
+    return sortSections([...present])
+  }, [gallery])
+
+  // Se o filtro aponta para uma seção que sumiu (troca de perfil), volta a "all".
+  useEffect(() => {
+    if (sectionFilter !== SECTION_FILTER_ALL && !sections.includes(sectionFilter)) {
+      setSectionFilter(SECTION_FILTER_ALL)
+    }
+  }, [sections, sectionFilter])
+
+  const visiblePosts = useMemo<MediaGalleryPost[]>(() => {
+    if (!gallery) return []
+    if (sectionFilter === SECTION_FILTER_ALL) return gallery.posts
+    return gallery.posts.filter((post) => (post.section || 'timeline') === sectionFilter)
+  }, [gallery, sectionFilter])
+
+  const days = useMemo<DayGroup[]>(() => {
     const groups: DayGroup[] = []
     let current: DayGroup | undefined
-    for (const post of gallery.posts) {
+    for (const post of visiblePosts) {
       const key = dayKey(post.capturedAt)
       if (!current || current.key !== key) {
         current = { key, label: dayLabel(key, post.capturedAt), posts: [] }
@@ -157,17 +217,16 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
       current.posts.push(post)
     }
     return groups
-  }, [gallery])
+  }, [visiblePosts])
 
-  // Lista plana (post → cada arquivo) para o lightbox navegar.
+  // Lista plana (post → cada arquivo) para o lightbox navegar (respeita o filtro).
   const flatItems = useMemo<FlatItem[]>(() => {
-    if (!gallery) return []
     const items: FlatItem[] = []
-    for (const post of gallery.posts) {
+    for (const post of visiblePosts) {
       post.files.forEach((file, fileIndex) => items.push({ file, post, fileIndex }))
     }
     return items
-  }, [gallery])
+  }, [visiblePosts])
 
   const firstFlatIndexByPost = useMemo(() => {
     const map = new Map<MediaGalleryPost, number>()
@@ -253,8 +312,10 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
           {post.mediaType === 'slideshow' ? (
             <span className="profile-view-badge" aria-hidden="true">▣ {post.files.length}</span>
           ) : null}
-          {post.section !== 'timeline' ? (
-            <span className="profile-view-section" aria-hidden="true">{post.section}</span>
+          {post.section && post.section !== 'timeline' ? (
+            <span className="profile-view-section" aria-hidden="true">
+              {gallery ? sectionLabel(gallery.provider, post.section) : post.section}
+            </span>
           ) : null}
           <span className="profile-view-thumb-overlay" aria-hidden="true">
             {post.capturedAt
@@ -341,6 +402,29 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
               All media
             </button>
           </div>
+          {sections.length > 1 ? (
+            <div className="profile-view-sections" role="group" aria-label="Section filter">
+              <button
+                className={sectionFilter === SECTION_FILTER_ALL ? 'is-active' : ''}
+                onClick={() => setSectionFilter(SECTION_FILTER_ALL)}
+                type="button"
+                aria-pressed={sectionFilter === SECTION_FILTER_ALL}
+              >
+                All
+              </button>
+              {sections.map((section) => (
+                <button
+                  key={section}
+                  className={sectionFilter === section ? 'is-active' : ''}
+                  onClick={() => setSectionFilter(section)}
+                  type="button"
+                  aria-pressed={sectionFilter === section}
+                >
+                  {gallery ? sectionLabel(gallery.provider, section) : section}
+                </button>
+              ))}
+            </div>
+          ) : null}
           <div className="profile-view-density" role="group" aria-label="Thumbnail size">
             <button
               className="ghost-button queue-icon-button"
@@ -375,7 +459,7 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
       ) : viewMode === 'grid' ? (
         <div className="profile-view-days">
           <div className="profile-view-grid" style={gridStyle}>
-            {gallery?.posts.map((post, index) => renderCard(post, post.postId ?? `post-${index}`))}
+            {visiblePosts.map((post, index) => renderCard(post, post.postId ?? `post-${index}`))}
           </div>
         </div>
       ) : (

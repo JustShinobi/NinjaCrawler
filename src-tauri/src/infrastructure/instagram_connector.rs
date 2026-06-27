@@ -104,6 +104,9 @@ pub struct DownloadedInstagramMedia {
     pub media_type: String,
     pub media_section: String,
     pub provider_media_key: String,
+    /// Post shortcode preserving original casing (Instagram shortcodes are
+    /// case-sensitive), used to rebuild the `instagram.com/p/<code>/` link.
+    pub provider_post_code: Option<String>,
     pub captured_at_timestamp: Option<i64>,
     pub final_file_name: String,
     pub legacy_raw_file_name: Option<String>,
@@ -186,6 +189,8 @@ struct MediaAsset {
     extracted_from_video: bool,
     file_name: String,
     provider_media_key: String,
+    /// Owning post shortcode (original casing) for link reconstruction.
+    provider_post_code: Option<String>,
     captured_at_timestamp: Option<i64>,
     legacy_raw_file_name: Option<String>,
     extension: String,
@@ -1585,6 +1590,7 @@ where
                     media_type: planned_asset.asset.media_type.clone(),
                     media_section: section.media_section.clone(),
                     provider_media_key: planned_asset.asset.provider_media_key.clone(),
+                    provider_post_code: planned_asset.asset.provider_post_code.clone(),
                     captured_at_timestamp: planned_asset.asset.captured_at_timestamp,
                     final_file_name: planned_asset
                         .destination_path
@@ -2654,6 +2660,7 @@ where
                 media_type: asset.media_type.clone(),
                 media_section: media_section.to_string(),
                 provider_media_key: asset.provider_media_key.clone(),
+                provider_post_code: asset.provider_post_code.clone(),
                 captured_at_timestamp: asset.captured_at_timestamp,
                 final_file_name: destination_path
                     .file_name()
@@ -2698,31 +2705,44 @@ fn collect_media_assets(
     Ok(assets)
 }
 
+/// Raw post shortcode kept with its original casing. Unlike
+/// `media_item_post_identity`, this is NOT lowercased because Instagram
+/// shortcodes are case-sensitive and feed the public post URL.
+fn raw_post_code(item: &Value) -> Option<String> {
+    string_from_value(item.get("code"))
+        .or_else(|| string_from_value(item.get("shortcode")))
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
 fn append_assets_from_item(
     item: &Value,
     assets: &mut Vec<MediaAsset>,
     request: &InstagramConnectorRequest,
     media_section: &str,
 ) -> Result<(), String> {
+    // The shortcode lives on the parent post; carousel children inherit it.
+    let post_code = raw_post_code(item);
+
     if let Some(edges) = item
         .pointer("/edge_sidecar_to_children/edges")
         .and_then(Value::as_array)
     {
         for (index, edge) in edges.iter().enumerate() {
             let child = edge.get("node").unwrap_or(edge);
-            append_single_asset(child, assets, index, request, media_section)?;
+            append_single_asset(child, assets, index, request, media_section, post_code.as_deref())?;
         }
         return Ok(());
     }
 
     if let Some(children) = item.get("carousel_media").and_then(Value::as_array) {
         for (index, child) in children.iter().enumerate() {
-            append_single_asset(child, assets, index, request, media_section)?;
+            append_single_asset(child, assets, index, request, media_section, post_code.as_deref())?;
         }
         return Ok(());
     }
 
-    append_single_asset(item, assets, 0, request, media_section)
+    append_single_asset(item, assets, 0, request, media_section, post_code.as_deref())
 }
 
 fn append_single_asset(
@@ -2731,6 +2751,7 @@ fn append_single_asset(
     variant_index: usize,
     request: &InstagramConnectorRequest,
     media_section: &str,
+    post_code: Option<&str>,
 ) -> Result<(), String> {
     let item_id = string_from_value(item.get("id"))
         .or_else(|| string_from_value(item.get("pk")))
@@ -2756,6 +2777,7 @@ fn append_single_asset(
                 extracted_from_video: false,
                 file_name,
                 provider_media_key,
+                provider_post_code: post_code.map(str::to_string),
                 captured_at_timestamp,
                 legacy_raw_file_name,
                 extension: "mp4".to_string(),
@@ -2779,6 +2801,7 @@ fn append_single_asset(
                     extracted_from_video: true,
                     file_name,
                     provider_media_key,
+                    provider_post_code: post_code.map(str::to_string),
                     captured_at_timestamp,
                     legacy_raw_file_name,
                     extension: "jpg".to_string(),
@@ -2805,6 +2828,7 @@ fn append_single_asset(
                 extracted_from_video: false,
                 file_name,
                 provider_media_key,
+                provider_post_code: post_code.map(str::to_string),
                 captured_at_timestamp,
                 legacy_raw_file_name,
                 extension: "jpg".to_string(),
@@ -3539,7 +3563,8 @@ fn fallback_media_stem(item_id: &str, variant_index: usize) -> String {
 mod tests {
     use super::{
         append_single_asset, best_image_url, build_manifest_section, build_media_file_name,
-        execute_manifest_section, extract_reels_payload_items, normalize_profile_sync_manifest,
+        collect_media_assets, execute_manifest_section, extract_reels_payload_items,
+        normalize_profile_sync_manifest,
         parse_profile_description, parse_profile_description_from_user,
         provider_media_identity_from_url, public_identity_headers, resolve_destination_path,
         should_ignore_media_download_error, DownloadedInstagramMedia, InstagramAuthHeaders,
@@ -3754,12 +3779,35 @@ mod tests {
         let request = sample_request();
         let mut assets = Vec::new();
 
-        append_single_asset(&item, &mut assets, 0, &request, "stories")
+        append_single_asset(&item, &mut assets, 0, &request, "stories", None)
             .expect("story asset extraction should succeed");
 
         assert_eq!(assets.len(), 1);
         assert_eq!(assets[0].media_type, "video");
         assert!(!assets[0].extracted_from_video);
+    }
+
+    #[test]
+    fn collect_media_assets_propagates_cased_shortcode_to_carousel_children() {
+        // O shortcode fica no post pai; os filhos do carrossel herdam (com casing).
+        let item = json!({
+            "id": "123_456",
+            "code": "CyAbC-1_x",
+            "edge_sidecar_to_children": {
+                "edges": [
+                    { "node": { "id": "child-1", "display_url": "https://cdninstagram.example/a/aaa111.jpg" } },
+                    { "node": { "id": "child-2", "display_url": "https://cdninstagram.example/b/bbb222.jpg" } }
+                ]
+            }
+        });
+        let request = sample_request();
+        let assets = collect_media_assets(std::slice::from_ref(&item), &request, "timeline", None)
+            .expect("asset extraction should succeed");
+
+        assert_eq!(assets.len(), 2);
+        for asset in &assets {
+            assert_eq!(asset.provider_post_code.as_deref(), Some("CyAbC-1_x"));
+        }
     }
 
     #[test]
@@ -3816,6 +3864,7 @@ mod tests {
             extracted_from_video: false,
             file_name: "631495592_18384355651158098_6314965943446164250_n.jpg".to_string(),
             provider_media_key: "631495592_18384355651158098_6314965943446164250_n".to_string(),
+            provider_post_code: None,
             captured_at_timestamp: Some(1_700_000_000),
             legacy_raw_file_name: Some("631495592_18384355651158098_6314965943446164250_n.jpg".to_string()),
             extension: "jpg".to_string(),
@@ -4206,6 +4255,7 @@ mod tests {
                         extracted_from_video: false,
                         file_name: "cancelled.jpg".to_string(),
                         provider_media_key: "cancelled".to_string(),
+                        provider_post_code: None,
                         captured_at_timestamp: Some(1_700_000_000),
                         legacy_raw_file_name: Some("cancelled.jpg".to_string()),
                         extension: "jpg".to_string(),
