@@ -2075,6 +2075,14 @@ pub fn load_source_media_gallery(source_id: String) -> Result<SourceMediaGallery
         // merges shortcodes read from the legacy SCrawler XML.
         let ledger_links =
             load_gallery_media_ledger_links(connection, &provider, &source_id, &profile_root);
+        // Twitter has no status id in the file name and older media ledger rows
+        // predate the post-key column, so pair files with their tweet id via the
+        // legacy SCrawler XML (keyed by media key). Empty for other providers.
+        let twitter_post_keys = if provider.eq_ignore_ascii_case("twitter") {
+            load_legacy_twitter_post_keys(&profile_root)
+        } else {
+            HashMap::new()
+        };
 
         let mut grouped: HashMap<String, GalleryPostAcc> = HashMap::new();
         let mut order: Vec<String> = Vec::new();
@@ -2177,6 +2185,15 @@ pub fn load_source_media_gallery(source_id: String) -> Result<SourceMediaGallery
                 }
                 if entry.ledger_captured_at.is_none() {
                     entry.ledger_captured_at = link.captured_at;
+                }
+            }
+            // Twitter: o status id não está no nome nem (para mídia antiga) no
+            // ledger; recupera do XML do SCrawler casando pelo media key.
+            if entry.ledger_post_key.is_none() && !twitter_post_keys.is_empty() {
+                if let Some(status_id) =
+                    twitter_media_key_from_file_name(file_name).and_then(|key| twitter_post_keys.get(&key))
+                {
+                    entry.ledger_post_key = Some(status_id.clone());
                 }
             }
         }
@@ -5058,6 +5075,71 @@ fn extract_instagram_post_code_from_permalink_cased(value: &str) -> Option<Strin
 
 fn extract_instagram_post_code_from_permalink(value: &str) -> Option<String> {
     extract_instagram_post_code_from_permalink_cased(value).map(|code| code.to_ascii_lowercase())
+}
+
+fn is_user_twitter_data_xml_file_name(value: &str) -> bool {
+    let lowercase = value.to_ascii_lowercase();
+    lowercase.starts_with("user_twitter") && lowercase.ends_with("_data.xml")
+}
+
+fn find_user_twitter_data_xml(profile_root: &Path) -> Result<Option<PathBuf>, String> {
+    let settings_dir = profile_root.join("Settings");
+    if !settings_dir.is_dir() {
+        return Ok(None);
+    }
+    let mut matches = fs::read_dir(&settings_dir)
+        .map_err(|error| error.to_string())?
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.is_file()
+                && path
+                    .file_name()
+                    .and_then(|value| value.to_str())
+                    .is_some_and(is_user_twitter_data_xml_file_name)
+        })
+        .collect::<Vec<_>>();
+    matches.sort();
+    Ok(matches.into_iter().next())
+}
+
+/// Twitter media key from a downloaded file name: drops the date prefix, an
+/// optional `GIF_` prefix and the extension, lowercased. This matches the
+/// basename of the `File` attribute in the SCrawler `User_Twitter_*_Data.xml`,
+/// letting us pair a file on disk with its tweet status id.
+fn twitter_media_key_from_file_name(file_name: &str) -> Option<String> {
+    let stem = file_name.rsplit_once('.').map(|(s, _)| s).unwrap_or(file_name);
+    let (_, rest) = strip_gallery_date_prefix(stem);
+    let mut key = rest.trim().to_ascii_lowercase();
+    if let Some(stripped) = key.strip_prefix("gif_") {
+        key = stripped.to_string();
+    }
+    let key = key.trim().to_string();
+    (!key.is_empty()).then_some(key)
+}
+
+/// `media_key -> tweet status id` read from the legacy SCrawler Twitter XML.
+/// Twitter file names never carry the status id (only the media key), so this is
+/// the only local source of the post link for media imported before the status
+/// id was persisted in the media ledger. Cheap (single XML parse, no file IO).
+fn load_legacy_twitter_post_keys(profile_root: &Path) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    let Ok(Some(data_xml_path)) = find_user_twitter_data_xml(profile_root) else {
+        return map;
+    };
+    let Ok(entries) = parse_legacy_instagram_data_xml(&data_xml_path) else {
+        return map;
+    };
+    for entry in entries {
+        let status_id = entry.provider_post_key.trim();
+        if status_id.is_empty() || !status_id.chars().all(|c| c.is_ascii_digit()) {
+            continue;
+        }
+        if let Some(media_key) = twitter_media_key_from_file_name(&entry.file_name) {
+            map.entry(media_key).or_insert_with(|| status_id.to_string());
+        }
+    }
+    map
 }
 
 fn infer_legacy_instagram_media_section(special_folder: Option<&str>, permalink: &str) -> String {
@@ -14472,6 +14554,24 @@ mod tests {
             Some("https://www.tiktok.com/@reeh_dmris/photo/7315175620856581381")
         );
         assert_eq!(source_target_url("tiktok", "reeh_dmris"), "https://www.tiktok.com/@reeh_dmris");
+    }
+
+    #[test]
+    fn twitter_media_key_strips_date_gif_and_extension() {
+        assert_eq!(
+            twitter_media_key_from_file_name("2026-06-19 16.44.17 hlm3jgqxsaajvu-.jpg").as_deref(),
+            Some("hlm3jgqxsaajvu-")
+        );
+        // GIF_ prefix (and casing) is normalized to match the XML File basename.
+        assert_eq!(
+            twitter_media_key_from_file_name("2025-11-10 15.11.32 GIF_G5aakG1WoAA2yHs.mp4").as_deref(),
+            Some("g5aakg1woaa2yhs")
+        );
+        // Raw SCrawler name without a date prefix.
+        assert_eq!(
+            twitter_media_key_from_file_name("Ghmf7p4asAA3qXa.jpg").as_deref(),
+            Some("ghmf7p4asaa3qxa")
+        );
     }
 
     #[test]
