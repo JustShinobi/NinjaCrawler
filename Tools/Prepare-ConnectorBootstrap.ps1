@@ -102,10 +102,35 @@ foreach ($connector in $manifest.connectors) {
         continue
     }
 
+    $repositoryPath = [string]$connector.releaseApiUrl `
+        -replace '^https://api.github.com/repos/', '' `
+        -replace '/releases(?:/latest)?$', ''
+    if ($repositoryPath -notmatch '^[^/]+/[^/]+$') {
+        throw "URL de releases invalida para '$($connector.key)': '$($connector.releaseApiUrl)'."
+    }
+
     $assetName = [string]$connector.assetName
-    $downloadUrl = "https://github.com/" +
-        ($connector.releaseApiUrl -replace '^https://api.github.com/repos/', '' -replace '/releases/latest$', '') +
-        "/releases/download/$releaseTag/$assetName"
+    $downloadUrl = "https://github.com/$repositoryPath/releases/download/$releaseTag/$assetName"
+    if (
+        $connector.PSObject.Properties.Name -contains 'assetPrefix' -and
+        $connector.PSObject.Properties.Name -contains 'assetSuffix'
+    ) {
+        $releaseUrl = "$($connector.releaseApiUrl.TrimEnd('/'))/tags/$releaseTag"
+        $release = Invoke-RestMethod -Uri $releaseUrl -Headers @{
+            "Accept" = "application/vnd.github+json"
+            "User-Agent" = "NinjaCrawler-Bootstrap/0.1.0"
+        }
+        $assets = @($release.assets | Where-Object {
+            $_.name.StartsWith([string]$connector.assetPrefix) -and
+            $_.name.EndsWith([string]$connector.assetSuffix)
+        })
+        if ($assets.Count -ne 1) {
+            throw "Esperado um asset para '$($connector.key)', encontrados $($assets.Count) em '$releaseUrl'."
+        }
+
+        $assetName = [string]$assets[0].name
+        $downloadUrl = [string]$assets[0].browser_download_url
+    }
     $downloadPath = Join-Path $tempRoot $assetName
 
     Write-Host "Baixando $assetName..."
