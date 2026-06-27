@@ -1,7 +1,9 @@
 import {
   PROVIDER_LABELS,
   addSource,
+  detectTargetFromUrl,
   detectProfileFromUrl,
+  downloadTarget,
   loadContext,
   syncSource,
 } from './core.js'
@@ -14,6 +16,7 @@ const elements = {
   profileForm: document.querySelector('#profileForm'),
   existingBanner: document.querySelector('#existingBanner'),
   existingMeta: document.querySelector('#existingMeta'),
+  targetButton: document.querySelector('#targetButton'),
   syncButton: document.querySelector('#syncButton'),
   addButton: document.querySelector('#addButton'),
   message: document.querySelector('#message'),
@@ -22,6 +25,7 @@ const elements = {
 const state = {
   tab: null,
   detected: null,
+  target: null,
   context: null,
 }
 
@@ -32,6 +36,7 @@ async function boot() {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true })
   state.tab = tab
   state.detected = detectProfileFromUrl(tab?.url)
+  state.target = detectTargetFromUrl(tab?.url)
 
   if (!state.detected) {
     showUnsupported()
@@ -55,12 +60,14 @@ async function boot() {
 }
 
 function bindEvents() {
-  elements.addButton.addEventListener('click', () => submitAdd())
-  elements.syncButton.addEventListener('click', () => submitSync())
+  elements.addButton?.addEventListener('click', () => submitAdd())
+  elements.syncButton?.addEventListener('click', () => submitSync())
+  elements.targetButton?.addEventListener('click', () => submitTargetDownload())
 }
 
 function renderContext() {
   const { detected, context } = state
+  const target = context.detectedTarget ?? state.target
   const existing = context.existingSource
 
   elements.unsupportedPanel.classList.add('hidden')
@@ -69,14 +76,18 @@ function renderContext() {
   elements.profileForm.classList.toggle('is-existing', Boolean(existing))
 
   if (existing) {
-    setStatus('good', 'Added')
+    setStatus('good', target ? 'Story' : 'Added')
     elements.existingBanner.classList.remove('hidden')
-    elements.existingMeta.textContent = `${existing.handle} · ${existing.lastSyncedAt ? `Last sync ${formatDate(existing.lastSyncedAt)}` : 'Never synced'}`
-    elements.syncButton.classList.remove('hidden')
+    elements.existingMeta.textContent = target
+      ? `${existing.handle} · selected story ${target.storyId}`
+      : `${existing.handle} · ${existing.lastSyncedAt ? `Last sync ${formatDate(existing.lastSyncedAt)}` : 'Never synced'}`
+    elements.targetButton?.classList.toggle('hidden', !target)
+    elements.syncButton.classList.toggle('hidden', Boolean(target))
     elements.addButton.classList.add('hidden')
   } else {
     setStatus('ready', 'Ready')
     elements.existingBanner.classList.add('hidden')
+    elements.targetButton?.classList.add('hidden')
     elements.syncButton.classList.add('hidden')
     elements.addButton.classList.remove('hidden')
   }
@@ -124,6 +135,27 @@ async function submitSync() {
   }
 }
 
+async function submitTargetDownload() {
+  const existing = state.context?.existingSource
+  const target = state.context?.detectedTarget ?? state.target
+  if (!existing || !target) return
+
+  setBusy(true)
+  setMessage('')
+
+  try {
+    await downloadTarget({
+      sourceId: existing.id,
+      target,
+    })
+    setMessage('Selected story queued.', 'ok')
+  } catch (error) {
+    setMessage(error.message, 'error')
+  } finally {
+    setBusy(false)
+  }
+}
+
 function showUnsupported() {
   elements.profileSummary.textContent = 'No supported profile detected'
   setStatus('neutral', 'Idle')
@@ -151,8 +183,10 @@ function showPopupError(error) {
 }
 
 function setBusy(isBusy) {
-  for (const button of [elements.addButton, elements.syncButton]) {
-    button.disabled = isBusy
+  for (const button of [elements.addButton, elements.syncButton, elements.targetButton]) {
+    if (button) {
+      button.disabled = isBusy
+    }
   }
 }
 

@@ -22,8 +22,50 @@ export const PROVIDER_LABELS = {
   twitter: 'X / Twitter',
 }
 
+export function detectTargetFromUrl(rawUrl) {
+  if (!rawUrl) return null
+
+  let url
+  try {
+    url = new URL(rawUrl)
+  } catch {
+    return null
+  }
+
+  const host = url.hostname.replace(/^www\./, '').toLowerCase()
+  const segments = url.pathname.split('/').filter(Boolean)
+
+  if ((host === 'instagram.com' || host.endsWith('.instagram.com'))
+    && segments[0] === 'stories'
+    && segments[1]
+    && segments[2]) {
+    const handle = normalizeHandle(segments[1])
+    const storyId = segments[2].trim()
+    if (!handle || !/^\d+$/.test(storyId)) return null
+    return {
+      kind: 'instagramStory',
+      provider: 'instagram',
+      handle,
+      displayName: handle.replace(/^@/, ''),
+      storyId,
+      url: url.href,
+    }
+  }
+
+  return null
+}
+
 export function detectProfileFromUrl(rawUrl) {
   if (!rawUrl) return null
+
+  const target = detectTargetFromUrl(rawUrl)
+  if (target) {
+    return {
+      provider: target.provider,
+      handle: target.handle,
+      displayName: target.displayName,
+    }
+  }
 
   let url
   try {
@@ -95,6 +137,16 @@ export async function addSource(payload) {
 
 export async function syncSource(payload) {
   const response = await fetch(`${API_BASE}/sync`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  if (!response.ok) throw new Error(await readError(response))
+  return response.json()
+}
+
+export async function downloadTarget(payload) {
+  const response = await fetch(`${API_BASE}/target`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),

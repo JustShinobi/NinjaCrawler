@@ -1,5 +1,6 @@
 use crate::domain::models::{
-    RunSourceSyncInput, SourceEditorSeedIntent, SourceEditorWindowIntent, SourceProfile,
+    InstagramSourceSyncOptions, RunSourceSyncInput, SourceEditorSeedIntent,
+    SourceEditorWindowIntent, SourceProfile, SourceSyncOptions,
 };
 use crate::infrastructure::{desktop_runtime, source_sync_runtime, workspace_repository};
 use serde::{Deserialize, Serialize};
@@ -24,12 +25,24 @@ struct DetectedProfile {
     canonical_key: String,
 }
 
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DetectedTarget {
+    kind: String,
+    provider: String,
+    handle: String,
+    display_name: String,
+    story_id: String,
+    url: String,
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct CompanionContext {
     app: &'static str,
     api_version: u8,
     detected_profile: Option<DetectedProfile>,
+    detected_target: Option<DetectedTarget>,
     existing_source: Option<SourceProfile>,
 }
 
@@ -45,6 +58,13 @@ struct AddSourceRequest {
 #[serde(rename_all = "camelCase")]
 struct SyncSourceRequest {
     source_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DownloadTargetRequest {
+    source_id: String,
+    target: DetectedTarget,
 }
 
 struct HttpRequest {
@@ -224,6 +244,14 @@ fn route_request(app: AppHandle, request: HttpRequest) -> Vec<u8> {
                 Err(error) => error_response(400, &error),
             }
         }
+        ("POST", path) if path == format!("{API_PREFIX}/target") => {
+            match parse_json::<DownloadTargetRequest>(&request.body)
+                .and_then(|input| download_target(app, input))
+            {
+                Ok(payload) => json_response(200, &payload),
+                Err(error) => error_response(400, &error),
+            }
+        }
         _ => error_response(404, "Unknown NinjaCrawler Companion API endpoint."),
     }
 }
@@ -231,6 +259,7 @@ fn route_request(app: AppHandle, request: HttpRequest) -> Vec<u8> {
 fn build_context(url: Option<&str>) -> Result<CompanionContext, String> {
     let snapshot = workspace_repository::bootstrap_workspace()?;
     let detected_profile = url.and_then(detect_profile_from_url);
+    let detected_target = url.and_then(detect_target_from_url);
     let existing_source = detected_profile.as_ref().and_then(|detected| {
         find_source(&snapshot.sources, &detected.provider, &detected.handle).cloned()
     });
@@ -239,6 +268,7 @@ fn build_context(url: Option<&str>) -> Result<CompanionContext, String> {
         app: "NinjaCrawler",
         api_version: 1,
         detected_profile,
+        detected_target,
         existing_source,
     })
 }
@@ -302,6 +332,74 @@ fn sync_source(app: AppHandle, input: SyncSourceRequest) -> Result<serde_json::V
     }))
 }
 
+fn download_target(
+    app: AppHandle,
+    input: DownloadTargetRequest,
+) -> Result<serde_json::Value, String> {
+    let source_id = input.source_id.trim();
+    if source_id.is_empty() {
+        return Err("Source id is required.".to_string());
+    }
+
+    if input.target.kind != "instagramStory" || input.target.provider != "instagram" {
+        return Err("Only selected Instagram stories are supported.".to_string());
+    }
+
+    let story_id = input.target.story_id.trim();
+    if story_id.is_empty() || !story_id.chars().all(|value| value.is_ascii_digit()) {
+        return Err("Selected Instagram story id is invalid.".to_string());
+    }
+
+    let handle = normalize_handle(&input.target.handle);
+    if handle.is_empty() {
+        return Err("Selected Instagram story handle is required.".to_string());
+    }
+
+    let snapshot = workspace_repository::bootstrap_workspace()?;
+    let source = snapshot
+        .sources
+        .iter()
+        .find(|source| source.id == source_id)
+        .ok_or_else(|| format!("Source '{source_id}' does not exist."))?;
+    if source.provider != "instagram" {
+        return Err("Selected story download requires an Instagram source.".to_string());
+    }
+    if canonical_profile_key("instagram", &source.handle)
+        != canonical_profile_key("instagram", &handle)
+    {
+        return Err("Selected story does not match the requested source.".to_string());
+    }
+
+    let override_options = SourceSyncOptions {
+        instagram: Some(InstagramSourceSyncOptions {
+            timeline: false,
+            reels: false,
+            stories: false,
+            stories_user: true,
+            tagged: false,
+            target_story_media_id: Some(story_id.to_string()),
+            ..InstagramSourceSyncOptions::default()
+        }),
+        ..SourceSyncOptions::default()
+    };
+
+    let snapshot = source_sync_runtime::enqueue_source_sync(
+        &app,
+        RunSourceSyncInput {
+            id: source_id.to_string(),
+            trigger: Some("chrome_extension_story".to_string()),
+            run_mode: None,
+            sync_options_override: Some(override_options),
+        },
+    )?;
+
+    Ok(json!({
+        "snapshot": snapshot,
+        "queued": true,
+        "target": input.target
+    }))
+}
+
 fn parse_json<T: for<'de> Deserialize<'de>>(body: &[u8]) -> Result<T, String> {
     serde_json::from_slice(body).map_err(|error| format!("Invalid JSON payload: {error}"))
 }
@@ -327,14 +425,18 @@ fn detect_profile_from_url(url: &str) -> Option<DetectedProfile> {
         .collect();
 
     let (provider, handle) = if host == "instagram.com" || host.ends_with(".instagram.com") {
-        let first = segments.first().copied()?;
-        if matches!(
-            first,
-            "accounts" | "direct" | "explore" | "p" | "reel" | "reels" | "stories" | "tv"
-        ) {
-            return None;
+        if segments.first().copied() == Some("stories") && segments.len() >= 3 {
+            ("instagram", segments[1])
+        } else {
+            let first = segments.first().copied()?;
+            if matches!(
+                first,
+                "accounts" | "direct" | "explore" | "p" | "reel" | "reels" | "stories" | "tv"
+            ) {
+                return None;
+            }
+            ("instagram", first)
         }
-        ("instagram", first)
     } else if host == "x.com" || host == "twitter.com" || host.ends_with(".twitter.com") {
         let first = segments.first().copied()?;
         if matches!(
@@ -379,6 +481,42 @@ fn detect_profile_from_url(url: &str) -> Option<DetectedProfile> {
         display_name: handle.trim_start_matches('@').to_string(),
         canonical_key: canonical_profile_key(provider, &handle),
         handle,
+    })
+}
+
+fn detect_target_from_url(url: &str) -> Option<DetectedTarget> {
+    let parsed = parse_url(url)?;
+    let host = parsed.host.trim_start_matches("www.").to_ascii_lowercase();
+    if !(host == "instagram.com" || host.ends_with(".instagram.com")) {
+        return None;
+    }
+
+    let segments: Vec<&str> = parsed
+        .path
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .collect();
+    if segments.len() < 3 || segments[0] != "stories" {
+        return None;
+    }
+
+    let story_id = segments[2].trim();
+    if story_id.is_empty() || !story_id.chars().all(|value| value.is_ascii_digit()) {
+        return None;
+    }
+
+    let handle = normalize_handle(segments[1]);
+    if handle.is_empty() {
+        return None;
+    }
+
+    Some(DetectedTarget {
+        kind: "instagramStory".to_string(),
+        provider: "instagram".to_string(),
+        display_name: handle.trim_start_matches('@').to_string(),
+        handle,
+        story_id: story_id.to_string(),
+        url: url.to_string(),
     })
 }
 
@@ -525,6 +663,11 @@ mod tests {
                 "@example.profile",
             ),
             (
+                "https://www.instagram.com/stories/example.profile/1234567890123456789/",
+                "instagram",
+                "@example.profile",
+            ),
+            (
                 "https://x.com/example_user/media",
                 "twitter",
                 "@example_user",
@@ -561,6 +704,32 @@ mod tests {
 
         for url in cases {
             assert!(detect_profile_from_url(url).is_none(), "{url}");
+        }
+    }
+
+    #[test]
+    fn detects_instagram_story_target_urls() {
+        let detected = detect_target_from_url(
+            "https://www.instagram.com/stories/example.profile/1234567890123456789/",
+        )
+        .expect("story target");
+
+        assert_eq!(detected.kind, "instagramStory");
+        assert_eq!(detected.provider, "instagram");
+        assert_eq!(detected.handle, "@example.profile");
+        assert_eq!(detected.story_id, "1234567890123456789");
+    }
+
+    #[test]
+    fn ignores_invalid_instagram_story_targets() {
+        let cases = [
+            "https://www.instagram.com/stories/example.profile/",
+            "https://www.instagram.com/stories/example.profile/not-a-number/",
+            "https://www.instagram.com/reel/1234567890123456789/",
+        ];
+
+        for url in cases {
+            assert!(detect_target_from_url(url).is_none(), "{url}");
         }
     }
 }
