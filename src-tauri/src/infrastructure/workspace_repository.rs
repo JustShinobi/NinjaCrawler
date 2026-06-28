@@ -2140,13 +2140,26 @@ pub fn load_source_media_gallery(source_id: String) -> Result<SourceMediaGallery
             };
             // Liga ao ledger pelo relative_path (que no banco é lowercased).
             let link = ledger_links.get(&relative_path.to_ascii_lowercase()).cloned();
+            // Instagram: agrupa o carrossel pelo shortcode — todas as fotos do
+            // post compartilham o mesmo code, então viram UM card (slideshow).
+            // Sem code (mídia antiga sem link), cai para o id derivado do nome.
+            let group_key = if provider.eq_ignore_ascii_case("instagram") {
+                link.as_ref()
+                    .and_then(|entry| entry.post_code.as_deref())
+                    .map(str::trim)
+                    .filter(|code| !code.is_empty())
+                    .map(|code| format!("ig-code:{}", code.to_ascii_lowercase()))
+                    .unwrap_or_else(|| derived.group_key.clone())
+            } else {
+                derived.group_key.clone()
+            };
             let file = MediaGalleryFile {
                 relative_path,
                 absolute_path: path.to_string_lossy().to_string(),
                 media_type: derived.media_type.to_string(),
             };
-            let entry = grouped.entry(derived.group_key.clone()).or_insert_with(|| {
-                order.push(derived.group_key.clone());
+            let entry = grouped.entry(group_key.clone()).or_insert_with(|| {
+                order.push(group_key.clone());
                 GalleryPostAcc {
                     post_id: derived.post_id.clone(),
                     captured_at: derived.captured_at,
