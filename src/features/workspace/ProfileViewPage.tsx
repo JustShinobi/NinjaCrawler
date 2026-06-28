@@ -119,6 +119,11 @@ function sortSections(sections: string[]): string[] {
   })
 }
 
+// Renderização progressiva: perfis com milhares de itens renderizam por janela,
+// que cresce conforme o usuário rola (evita montar dezenas de milhares de nós).
+const INITIAL_RENDER_LIMIT = 120
+const RENDER_BATCH = 120
+
 export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
   const [sourceId, setSourceId] = useState<string | undefined>(initialSourceId)
   const [gallery, setGallery] = useState<SourceMediaGallery>()
@@ -129,6 +134,9 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
   const [viewMode, setViewMode] = useState<ViewMode>(readStoredMode)
   const [densityIndex, setDensityIndex] = useState<number>(readStoredDensity)
   const [sectionFilter, setSectionFilter] = useState<string>(SECTION_FILTER_ALL)
+  const [renderLimit, setRenderLimit] = useState(INITIAL_RENDER_LIMIT)
+  const scrollRef = useRef<HTMLDivElement>(null)
+  const sentinelRef = useRef<HTMLDivElement>(null)
 
   // Persiste as preferências de visualização.
   useEffect(() => {
@@ -205,10 +213,22 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
     return gallery.posts.filter((post) => (post.section || 'timeline') === sectionFilter)
   }, [gallery, sectionFilter])
 
+  // Reinicia a janela ao trocar de perfil ou de filtro (conteúdo diferente).
+  useEffect(() => {
+    setRenderLimit(INITIAL_RENDER_LIMIT)
+  }, [sourceId, sectionFilter])
+
+  // Subconjunto efetivamente montado no DOM (a janela cresce no scroll).
+  const renderedPosts = useMemo(
+    () => visiblePosts.slice(0, renderLimit),
+    [visiblePosts, renderLimit],
+  )
+  const hasMoreToRender = renderLimit < visiblePosts.length
+
   const days = useMemo<DayGroup[]>(() => {
     const groups: DayGroup[] = []
     let current: DayGroup | undefined
-    for (const post of visiblePosts) {
+    for (const post of renderedPosts) {
       const key = dayKey(post.capturedAt)
       if (!current || current.key !== key) {
         current = { key, label: dayLabel(key, post.capturedAt), posts: [] }
@@ -217,7 +237,26 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
       current.posts.push(post)
     }
     return groups
-  }, [visiblePosts])
+  }, [renderedPosts])
+
+  // Cresce a janela quando o sentinel (fim da lista) entra na viewport. O
+  // rootMargin pré-carrega antes de chegar ao fim; re-observa a cada cresc.
+  // para o caso de um lote não preencher a tela inteira.
+  useEffect(() => {
+    if (!hasMoreToRender) return
+    const sentinel = sentinelRef.current
+    if (!sentinel) return
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) {
+          setRenderLimit((current) => current + RENDER_BATCH)
+        }
+      },
+      { root: scrollRef.current ?? null, rootMargin: '800px 0px' },
+    )
+    observer.observe(sentinel)
+    return () => observer.disconnect()
+  }, [hasMoreToRender, renderLimit, viewMode])
 
   // Lista plana (post → cada arquivo) para o lightbox navegar (respeita o filtro).
   const flatItems = useMemo<FlatItem[]>(() => {
@@ -456,25 +495,28 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
         <div className="runtime-log-window-empty">Loading media…</div>
       ) : gallery && gallery.posts.length === 0 ? (
         <div className="runtime-log-window-empty">No downloaded media found for this profile.</div>
-      ) : viewMode === 'grid' ? (
-        <div className="profile-view-days">
-          <div className="profile-view-grid" style={gridStyle}>
-            {visiblePosts.map((post, index) => renderCard(post, post.postId ?? `post-${index}`))}
-          </div>
-        </div>
       ) : (
-        <div className="profile-view-days">
-          {days.map((day) => (
-            <section className="profile-view-day" key={day.key}>
-              <div className="profile-view-day-header">
-                <span className="eyebrow">{day.label}</span>
-                <span className="pill">{day.posts.length}</span>
-              </div>
-              <div className="profile-view-grid" style={gridStyle}>
-                {day.posts.map((post, index) => renderCard(post, post.postId ?? `${day.key}-${index}`))}
-              </div>
-            </section>
-          ))}
+        <div className="profile-view-days" ref={scrollRef}>
+          {viewMode === 'grid' ? (
+            <div className="profile-view-grid" style={gridStyle}>
+              {renderedPosts.map((post, index) => renderCard(post, post.postId ?? `post-${index}`))}
+            </div>
+          ) : (
+            days.map((day) => (
+              <section className="profile-view-day" key={day.key}>
+                <div className="profile-view-day-header">
+                  <span className="eyebrow">{day.label}</span>
+                  <span className="pill">{day.posts.length}</span>
+                </div>
+                <div className="profile-view-grid" style={gridStyle}>
+                  {day.posts.map((post, index) => renderCard(post, post.postId ?? `${day.key}-${index}`))}
+                </div>
+              </section>
+            ))
+          )}
+          {hasMoreToRender ? (
+            <div ref={sentinelRef} className="profile-view-sentinel" aria-hidden="true" />
+          ) : null}
         </div>
       )}
 

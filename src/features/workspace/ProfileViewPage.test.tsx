@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { SourceMediaGallery } from '../../domain/models'
 import { ProfileViewPage } from './ProfileViewPage'
@@ -171,6 +171,56 @@ describe('ProfileViewPage', () => {
       expect(bridgeMocks.openExternalTarget).toHaveBeenCalledWith('https://www.instagram.com/p/CyAbC-1_x/')
     })
   })
+
+  it('renders media progressively and grows the window on scroll', async () => {
+    // Capture IntersectionObserver instances (jsdom has none) so we can fire it.
+    const observers: Array<(entries: Array<{ isIntersecting: boolean }>) => void> = []
+    class MockIntersectionObserver {
+      constructor(cb: (entries: Array<{ isIntersecting: boolean }>) => void) {
+        observers.push(cb)
+      }
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    }
+    vi.stubGlobal('IntersectionObserver', MockIntersectionObserver)
+
+    const day = Math.floor(Date.parse('2026-05-19T12:00:00Z') / 1000)
+    // Image posts keep the DOM light (an <img> per card vs a heavier <video>).
+    const posts = Array.from({ length: 140 }, (_, index) => ({
+      postId: `p-${index}`,
+      postUrl: `https://www.tiktok.com/@bulk/photo/${index}`,
+      capturedAt: day - index,
+      mediaType: 'image' as const,
+      section: 'timeline',
+      files: [{ relativePath: `${index}.jpg`, absolutePath: `S:/x/${index}.jpg`, mediaType: 'image' }],
+    }))
+    bridgeMocks.loadSourceMediaGallery.mockResolvedValue({
+      sourceId: 'bulk',
+      provider: 'tiktok',
+      handle: 'bulk',
+      profileUrl: 'https://www.tiktok.com/@bulk',
+      posts,
+    } satisfies SourceMediaGallery)
+
+    render(<ProfileViewPage initialSourceId="bulk" />)
+
+    // First window only mounts the initial batch, not all 150 posts.
+    await waitFor(
+      () => expect(screen.getAllByRole('button', { name: /open preview/i }).length).toBe(120),
+      { timeout: 5000 },
+    )
+
+    // The sentinel becoming visible grows the window to cover the rest.
+    expect(observers.length).toBeGreaterThan(0)
+    act(() => observers[observers.length - 1]([{ isIntersecting: true }]))
+    await waitFor(
+      () => expect(screen.getAllByRole('button', { name: /open preview/i }).length).toBe(140),
+      { timeout: 5000 },
+    )
+
+    vi.unstubAllGlobals()
+  }, 20000)
 
   it('opens the lightbox when a thumbnail is clicked', async () => {
     render(<ProfileViewPage initialSourceId="src-1" />)

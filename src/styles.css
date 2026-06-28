@@ -9623,6 +9623,15 @@ p {
 .profile-view-card {
   position: relative;
   border-radius: 12px;
+  /* Offscreen cards skip layout/paint; `auto` remembers the real size after the
+     first render so scrolling stays stable. Complements progressive rendering. */
+  content-visibility: auto;
+  contain-intrinsic-size: auto 240px;
+}
+
+.profile-view-sentinel {
+  width: 100%;
+  height: 1px;
 }
 
 .profile-view-thumb {
