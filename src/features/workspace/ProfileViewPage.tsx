@@ -89,21 +89,24 @@ function postKey(post: MediaGalleryPost): string {
 }
 
 /**
- * Stories são efêmeros (expiram em ~24h), então o link "Online" do post não
- * leva a lugar nenhum — não faz sentido oferecê-lo.
+ * Atenção à nomenclatura herdada do backend (instagram_connector.rs): a seção
+ * `stories_user` ("Stories (user)") são as Stories ao vivo do perfil — efêmeras,
+ * expiram em ~24h; já `stories` é populada pela descoberta de Highlights, que são
+ * permanentes. Só as efêmeras não têm link "Online" útil.
  */
-function isStorySection(section: string): boolean {
-  return section === 'stories' || section === 'stories_user'
+function isEphemeralStorySection(section: string): boolean {
+  return section === 'stories_user'
 }
 
 const SECTION_FILTER_ALL = 'all'
 
 /** Ordem estável dos chips de seção (feed antes de reels etc.). */
-const SECTION_ORDER = ['timeline', 'reels', 'stories', 'stories_user', 'tagged', 'reposts', 'video']
+const SECTION_ORDER = ['timeline', 'reels', 'stories_user', 'stories', 'tagged', 'reposts', 'video']
 
 /**
  * Rótulo da seção. No Instagram, `timeline` é o Feed (distinto dos Reels, que
- * são conteúdos diferentes); nos demais providers vira "Posts".
+ * são conteúdos diferentes); nos demais providers vira "Posts". Sobre `stories`
+ * vs `stories_user`, ver {@link isEphemeralStorySection}.
  */
 function sectionLabel(provider: ProviderKey, section: string): string {
   switch (section) {
@@ -112,6 +115,8 @@ function sectionLabel(provider: ProviderKey, section: string): string {
     case 'reels':
       return 'Reels'
     case 'stories':
+      // `stories` carrega os Highlights no Instagram; nos demais, Stories comuns.
+      return provider === 'instagram' ? 'Highlights' : 'Stories'
     case 'stories_user':
       return 'Stories'
     case 'tagged':
@@ -151,6 +156,8 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
   const [renderLimit, setRenderLimit] = useState(INITIAL_RENDER_LIMIT)
   const [selectMode, setSelectMode] = useState(false)
   const [selectedKeys, setSelectedKeys] = useState<Set<string>>(() => new Set())
+  // Âncora para seleção por intervalo (shift+clique): o último item alternado.
+  const selectAnchorRef = useRef<string | null>(null)
   const [confirmPosts, setConfirmPosts] = useState<MediaGalleryPost[]>()
   const [deleting, setDeleting] = useState(false)
   const scrollRef = useRef<HTMLDivElement>(null)
@@ -347,21 +354,51 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
   useEffect(() => {
     setSelectMode(false)
     setSelectedKeys(new Set())
+    selectAnchorRef.current = null
   }, [sourceId, sectionFilter])
 
-  const toggleSelected = useCallback((post: MediaGalleryPost) => {
-    setSelectedKeys((current) => {
-      const next = new Set(current)
+  // Índice de cada post visível (na ordem exibida) para o range do shift+clique.
+  const indexByKey = useMemo(() => {
+    const map = new Map<string, number>()
+    visiblePosts.forEach((post, index) => map.set(postKey(post), index))
+    return map
+  }, [visiblePosts])
+
+  /**
+   * Seleciona/alterna um post. Marcar qualquer item entra automaticamente no
+   * modo de seleção (a barra de ações aparece sem precisar do botão "Select").
+   * Com `shift`, seleciona todo o intervalo a partir da última âncora.
+   */
+  const handleSelect = useCallback(
+    (post: MediaGalleryPost, shiftKey: boolean) => {
       const key = postKey(post)
-      if (next.has(key)) next.delete(key)
-      else next.add(key)
-      return next
-    })
-  }, [])
+      setSelectMode(true)
+      setSelectedKeys((current) => {
+        const next = new Set(current)
+        const anchor = selectAnchorRef.current
+        if (shiftKey && anchor !== null && indexByKey.has(anchor) && indexByKey.has(key)) {
+          const a = indexByKey.get(anchor)!
+          const b = indexByKey.get(key)!
+          const [lo, hi] = a <= b ? [a, b] : [b, a]
+          for (let i = lo; i <= hi; i++) {
+            next.add(postKey(visiblePosts[i]))
+          }
+          return next
+        }
+        if (next.has(key)) next.delete(key)
+        else next.add(key)
+        return next
+      })
+      // O shift estende a partir da âncora existente; o clique simples redefine-a.
+      if (!shiftKey) selectAnchorRef.current = key
+    },
+    [indexByKey, visiblePosts],
+  )
 
   const exitSelectMode = useCallback(() => {
     setSelectMode(false)
     setSelectedKeys(new Set())
+    selectAnchorRef.current = null
   }, [])
 
   const selectedPosts = useMemo(
@@ -397,22 +434,29 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
     const video = isVideo(post.mediaType === 'video' ? 'video' : thumb.mediaType)
     const selected = selectedKeys.has(postKey(post))
     return (
-      <article className={`profile-view-card${selected ? ' is-selected' : ''}`} key={key}>
+      <article
+        className={`profile-view-card${selected ? ' is-selected' : ''}${selectMode ? ' is-selecting' : ''}`}
+        key={key}
+      >
         <button
           className={`profile-view-select${selected ? ' is-checked' : ''}`}
-          onClick={() => toggleSelected(post)}
+          onClick={(event) => handleSelect(post, event.shiftKey)}
           type="button"
           aria-pressed={selected}
           aria-label={selected ? 'Deselect media' : 'Select media'}
-          title={selected ? 'Deselect' : 'Select'}
+          title={selected ? 'Deselect (Shift: range)' : 'Select (Shift: range)'}
         >
           <span aria-hidden="true">{selected ? '✓' : ''}</span>
         </button>
         <button
           className="profile-view-thumb"
-          onClick={() => (selectMode ? toggleSelected(post) : openLightboxForPost(post))}
+          onClick={(event) => {
+            if (selectMode) handleSelect(post, event.shiftKey)
+            else if (event.shiftKey && selectAnchorRef.current !== null) handleSelect(post, true)
+            else openLightboxForPost(post)
+          }}
           type="button"
-          title={selectMode ? 'Toggle selection' : 'Open preview'}
+          title={selectMode ? 'Toggle selection (Shift: range)' : 'Open preview'}
         >
           {posterSrc ? (
             <img src={convertFileSrc(posterSrc)} alt="" loading="lazy" />
@@ -434,35 +478,51 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
               : ''}
           </span>
         </button>
-        <div className="profile-view-card-actions">
-          {isStorySection(post.section) ? null : (
+        {/* Per-card actions só fazem sentido fora do modo seleção; durante a
+            seleção o card é só alvo de clique, sem ruído de botões. */}
+        {selectMode ? null : (
+          <>
+            <div className="profile-view-card-actions">
+              {isEphemeralStorySection(post.section) ? null : (
+                <button
+                  className="ghost-button queue-icon-button"
+                  disabled={!post.postUrl && !gallery?.profileUrl}
+                  onClick={() => handleOpenOnline(post, gallery?.profileUrl)}
+                  type="button"
+                  title={post.postUrl ? 'Open original post online' : 'Original link unavailable — open profile'}
+                >
+                  Online
+                </button>
+              )}
+              <button
+                className="ghost-button queue-icon-button"
+                onClick={() => void revealMediaInFolder(thumb.absolutePath)}
+                type="button"
+                title="Reveal in folder"
+              >
+                Folder
+              </button>
+            </div>
             <button
-              className="ghost-button queue-icon-button"
-              disabled={!post.postUrl && !gallery?.profileUrl}
-              onClick={() => handleOpenOnline(post, gallery?.profileUrl)}
+              className="profile-view-trash"
+              onClick={() => setConfirmPosts([post])}
               type="button"
-              title={post.postUrl ? 'Open original post online' : 'Original link unavailable — open profile'}
+              aria-label="Delete"
+              title="Delete (move to Recycle Bin)"
             >
-              Online
+              <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" focusable="false">
+                <path
+                  d="M9 3h6m-9 3h12M6 6l1 14a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-14M10 10v7M14 10v7"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="1.8"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+              </svg>
             </button>
-          )}
-          <button
-            className="ghost-button queue-icon-button"
-            onClick={() => void revealMediaInFolder(thumb.absolutePath)}
-            type="button"
-            title="Reveal in folder"
-          >
-            Folder
-          </button>
-          <button
-            className="ghost-button queue-icon-button profile-view-delete"
-            onClick={() => setConfirmPosts([post])}
-            type="button"
-            title="Delete (move to Recycle Bin)"
-          >
-            Delete
-          </button>
-        </div>
+          </>
+        )}
       </article>
     )
   }
@@ -504,110 +564,126 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
       </header>
 
       {hasMedia ? (
-        <div className="profile-view-toolbar">
-          <div className="profile-view-segmented" role="group" aria-label="View mode">
-            <button
-              className={viewMode === 'day' ? 'is-active' : ''}
-              onClick={() => setViewMode('day')}
-              type="button"
-              aria-pressed={viewMode === 'day'}
-            >
-              By day
-            </button>
-            <button
-              className={viewMode === 'grid' ? 'is-active' : ''}
-              onClick={() => setViewMode('grid')}
-              type="button"
-              aria-pressed={viewMode === 'grid'}
-            >
-              All media
-            </button>
-          </div>
-          {sections.length > 1 ? (
-            <div className="profile-view-sections" role="group" aria-label="Section filter">
+        <div className={`profile-view-toolbar${selectMode ? ' is-selecting' : ''}`}>
+          {selectMode ? (
+            // Selection controls take over the toolbar in place — same row, so
+            // entering/leaving the mode never shifts the media grid below.
+            <>
+              <span className="profile-view-selectbar-count">
+                {selectedPosts.length > 0
+                  ? `${selectedPosts.length} selected`
+                  : 'Click items to select · Shift+click for a range'}
+              </span>
+              <span className="profile-view-selectbar-spacer" />
               <button
-                className={sectionFilter === SECTION_FILTER_ALL ? 'is-active' : ''}
-                onClick={() => setSectionFilter(SECTION_FILTER_ALL)}
+                className="ghost-button queue-icon-button"
+                onClick={() => setSelectedKeys(new Set(visiblePosts.map(postKey)))}
                 type="button"
-                aria-pressed={sectionFilter === SECTION_FILTER_ALL}
+                disabled={visiblePosts.length === 0 || selectedPosts.length === visiblePosts.length}
               >
-                All
+                Select all
               </button>
-              {sections.map((section) => (
+              <button
+                className="ghost-button queue-icon-button"
+                onClick={() => setSelectedKeys(new Set())}
+                type="button"
+                disabled={selectedPosts.length === 0}
+              >
+                Clear
+              </button>
+              <button
+                className="profile-view-delete-selected"
+                onClick={() => setConfirmPosts(selectedPosts)}
+                type="button"
+                disabled={selectedPosts.length === 0}
+                aria-label="Delete selected"
+              >
+                Delete{selectedPosts.length > 0 ? ` (${selectedPosts.length})` : ''}
+              </button>
+              <button
+                className="ghost-button profile-view-select-toggle is-active"
+                onClick={() => exitSelectMode()}
+                type="button"
+                aria-pressed={true}
+              >
+                Done
+              </button>
+            </>
+          ) : (
+            <>
+              <div className="profile-view-segmented" role="group" aria-label="View mode">
                 <button
-                  key={section}
-                  className={sectionFilter === section ? 'is-active' : ''}
-                  onClick={() => setSectionFilter(section)}
+                  className={viewMode === 'day' ? 'is-active' : ''}
+                  onClick={() => setViewMode('day')}
                   type="button"
-                  aria-pressed={sectionFilter === section}
+                  aria-pressed={viewMode === 'day'}
                 >
-                  {gallery ? sectionLabel(gallery.provider, section) : section}
+                  By day
                 </button>
-              ))}
-            </div>
-          ) : null}
-          <div className="profile-view-density" role="group" aria-label="Thumbnail size">
-            <button
-              className="ghost-button queue-icon-button"
-              onClick={() => setDensityIndex((index) => Math.max(0, index - 1))}
-              disabled={densityIndex <= 0}
-              type="button"
-              aria-label="Smaller thumbnails"
-              title="Smaller thumbnails (more per row)"
-            >
-              −
-            </button>
-            <button
-              className="ghost-button queue-icon-button"
-              onClick={() => setDensityIndex((index) => Math.min(DENSITY_STEPS.length - 1, index + 1))}
-              disabled={densityIndex >= DENSITY_STEPS.length - 1}
-              type="button"
-              aria-label="Larger thumbnails"
-              title="Larger thumbnails (fewer per row)"
-            >
-              +
-            </button>
-          </div>
-          <button
-            className={`ghost-button profile-view-select-toggle${selectMode ? ' is-active' : ''}`}
-            onClick={() => (selectMode ? exitSelectMode() : setSelectMode(true))}
-            type="button"
-            aria-pressed={selectMode}
-          >
-            {selectMode ? 'Done' : 'Select'}
-          </button>
-        </div>
-      ) : null}
-
-      {selectMode ? (
-        <div className="profile-view-selectbar">
-          <span className="muted-text">
-            {selectedPosts.length} selected
-          </span>
-          <button
-            className="ghost-button queue-icon-button"
-            onClick={() => setSelectedKeys(new Set(visiblePosts.map(postKey)))}
-            type="button"
-            disabled={visiblePosts.length === 0 || selectedPosts.length === visiblePosts.length}
-          >
-            Select all
-          </button>
-          <button
-            className="ghost-button queue-icon-button"
-            onClick={() => setSelectedKeys(new Set())}
-            type="button"
-            disabled={selectedPosts.length === 0}
-          >
-            Clear
-          </button>
-          <button
-            className="ghost-button queue-icon-button profile-view-delete"
-            onClick={() => setConfirmPosts(selectedPosts)}
-            type="button"
-            disabled={selectedPosts.length === 0}
-          >
-            Delete selected
-          </button>
+                <button
+                  className={viewMode === 'grid' ? 'is-active' : ''}
+                  onClick={() => setViewMode('grid')}
+                  type="button"
+                  aria-pressed={viewMode === 'grid'}
+                >
+                  All media
+                </button>
+              </div>
+              {sections.length > 1 ? (
+                <div className="profile-view-sections" role="group" aria-label="Section filter">
+                  <button
+                    className={sectionFilter === SECTION_FILTER_ALL ? 'is-active' : ''}
+                    onClick={() => setSectionFilter(SECTION_FILTER_ALL)}
+                    type="button"
+                    aria-pressed={sectionFilter === SECTION_FILTER_ALL}
+                  >
+                    All
+                  </button>
+                  {sections.map((section) => (
+                    <button
+                      key={section}
+                      className={sectionFilter === section ? 'is-active' : ''}
+                      onClick={() => setSectionFilter(section)}
+                      type="button"
+                      aria-pressed={sectionFilter === section}
+                    >
+                      {gallery ? sectionLabel(gallery.provider, section) : section}
+                    </button>
+                  ))}
+                </div>
+              ) : null}
+              <div className="profile-view-density" role="group" aria-label="Thumbnail size">
+                <button
+                  className="ghost-button queue-icon-button"
+                  onClick={() => setDensityIndex((index) => Math.max(0, index - 1))}
+                  disabled={densityIndex <= 0}
+                  type="button"
+                  aria-label="Smaller thumbnails"
+                  title="Smaller thumbnails (more per row)"
+                >
+                  −
+                </button>
+                <button
+                  className="ghost-button queue-icon-button"
+                  onClick={() => setDensityIndex((index) => Math.min(DENSITY_STEPS.length - 1, index + 1))}
+                  disabled={densityIndex >= DENSITY_STEPS.length - 1}
+                  type="button"
+                  aria-label="Larger thumbnails"
+                  title="Larger thumbnails (fewer per row)"
+                >
+                  +
+                </button>
+              </div>
+              <button
+                className="ghost-button profile-view-select-toggle"
+                onClick={() => setSelectMode(true)}
+                type="button"
+                aria-pressed={false}
+              >
+                Select
+              </button>
+            </>
+          )}
         </div>
       ) : null}
 
@@ -712,7 +788,7 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
               <img src={convertFileSrc(activeItem.file.absolutePath)} alt="" />
             )}
             <div className="profile-view-lightbox-actions">
-              {isStorySection(activeItem.post.section) ? null : (
+              {isEphemeralStorySection(activeItem.post.section) ? null : (
                 <button
                   className="ghost-button"
                   disabled={!activeItem.post.postUrl && !gallery?.profileUrl}

@@ -260,6 +260,24 @@ describe('ProfileViewPage', () => {
     )
   })
 
+  it('enters selection from a checkbox alone and ranges with shift+click', async () => {
+    render(<ProfileViewPage initialSourceId="src-1" />)
+    await screen.findAllByRole('button', { name: /open preview/i })
+
+    const checkboxes = screen.getAllByRole('button', { name: /select media/i })
+
+    // Checking a box (without the "Select" toggle) reveals the delete action.
+    fireEvent.click(checkboxes[0])
+    expect(screen.getByText(/1 selected/i)).toBeTruthy()
+    expect(screen.getByRole('button', { name: /delete selected/i })).toBeTruthy()
+
+    // Shift+click the last box selects the whole range in between.
+    fireEvent.click(screen.getAllByRole('button', { name: /select media/i }).at(-1)!, {
+      shiftKey: true,
+    })
+    expect(screen.getByText(/2 selected/i)).toBeTruthy()
+  })
+
   it('deletes a single post from its card action', async () => {
     bridgeMocks.deleteSourceMedia.mockResolvedValue({ ...galleryFixture(), posts: [] })
     render(<ProfileViewPage initialSourceId="src-1" />)
@@ -275,7 +293,7 @@ describe('ProfileViewPage', () => {
     )
   })
 
-  it('hides the Online link for stories (ephemeral, 24h)', async () => {
+  it('hides the Online link for live stories but keeps it for highlights', async () => {
     const day = Math.floor(Date.parse('2026-05-19T12:00:00Z') / 1000)
     bridgeMocks.loadSourceMediaGallery.mockResolvedValue({
       sourceId: 'ig-1',
@@ -292,11 +310,21 @@ describe('ProfileViewPage', () => {
           files: [{ relativePath: 'f.jpg', absolutePath: 'S:/f.jpg', mediaType: 'image' }],
         },
         {
+          // Highlights (backend section `stories`) persist → keep the Online link.
+          postId: 'highlight',
+          postUrl: undefined,
+          capturedAt: day - 30,
+          mediaType: 'image',
+          section: 'stories',
+          files: [{ relativePath: 'h.jpg', absolutePath: 'S:/h.jpg', mediaType: 'image' }],
+        },
+        {
+          // Live stories (backend section `stories_user`) are ephemeral → no link.
           postId: 'story',
           postUrl: undefined,
           capturedAt: day - 60,
           mediaType: 'image',
-          section: 'stories',
+          section: 'stories_user',
           files: [{ relativePath: 's.jpg', absolutePath: 'S:/s.jpg', mediaType: 'image' }],
         },
       ],
@@ -304,9 +332,12 @@ describe('ProfileViewPage', () => {
 
     render(<ProfileViewPage initialSourceId="ig-1" />)
     await waitFor(() =>
-      expect(screen.getAllByRole('button', { name: /open preview/i }).length).toBe(2),
+      expect(screen.getAllByRole('button', { name: /open preview/i }).length).toBe(3),
     )
-    // Only the feed post offers an Online link; the story does not.
-    expect(screen.getAllByRole('button', { name: 'Online' }).length).toBe(1)
+    // Feed + highlight expose Online; the ephemeral live story does not.
+    expect(screen.getAllByRole('button', { name: 'Online' }).length).toBe(2)
+    // The two story-like sections render distinct chips (Stories vs Highlights).
+    expect(screen.getByRole('button', { name: 'Highlights' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Stories' })).toBeTruthy()
   })
 })
