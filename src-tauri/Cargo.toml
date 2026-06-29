@@ -1,6 +1,6 @@
 [package]
 name = "ninjacrawler"
-version = "0.2.0"
+version = "0.3.0"
 description = "Local-first desktop crawler manager"
 authors = ["MetalDevOps"]
 edition = "2021"
@@ -27,6 +27,7 @@ roxmltree = "0.20"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 sha2 = "0.10"
+trash = "5"
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.55"

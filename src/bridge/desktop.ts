@@ -2433,11 +2433,7 @@ export async function openProfileViewWindow(sourceId: string): Promise<void> {
   await invoke<void>('open_profile_view_window', buildInvokeArgs({ sourceId }, { source_id: sourceId }))
 }
 
-export async function loadSourceMediaGallery(sourceId: string): Promise<SourceMediaGallery> {
-  const raw = await invoke<unknown>(
-    'load_source_media_gallery',
-    buildInvokeArgs({ sourceId }, { source_id: sourceId }),
-  )
+function parseSourceMediaGallery(raw: unknown, sourceId: string): SourceMediaGallery {
   const value = isRecord(raw) ? raw : {}
   const posts = Array.isArray(value.posts) ? value.posts : []
   return {
@@ -2459,6 +2455,25 @@ export async function loadSourceMediaGallery(sourceId: string): Promise<SourceMe
       })),
     })),
   }
+}
+
+export async function loadSourceMediaGallery(sourceId: string): Promise<SourceMediaGallery> {
+  const raw = await invoke<unknown>(
+    'load_source_media_gallery',
+    buildInvokeArgs({ sourceId }, { source_id: sourceId }),
+  )
+  return parseSourceMediaGallery(raw, sourceId)
+}
+
+export async function deleteSourceMedia(
+  sourceId: string,
+  relativePaths: string[],
+): Promise<SourceMediaGallery> {
+  const raw = await invoke<unknown>(
+    'delete_source_media',
+    buildInvokeArgs({ sourceId, relativePaths }, { source_id: sourceId, relative_paths: relativePaths }),
+  )
+  return parseSourceMediaGallery(raw, sourceId)
 }
 
 export async function subscribeToProfileViewSource(

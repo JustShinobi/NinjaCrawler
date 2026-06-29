@@ -551,6 +551,14 @@ pub fn load_source_media_gallery(
 }
 
 #[tauri::command]
+pub fn delete_source_media(
+    source_id: String,
+    relative_paths: Vec<String>,
+) -> Result<crate::domain::models::SourceMediaGallery, String> {
+    workspace_repository::delete_source_media(source_id, relative_paths)
+}
+
+#[tauri::command]
 pub fn upsert_app_setting(
     app: tauri::AppHandle,
     input: AppSettingUpsert,

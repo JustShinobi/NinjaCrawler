@@ -2282,6 +2282,250 @@ pub fn load_source_media_gallery(source_id: String) -> Result<SourceMediaGallery
     })
 }
 
+fn ensure_provider_deleted_media_table(connection: &Connection) -> Result<(), String> {
+    connection
+        .execute_batch(
+            "CREATE TABLE IF NOT EXISTS provider_deleted_media (
+                provider TEXT NOT NULL,
+                source_id TEXT NOT NULL,
+                relative_path TEXT NOT NULL,
+                media_section TEXT NOT NULL DEFAULT '',
+                provider_post_key TEXT,
+                provider_post_code TEXT,
+                provider_media_key TEXT,
+                deleted_at TEXT NOT NULL,
+                PRIMARY KEY (provider, source_id, relative_path),
+                FOREIGN KEY (source_id) REFERENCES source_profiles(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_provider_deleted_media_source
+                ON provider_deleted_media(provider, source_id);",
+        )
+        .map_err(|error| error.to_string())
+}
+
+/// Reads the substring of `url` right after `marker` up to the next path/query
+/// separator. Used to recover a post key/shortcode from the gallery's post URL.
+fn url_segment_after(url: &str, marker: &str) -> Option<String> {
+    let tail = url.split_once(marker)?.1;
+    tail.split(['/', '?', '&', '#'])
+        .next()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+/// Resolves the (post_key, post_code) used to tombstone a deleted post in the
+/// per-provider post ledger, from what the gallery already resolved. TikTok uses
+/// the numeric post id; Twitter the status id; Instagram the case-sensitive
+/// shortcode (the connector's skip set accepts the code as a key).
+fn extract_post_tombstone_keys(
+    provider: &str,
+    post: &MediaGalleryPost,
+) -> (Option<String>, Option<String>) {
+    match provider {
+        "tiktok" => (
+            post.post_id
+                .clone()
+                .or_else(|| post.post_url.as_deref().and_then(|url| {
+                    url_segment_after(url, "/video/").or_else(|| url_segment_after(url, "/photo/"))
+                })),
+            None,
+        ),
+        "twitter" => (
+            post.post_url
+                .as_deref()
+                .and_then(|url| url_segment_after(url, "/status/")),
+            None,
+        ),
+        "instagram" => (
+            None,
+            post.post_url
+                .as_deref()
+                .and_then(|url| url_segment_after(url, "/p/")),
+        ),
+        _ => (None, None),
+    }
+}
+
+/// Moves the given media files (paths relative to the source's profile root) to
+/// the OS recycle bin and records a deletion tombstone, so they are neither
+/// shown again nor re-downloaded on the next sync. The post key/code is written
+/// back into the per-provider post ledger — which every connector already
+/// consults to skip known posts — so no connector changes are needed. Returns
+/// the refreshed gallery.
+pub fn delete_source_media(
+    source_id: String,
+    relative_paths: Vec<String>,
+) -> Result<SourceMediaGallery, String> {
+    // Resolve each requested file to its post first, reusing the gallery's own
+    // link/section resolution (ledger + legacy XML + file-name derivation).
+    let gallery = load_source_media_gallery(source_id.clone())?;
+    let mut post_by_rel: HashMap<String, MediaGalleryPost> = HashMap::new();
+    for post in &gallery.posts {
+        for file in &post.files {
+            post_by_rel.insert(file.relative_path.to_ascii_lowercase(), post.clone());
+        }
+    }
+
+    with_workspace(|connection, layout| {
+        let row = connection
+            .query_row(
+                "SELECT provider, handle, account_id, sync_options_json FROM source_profiles
+                 WHERE id = ?1 AND deleted_at IS NULL LIMIT 1",
+                params![&source_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| format!("Source '{}' does not exist.", source_id))?;
+        let (provider, handle, account_id, sync_options_json) = row;
+        let account_id_for_ledger = account_id.clone();
+        let source_profile = SourceProfile {
+            id: source_id.clone(),
+            provider: provider.clone(),
+            source_kind: "profile".to_string(),
+            handle: handle.clone(),
+            display_name: String::new(),
+            account_id,
+            group_id: None,
+            labels: Vec::new(),
+            ready_for_download: false,
+            sync_options: deserialize_source_sync_options(&provider, &sync_options_json),
+            profile_image_path: None,
+            profile_image_custom: false,
+            remote_state: "exists".to_string(),
+            is_subscription: false,
+            last_synced_at: None,
+            sync_problem_code: None,
+            sync_problem_message: None,
+            sync_problem_at: None,
+            created_at: None,
+            importer_id: None,
+            imported_at: None,
+        };
+        let profile_root =
+            resolved_source_media_output_root_with_connection(connection, layout, &source_profile)?;
+        let canonical_root = fs::canonicalize(&profile_root).unwrap_or_else(|_| profile_root.clone());
+
+        ensure_provider_deleted_media_table(connection)?;
+        let now = now_timestamp();
+
+        let mut tw_posts: Vec<twitter_connector::ObservedTwitterPost> = Vec::new();
+        let mut ig_posts: Vec<instagram_connector::ObservedInstagramPost> = Vec::new();
+        let mut seen_post: HashSet<String> = HashSet::new();
+
+        for raw_rel in &relative_paths {
+            let rel = raw_rel.replace('\\', "/");
+            let rel = rel.trim_start_matches('/').to_string();
+            if rel.is_empty() {
+                continue;
+            }
+            let abs = profile_root.join(&rel);
+            // Containment guard: never touch anything outside the profile root.
+            let abs_canon = fs::canonicalize(&abs).unwrap_or_else(|_| abs.clone());
+            if !abs_canon.starts_with(&canonical_root) {
+                continue;
+            }
+
+            let post = post_by_rel.get(&rel.to_ascii_lowercase());
+            let section = post
+                .map(|entry| entry.section.clone())
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(|| "timeline".to_string());
+            let (post_key, post_code) = post
+                .map(|entry| extract_post_tombstone_keys(&provider, entry))
+                .unwrap_or((None, None));
+
+            if abs.exists() {
+                trash::delete(&abs)
+                    .map_err(|error| format!("Failed to delete '{}': {error}", abs.display()))?;
+            }
+
+            connection
+                .execute(
+                    "INSERT INTO provider_deleted_media (
+                        provider, source_id, relative_path, media_section,
+                        provider_post_key, provider_post_code, deleted_at
+                     )
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                     ON CONFLICT(provider, source_id, relative_path) DO UPDATE SET
+                        media_section = excluded.media_section,
+                        provider_post_key = COALESCE(excluded.provider_post_key, provider_deleted_media.provider_post_key),
+                        provider_post_code = COALESCE(excluded.provider_post_code, provider_deleted_media.provider_post_code),
+                        deleted_at = excluded.deleted_at",
+                    params![
+                        provider,
+                        source_id,
+                        rel.to_ascii_lowercase(),
+                        section,
+                        post_key,
+                        post_code,
+                        now,
+                    ],
+                )
+                .map_err(|error| error.to_string())?;
+
+            // Tombstone the post key/code so the next sync skips re-downloading it.
+            if provider.eq_ignore_ascii_case("instagram") {
+                if let Some(code) = post_code.clone() {
+                    if seen_post.insert(code.to_ascii_lowercase()) {
+                        ig_posts.push(instagram_connector::ObservedInstagramPost {
+                            provider_post_key: post_key.clone().unwrap_or_else(|| code.clone()),
+                            provider_post_code: Some(code),
+                            media_section: section.clone(),
+                        });
+                    }
+                }
+            } else if let Some(key) = post_key.clone() {
+                if seen_post.insert(key.to_ascii_lowercase()) {
+                    tw_posts.push(twitter_connector::ObservedTwitterPost {
+                        provider_post_key: key,
+                        media_section: section.clone(),
+                    });
+                }
+            }
+        }
+
+        // The post ledger has a FK to provider_accounts, so only write tombstones
+        // there when the source is account-linked (the deletion is always
+        // recorded in provider_deleted_media regardless).
+        if let Some(account) = account_id_for_ledger
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            if provider.eq_ignore_ascii_case("instagram") {
+                if !ig_posts.is_empty() {
+                    upsert_instagram_post_ledger_entries(
+                        connection, &source_id, account, &handle, &ig_posts, &now,
+                    )?;
+                }
+            } else if !tw_posts.is_empty() {
+                upsert_provider_sync_post_ledger_entries(
+                    connection,
+                    &provider.to_ascii_lowercase(),
+                    &source_id,
+                    account,
+                    &handle,
+                    &tw_posts,
+                    &now,
+                )?;
+            }
+        }
+
+        Ok(())
+    })?;
+
+    load_source_media_gallery(source_id)
+}
+
 pub fn pick_source_profile_image(source_id: String) -> Result<WorkspaceSnapshot, String> {
     let initial_directory = with_workspace(|connection, layout| {
         let source = connection
@@ -14715,6 +14959,45 @@ mod tests {
         assert_eq!(
             build_post_url("instagram", "someone", Some("123"), false, None),
             None
+        );
+    }
+
+    #[test]
+    fn extract_post_tombstone_keys_per_provider() {
+        let post = |url: Option<&str>, id: Option<&str>| MediaGalleryPost {
+            post_id: id.map(str::to_string),
+            post_url: url.map(str::to_string),
+            captured_at: None,
+            media_type: "image".to_string(),
+            section: "timeline".to_string(),
+            poster_path: None,
+            files: Vec::new(),
+        };
+        // TikTok: usa o post id.
+        assert_eq!(
+            extract_post_tombstone_keys(
+                "tiktok",
+                &post(Some("https://www.tiktok.com/@h/video/123"), Some("123")),
+            ),
+            (Some("123".to_string()), None)
+        );
+        // Twitter: status id do post_url.
+        assert_eq!(
+            extract_post_tombstone_keys("twitter", &post(Some("https://x.com/h/status/999"), None)),
+            (Some("999".to_string()), None)
+        );
+        // Instagram: shortcode (case-sensitive) do post_url.
+        assert_eq!(
+            extract_post_tombstone_keys(
+                "instagram",
+                &post(Some("https://www.instagram.com/p/CyAbC-1_x/"), None),
+            ),
+            (None, Some("CyAbC-1_x".to_string()))
+        );
+        // Sem URL: nada a tombstonar via post ledger.
+        assert_eq!(
+            extract_post_tombstone_keys("twitter", &post(None, None)),
+            (None, None)
         );
     }
 

@@ -7,6 +7,7 @@ import { ProfileViewPage } from './ProfileViewPage'
 
 const bridgeMocks = vi.hoisted(() => ({
   loadSourceMediaGallery: vi.fn(),
+  deleteSourceMedia: vi.fn(),
   loadWorkspaceSnapshot: vi.fn(),
   openExternalTarget: vi.fn(),
   openMediaFile: vi.fn(),
@@ -229,5 +230,114 @@ describe('ProfileViewPage', () => {
     const dialog = await screen.findByRole('dialog')
     expect(within(dialog).getByRole('button', { name: /open online/i })).toBeTruthy()
     expect(within(dialog).getByRole('button', { name: /reveal in folder/i })).toBeTruthy()
+  })
+
+  it('multi-selects posts and deletes them via the backend', async () => {
+    // After deletion the backend returns the gallery without the first post.
+    const remaining = galleryFixture()
+    remaining.posts = remaining.posts.slice(1)
+    bridgeMocks.deleteSourceMedia.mockResolvedValue(remaining)
+
+    render(<ProfileViewPage initialSourceId="src-1" />)
+    await screen.findAllByRole('button', { name: /open preview/i })
+
+    // Enter selection mode and pick the first post.
+    fireEvent.click(screen.getByRole('button', { name: /^select$/i }))
+    fireEvent.click(screen.getAllByRole('button', { name: /select media/i })[0])
+    expect(screen.getByText(/1 selected/i)).toBeTruthy()
+
+    // Delete selected → confirm dialog → confirm.
+    fireEvent.click(screen.getByRole('button', { name: /delete selected/i }))
+    const dialog = await screen.findByRole('dialog')
+    fireEvent.click(within(dialog).getByRole('button', { name: /^delete$/i }))
+
+    await waitFor(() =>
+      expect(bridgeMocks.deleteSourceMedia).toHaveBeenCalledWith('src-1', ['a.mp4']),
+    )
+    // Gallery refreshed to the backend result (first post gone).
+    await waitFor(() =>
+      expect(screen.getAllByRole('button', { name: /open preview/i }).length).toBe(1),
+    )
+  })
+
+  it('enters selection from a checkbox alone and ranges with shift+click', async () => {
+    render(<ProfileViewPage initialSourceId="src-1" />)
+    await screen.findAllByRole('button', { name: /open preview/i })
+
+    const checkboxes = screen.getAllByRole('button', { name: /select media/i })
+
+    // Checking a box (without the "Select" toggle) reveals the delete action.
+    fireEvent.click(checkboxes[0])
+    expect(screen.getByText(/1 selected/i)).toBeTruthy()
+    expect(screen.getByRole('button', { name: /delete selected/i })).toBeTruthy()
+
+    // Shift+click the last box selects the whole range in between.
+    fireEvent.click(screen.getAllByRole('button', { name: /select media/i }).at(-1)!, {
+      shiftKey: true,
+    })
+    expect(screen.getByText(/2 selected/i)).toBeTruthy()
+  })
+
+  it('deletes a single post from its card action', async () => {
+    bridgeMocks.deleteSourceMedia.mockResolvedValue({ ...galleryFixture(), posts: [] })
+    render(<ProfileViewPage initialSourceId="src-1" />)
+    await screen.findAllByRole('button', { name: /open preview/i })
+
+    // Card action delete (accessible name is the visible text "Delete").
+    fireEvent.click(screen.getAllByRole('button', { name: 'Delete' })[0])
+    const dialog = await screen.findByRole('dialog')
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Delete' }))
+
+    await waitFor(() =>
+      expect(bridgeMocks.deleteSourceMedia).toHaveBeenCalledWith('src-1', ['a.mp4']),
+    )
+  })
+
+  it('hides the Online link for live stories but keeps it for highlights', async () => {
+    const day = Math.floor(Date.parse('2026-05-19T12:00:00Z') / 1000)
+    bridgeMocks.loadSourceMediaGallery.mockResolvedValue({
+      sourceId: 'ig-1',
+      provider: 'instagram',
+      handle: 'someone',
+      profileUrl: 'https://www.instagram.com/someone/',
+      posts: [
+        {
+          postId: 'feed',
+          postUrl: 'https://www.instagram.com/p/AAA/',
+          capturedAt: day,
+          mediaType: 'image',
+          section: 'timeline',
+          files: [{ relativePath: 'f.jpg', absolutePath: 'S:/f.jpg', mediaType: 'image' }],
+        },
+        {
+          // Highlights (backend section `stories`) persist → keep the Online link.
+          postId: 'highlight',
+          postUrl: undefined,
+          capturedAt: day - 30,
+          mediaType: 'image',
+          section: 'stories',
+          files: [{ relativePath: 'h.jpg', absolutePath: 'S:/h.jpg', mediaType: 'image' }],
+        },
+        {
+          // Live stories (backend section `stories_user`) are ephemeral → no link.
+          postId: 'story',
+          postUrl: undefined,
+          capturedAt: day - 60,
+          mediaType: 'image',
+          section: 'stories_user',
+          files: [{ relativePath: 's.jpg', absolutePath: 'S:/s.jpg', mediaType: 'image' }],
+        },
+      ],
+    } as SourceMediaGallery)
+
+    render(<ProfileViewPage initialSourceId="ig-1" />)
+    await waitFor(() =>
+      expect(screen.getAllByRole('button', { name: /open preview/i }).length).toBe(3),
+    )
+    // Feed + highlight expose Online; the ephemeral live story does not.
+    expect(screen.getAllByRole('button', { name: 'Online' }).length).toBe(2)
+    // The two story-like sections render distinct chips (Stories vs Highlights).
+    expect(screen.getByRole('button', { name: 'Highlights' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Stories' })).toBeTruthy()
   })
 })
