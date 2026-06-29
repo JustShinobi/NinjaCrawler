@@ -274,4 +274,39 @@ describe('ProfileViewPage', () => {
       expect(bridgeMocks.deleteSourceMedia).toHaveBeenCalledWith('src-1', ['a.mp4']),
     )
   })
+
+  it('hides the Online link for stories (ephemeral, 24h)', async () => {
+    const day = Math.floor(Date.parse('2026-05-19T12:00:00Z') / 1000)
+    bridgeMocks.loadSourceMediaGallery.mockResolvedValue({
+      sourceId: 'ig-1',
+      provider: 'instagram',
+      handle: 'someone',
+      profileUrl: 'https://www.instagram.com/someone/',
+      posts: [
+        {
+          postId: 'feed',
+          postUrl: 'https://www.instagram.com/p/AAA/',
+          capturedAt: day,
+          mediaType: 'image',
+          section: 'timeline',
+          files: [{ relativePath: 'f.jpg', absolutePath: 'S:/f.jpg', mediaType: 'image' }],
+        },
+        {
+          postId: 'story',
+          postUrl: undefined,
+          capturedAt: day - 60,
+          mediaType: 'image',
+          section: 'stories',
+          files: [{ relativePath: 's.jpg', absolutePath: 'S:/s.jpg', mediaType: 'image' }],
+        },
+      ],
+    } as SourceMediaGallery)
+
+    render(<ProfileViewPage initialSourceId="ig-1" />)
+    await waitFor(() =>
+      expect(screen.getAllByRole('button', { name: /open preview/i }).length).toBe(2),
+    )
+    // Only the feed post offers an Online link; the story does not.
+    expect(screen.getAllByRole('button', { name: 'Online' }).length).toBe(1)
+  })
 })

@@ -88,6 +88,14 @@ function postKey(post: MediaGalleryPost): string {
   return post.files[0]?.relativePath ?? post.postId ?? ''
 }
 
+/**
+ * Stories são efêmeros (expiram em ~24h), então o link "Online" do post não
+ * leva a lugar nenhum — não faz sentido oferecê-lo.
+ */
+function isStorySection(section: string): boolean {
+  return section === 'stories' || section === 'stories_user'
+}
+
 const SECTION_FILTER_ALL = 'all'
 
 /** Ordem estável dos chips de seção (feed antes de reels etc.). */
@@ -427,15 +435,17 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
           </span>
         </button>
         <div className="profile-view-card-actions">
-          <button
-            className="ghost-button queue-icon-button"
-            disabled={!post.postUrl && !gallery?.profileUrl}
-            onClick={() => handleOpenOnline(post, gallery?.profileUrl)}
-            type="button"
-            title={post.postUrl ? 'Open original post online' : 'Original link unavailable — open profile'}
-          >
-            Online
-          </button>
+          {isStorySection(post.section) ? null : (
+            <button
+              className="ghost-button queue-icon-button"
+              disabled={!post.postUrl && !gallery?.profileUrl}
+              onClick={() => handleOpenOnline(post, gallery?.profileUrl)}
+              type="button"
+              title={post.postUrl ? 'Open original post online' : 'Original link unavailable — open profile'}
+            >
+              Online
+            </button>
+          )}
           <button
             className="ghost-button queue-icon-button"
             onClick={() => void revealMediaInFolder(thumb.absolutePath)}
@@ -702,14 +712,16 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
               <img src={convertFileSrc(activeItem.file.absolutePath)} alt="" />
             )}
             <div className="profile-view-lightbox-actions">
-              <button
-                className="ghost-button"
-                disabled={!activeItem.post.postUrl && !gallery?.profileUrl}
-                onClick={() => handleOpenOnline(activeItem.post, gallery?.profileUrl)}
-                type="button"
-              >
-                Open online
-              </button>
+              {isStorySection(activeItem.post.section) ? null : (
+                <button
+                  className="ghost-button"
+                  disabled={!activeItem.post.postUrl && !gallery?.profileUrl}
+                  onClick={() => handleOpenOnline(activeItem.post, gallery?.profileUrl)}
+                  type="button"
+                >
+                  Open online
+                </button>
+              )}
               <button className="ghost-button" onClick={() => void openMediaFile(activeItem.file.absolutePath)} type="button">
                 Open file
               </button>
