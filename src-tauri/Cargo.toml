@@ -1,6 +1,6 @@
 [package]
 name = "ninjacrawler"
-version = "0.3.0"
+version = "0.4.0"
 description = "Local-first desktop crawler manager"
 authors = ["MetalDevOps"]
 edition = "2021"
