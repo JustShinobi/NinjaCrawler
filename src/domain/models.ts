@@ -458,10 +458,20 @@ export interface ProviderAccountSettingValue {
   jsonValue?: unknown
 }
 
+export interface ProviderAccountImportState {
+  accountId: string
+  providerUserId?: string
+  providerUsername?: string
+  lastImportedAt: string
+  canRevert: boolean
+  backupImportedAt?: string
+}
+
 export interface ProviderAccountEditor {
   account: ProviderAccount
   session?: ProviderAccountSession | null
   settings: ProviderAccountSettingValue[]
+  importState?: ProviderAccountImportState | null
 }
 
 export interface RuntimeLogEntry {

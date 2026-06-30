@@ -1,10 +1,13 @@
 import {
   PROVIDER_LABELS,
   addSource,
+  detectProviderFromUrl,
   detectTargetFromUrl,
   detectProfileFromUrl,
   downloadTarget,
+  importAccount,
   loadContext,
+  previewAccount,
   syncSource,
 } from './core.js'
 
@@ -19,14 +22,27 @@ const elements = {
   targetButton: document.querySelector('#targetButton'),
   syncButton: document.querySelector('#syncButton'),
   addButton: document.querySelector('#addButton'),
+  importAccountButton: document.querySelector('#importAccountButton'),
+  accountImportPanel: document.querySelector('#accountImportPanel'),
+  accountImportSummary: document.querySelector('#accountImportSummary'),
+  accountImportFields: document.querySelector('#accountImportFields'),
+  accountDestination: document.querySelector('#accountDestination'),
+  newAccountNameField: document.querySelector('#newAccountNameField'),
+  newAccountName: document.querySelector('#newAccountName'),
+  confirmAccountImport: document.querySelector('#confirmAccountImport'),
+  cancelAccountImport: document.querySelector('#cancelAccountImport'),
+  accountImportMessage: document.querySelector('#accountImportMessage'),
   message: document.querySelector('#message'),
 }
 
 const state = {
   tab: null,
   detected: null,
+  provider: null,
   target: null,
   context: null,
+  accountCapture: null,
+  accountPreview: null,
 }
 
 boot()
@@ -36,14 +52,17 @@ async function boot() {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true })
   state.tab = tab
   state.detected = detectProfileFromUrl(tab?.url)
+  state.provider = state.detected?.provider ?? detectProviderFromUrl(tab?.url)
   state.target = detectTargetFromUrl(tab?.url)
 
-  if (!state.detected) {
+  if (!state.provider || (!state.detected && state.provider === 'reddit')) {
     showUnsupported()
     return
   }
 
-  elements.profileSummary.textContent = `${PROVIDER_LABELS[state.detected.provider]} ${state.detected.handle}`
+  elements.profileSummary.textContent = state.detected
+    ? `${PROVIDER_LABELS[state.provider]} ${state.detected.handle}`
+    : `${PROVIDER_LABELS[state.provider]} account import`
 
   try {
     state.context = await loadContext(tab.url)
@@ -63,6 +82,10 @@ function bindEvents() {
   elements.addButton?.addEventListener('click', () => submitAdd())
   elements.syncButton?.addEventListener('click', () => submitSync())
   elements.targetButton?.addEventListener('click', () => submitTargetDownload())
+  elements.importAccountButton?.addEventListener('click', () => startAccountImport())
+  elements.confirmAccountImport?.addEventListener('click', () => submitAccountImport())
+  elements.cancelAccountImport?.addEventListener('click', () => closeAccountImport())
+  elements.accountDestination?.addEventListener('change', () => renderAccountDestination())
 }
 
 function renderContext() {
@@ -75,7 +98,13 @@ function renderContext() {
   elements.profileForm.classList.remove('hidden')
   elements.profileForm.classList.toggle('is-existing', Boolean(existing))
 
-  if (existing) {
+  if (!detected) {
+    setStatus('ready', 'Account')
+    elements.existingBanner.classList.add('hidden')
+    elements.targetButton?.classList.add('hidden')
+    elements.syncButton.classList.add('hidden')
+    elements.addButton.classList.add('hidden')
+  } else if (existing) {
     setStatus('good', target ? 'Story' : 'Added')
     elements.existingBanner.classList.remove('hidden')
     elements.existingMeta.textContent = target
@@ -92,7 +121,106 @@ function renderContext() {
     elements.addButton.classList.remove('hidden')
   }
 
+  elements.importAccountButton?.classList.toggle('hidden', state.provider === 'reddit')
   setMessage('')
+}
+
+async function startAccountImport() {
+  if (!state.tab?.id || !state.provider || state.provider === 'reddit') return
+  setBusy(true)
+  setMessage('Capturing the signed-in browser account…')
+  try {
+    const response = await chrome.runtime.sendMessage({
+      type: 'captureAccount',
+      tabId: state.tab.id,
+      provider: state.provider,
+    })
+    if (!response?.ok) throw new Error(response?.error || 'Account capture failed.')
+    state.accountCapture = response.capture
+    state.accountPreview = await previewAccount(response.capture)
+    renderAccountImportReview()
+    setMessage('')
+  } catch (error) {
+    setMessage(error.message, 'error')
+  } finally {
+    setBusy(false)
+  }
+}
+
+function renderAccountImportReview() {
+  const preview = state.accountPreview
+  if (!preview) return
+  elements.accountImportPanel.classList.remove('hidden')
+  elements.accountImportSummary.textContent =
+    `${PROVIDER_LABELS[preview.provider]} @${preview.username} · ${preview.cookieCount} cookies`
+  elements.accountImportFields.textContent = preview.authorizationFields.length
+    ? `Authorization: ${preview.authorizationFields.join(', ')}`
+    : 'No additional authorization parameters detected.'
+  elements.accountDestination.replaceChildren()
+
+  const createOption = document.createElement('option')
+  createOption.value = '__new__'
+  createOption.textContent = 'Create a new account'
+  elements.accountDestination.append(createOption)
+  for (const candidate of preview.candidates) {
+    const option = document.createElement('option')
+    option.value = candidate.accountId
+    option.textContent = `Update ${candidate.displayName}${candidate.matchKind === 'provider_user_id' ? ' (matched)' : ''}`
+    elements.accountDestination.append(option)
+  }
+  elements.accountDestination.value = preview.suggestedAccountId || '__new__'
+  elements.newAccountName.value = preview.username
+  elements.accountImportMessage.textContent = ''
+  renderAccountDestination()
+}
+
+function renderAccountDestination() {
+  const creating = elements.accountDestination.value === '__new__'
+  elements.newAccountNameField.classList.toggle('hidden', !creating)
+  elements.confirmAccountImport.textContent = creating ? 'Create and import' : 'Update account'
+}
+
+async function submitAccountImport() {
+  if (!state.accountCapture || !state.accountPreview) return
+  const creating = elements.accountDestination.value === '__new__'
+  const createDisplayName = elements.newAccountName.value.trim()
+  if (creating && !createDisplayName) {
+    setAccountImportMessage('Enter a name for the new account.', 'error')
+    return
+  }
+  if (!creating) {
+    const selected = state.accountPreview.candidates
+      .find((candidate) => candidate.accountId === elements.accountDestination.value)
+    if (!globalThis.confirm(`Replace the browser session for "${selected?.displayName ?? 'this account'}"?`)) {
+      return
+    }
+  }
+
+  setBusy(true)
+  setAccountImportMessage('Saving and validating…')
+  try {
+    const result = await importAccount({
+      capture: state.accountCapture,
+      targetAccountId: creating ? null : elements.accountDestination.value,
+      createDisplayName: creating ? createDisplayName : null,
+    })
+    if (result.validationError) {
+      setAccountImportMessage(`Imported, but validation is degraded: ${result.validationError}`, 'error')
+    } else {
+      setAccountImportMessage(result.created ? 'Account created and validated.' : 'Account updated and validated.', 'ok')
+    }
+  } catch (error) {
+    setAccountImportMessage(error.message, 'error')
+  } finally {
+    setBusy(false)
+  }
+}
+
+function closeAccountImport() {
+  state.accountCapture = null
+  state.accountPreview = null
+  elements.accountImportPanel.classList.add('hidden')
+  setAccountImportMessage('')
 }
 
 async function submitAdd() {
@@ -166,7 +294,9 @@ function showUnsupported() {
 
 function showOffline(error) {
   setStatus('bad', 'Offline')
-  elements.profileSummary.textContent = `${PROVIDER_LABELS[state.detected.provider]} ${state.detected.handle}`
+  elements.profileSummary.textContent = state.detected
+    ? `${PROVIDER_LABELS[state.provider]} ${state.detected.handle}`
+    : `${PROVIDER_LABELS[state.provider]} account import`
   elements.unsupportedPanel.classList.add('hidden')
   elements.offlinePanel.classList.remove('hidden')
   elements.profileForm.classList.add('hidden')
@@ -183,11 +313,23 @@ function showPopupError(error) {
 }
 
 function setBusy(isBusy) {
-  for (const button of [elements.addButton, elements.syncButton, elements.targetButton]) {
+  for (const button of [
+    elements.addButton,
+    elements.syncButton,
+    elements.targetButton,
+    elements.importAccountButton,
+    elements.confirmAccountImport,
+    elements.cancelAccountImport,
+  ]) {
     if (button) {
       button.disabled = isBusy
     }
   }
+}
+
+function setAccountImportMessage(text, kind = '') {
+  elements.accountImportMessage.textContent = text
+  elements.accountImportMessage.className = `message ${kind}`.trim()
 }
 
 function setStatus(kind, text) {

@@ -1,8 +1,10 @@
 # NinjaCrawler Companion
 
-Chrome extension package for adding and syncing supported profile tabs with the local NinjaCrawler desktop app.
+Chrome extension package for adding and syncing supported profile tabs and importing the signed-in browser account into the local NinjaCrawler desktop app.
 
-The V1 extension intentionally stays small: it detects the active profile tab, shows whether the profile already exists, sends new `provider + handle` seeds to NinjaCrawler, and queues sync for existing profiles. Provider-specific configuration remains in NinjaCrawler.
+The extension detects the active profile tab, shows whether the profile already exists, sends new `provider + handle` seeds to NinjaCrawler, and queues sync for existing profiles. On Instagram, X/Twitter, and TikTok, **Import account** captures the current browser session only after an explicit click. The operator then chooses whether to update an existing provider account or create a new one.
+
+Captured cookies and provider authorization metadata are sent only to the loopback desktop API and stored in NinjaCrawler's protected session store. Updating an account preserves its paths, defaults, capabilities, and source bindings. NinjaCrawler keeps one previous Companion import that can be restored from the Accounts window.
 
 ## Local Development
 
@@ -23,6 +25,8 @@ http://127.0.0.1:47219/ninjacrawler-companion/v1
 - X / Twitter: `https://x.com/<handle>` or `https://twitter.com/<handle>`
 - TikTok: `https://www.tiktok.com/@<handle>`
 - Reddit: `https://www.reddit.com/user/<handle>` or `/u/<handle>`
+
+Reddit account import is not supported yet; its add and sync actions remain available.
 
 The extension badge shows:
 

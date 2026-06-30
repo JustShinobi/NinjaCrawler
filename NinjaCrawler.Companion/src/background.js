@@ -1,4 +1,5 @@
 import { detectProfileFromUrl, detectTargetFromUrl, loadContext } from './core.js'
+import { captureAccountFromTab } from './accountCapture.js'
 
 chrome.runtime.onInstalled.addListener(() => {
   void safeAction(() => chrome.action.setBadgeBackgroundColor({ color: '#2f855a' }))
@@ -18,6 +19,16 @@ chrome.tabs.onUpdated.addListener((_tabId, changeInfo, tab) => {
   if (changeInfo.status === 'complete' || changeInfo.url) {
     void refreshBadge(tab).catch(() => undefined)
   }
+})
+
+chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  if (message?.type !== 'captureAccount') return undefined
+
+  chrome.tabs.get(message.tabId)
+    .then((tab) => captureAccountFromTab(tab, message.provider))
+    .then((capture) => sendResponse({ ok: true, capture }))
+    .catch((error) => sendResponse({ ok: false, error: error?.message || 'Account capture failed.' }))
+  return true
 })
 
 async function refreshBadge(tab) {

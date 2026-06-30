@@ -115,6 +115,10 @@ const MIGRATIONS: &[(i64, &str)] = &[
         29,
         include_str!("../../migrations/0029_instagram_highlight_media_membership.sql"),
     ),
+    (
+        30,
+        include_str!("../../migrations/0030_companion_account_import.sql"),
+    ),
 ];
 
 pub fn open_connection(path: &Path) -> rusqlite::Result<Connection> {

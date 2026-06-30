@@ -162,6 +162,10 @@ h2 {
   gap: 8px;
 }
 
+.inline-actions {
+  grid-template-columns: 1fr 1fr;
+}
+
 .actions button {
   min-height: 34px;
   border: 1px solid #b9c3d3;

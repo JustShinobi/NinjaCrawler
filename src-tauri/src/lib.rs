@@ -53,6 +53,7 @@ pub fn run() {
             application::commands::import_provider_account_cookies,
             application::commands::clear_provider_account_cookies,
             application::commands::validate_provider_account,
+            application::commands::revert_provider_account_import,
             application::commands::query_runtime_logs,
             application::commands::load_runtime_log_context,
             application::commands::list_import_providers,

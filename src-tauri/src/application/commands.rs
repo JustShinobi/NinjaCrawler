@@ -106,6 +106,17 @@ pub fn validate_provider_account(
 }
 
 #[tauri::command]
+pub fn revert_provider_account_import(
+    app: tauri::AppHandle,
+    account_id: String,
+) -> Result<WorkspaceSnapshot, String> {
+    publish_snapshot(
+        &app,
+        workspace_repository::revert_provider_account_import(account_id)?,
+    )
+}
+
+#[tauri::command]
 pub fn query_runtime_logs(input: RuntimeLogQuery) -> Result<Vec<RuntimeLogEntry>, String> {
     workspace_repository::query_runtime_logs(input)
 }

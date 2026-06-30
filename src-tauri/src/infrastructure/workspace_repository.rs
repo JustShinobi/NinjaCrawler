@@ -17,13 +17,16 @@ use uuid::Uuid;
 
 use crate::domain::models::{
     AccountSyncRun, AppSetting, AppSettingUpsert, BatchSourceProfilePatch, CloneSyncPlanInput,
-    DesktopRuntimeState, ImportMethodDescriptor, ImportPreview, ImportPreviewOptions,
+    CompanionAccountCandidate, CompanionAccountCapture, CompanionAccountImportInput,
+    CompanionAccountImportResult, CompanionAccountPreview, DesktopRuntimeState,
+    ImportMethodDescriptor, ImportPreview, ImportPreviewOptions,
     ImportPreviewProfile, ImportPreviewSummary, ImportProblem, ImportProviderDescriptor,
     ImportRootDescriptor, ImportRunProfileResult, ImportRunRequest, ImportRunResult,
     InstagramExtractImageFromVideoSections, InstagramNamingLedgerBackfillResult,
     InstagramSourceSyncOptions, InstagramSyncOptionsPatch, MediaGalleryFile, MediaGalleryPost,
     MoveSyncPlanInput, ProviderAccount,
     ProviderAccountCookie, ProviderAccountCookieImport, ProviderAccountEditor,
+    ProviderAccountImportState,
     ProviderAccountSession, ProviderAccountSettingValue, ProviderAccountSettingValueKind,
     ProviderAccountUpsert, RunSyncPlanNowInput, RuntimeLogContext, RuntimeLogEntry,
     RuntimeLogQuery, SchedulerGroup, SchedulerGroupUpsert, SchedulerPlanCriteria,
@@ -1240,6 +1243,28 @@ pub fn clear_provider_account_cookies(account_id: String) -> Result<WorkspaceSna
 pub fn validate_provider_account(id: String) -> Result<WorkspaceSnapshot, String> {
     with_workspace(|connection, layout| {
         validate_provider_account_with_connection(connection, layout, id)
+    })
+}
+
+pub fn preview_companion_account(
+    capture: CompanionAccountCapture,
+) -> Result<CompanionAccountPreview, String> {
+    with_workspace(|connection, layout| {
+        preview_companion_account_with_connection(connection, layout, &capture)
+    })
+}
+
+pub fn import_companion_account(
+    input: CompanionAccountImportInput,
+) -> Result<CompanionAccountImportResult, String> {
+    with_workspace(|connection, layout| {
+        import_companion_account_with_connection(connection, layout, input)
+    })
+}
+
+pub fn revert_provider_account_import(account_id: String) -> Result<WorkspaceSnapshot, String> {
+    with_workspace(|connection, layout| {
+        revert_provider_account_import_with_connection(connection, layout, &account_id)
     })
 }
 
@@ -4322,6 +4347,11 @@ fn delete_provider_account_with_connection(
     if let Some(secret_ref) = load_account_session_secret_ref(connection, &id)? {
         session_secret_store::delete_secret(layout, &secret_ref)?;
     }
+    if let Some(secret_ref) = load_account_import_backup_secret_ref(connection, &id)? {
+        if load_account_session_secret_ref(connection, &id)?.as_deref() != Some(secret_ref.as_str()) {
+            session_secret_store::delete_secret(layout, &secret_ref)?;
+        }
+    }
 
     connection
         .execute("DELETE FROM provider_accounts WHERE id = ?1", params![id])
@@ -4334,11 +4364,92 @@ fn load_provider_account_editor_with_connection(
     layout: &StorageLayout,
     account_id: String,
 ) -> Result<ProviderAccountEditor, String> {
+    let account = load_provider_account_by_id(connection, &account_id)?;
+    let session = load_account_session(connection, layout, &account_id)?;
+    let mut settings = load_provider_account_settings(connection, &account_id)?;
+    if let Some(secret_ref) = load_account_session_secret_ref(connection, &account_id)? {
+        if let Ok(secret) = session_secret_store::load_secret(layout, &secret_ref) {
+            if let Ok(parsed) = parse_session_payload(&secret) {
+                merge_protected_authorization_settings(
+                    &mut settings,
+                    &account.provider,
+                    &parsed.metadata,
+                );
+            }
+        }
+    }
     Ok(ProviderAccountEditor {
-        account: load_provider_account_by_id(connection, &account_id)?,
-        session: load_account_session(connection, layout, &account_id)?,
-        settings: load_provider_account_settings(connection, &account_id)?,
+        account,
+        session,
+        settings,
+        import_state: load_provider_account_import_state(connection, &account_id)?,
     })
+}
+
+fn merge_protected_authorization_settings(
+    settings: &mut Vec<ProviderAccountSettingValue>,
+    provider: &str,
+    metadata: &CapturedBrowserMetadata,
+) {
+    let values: Vec<(&str, Option<String>)> = match provider {
+        "instagram" => vec![
+            ("instagram.auth.csrfToken", metadata.csrf_token.clone()),
+            ("instagram.auth.appId", metadata.app_id.clone()),
+            ("instagram.auth.asbdId", metadata.asbd_id.clone()),
+            ("instagram.auth.igWwwClaim", metadata.ig_www_claim.clone()),
+            ("instagram.auth.userAgent", metadata.user_agent.clone()),
+            ("instagram.auth.secChUa", metadata.sec_ch_ua.clone()),
+            ("instagram.auth.secChUaFullVersionList", metadata.sec_ch_ua_full_version_list.clone()),
+            ("instagram.auth.secChUaPlatformVersion", metadata.sec_ch_ua_platform_version.clone()),
+        ],
+        "twitter" => vec![
+            ("twitter.auth.useUserAgent", metadata.user_agent.as_ref().map(|_| "true".to_string())),
+            ("twitter.auth.userAgent", metadata.user_agent.clone()),
+        ],
+        "tiktok" => vec![
+            ("tiktok.auth.useUserAgent", metadata.user_agent.as_ref().map(|_| "true".to_string())),
+            ("tiktok.auth.userAgent", metadata.user_agent.clone()),
+        ],
+        _ => Vec::new(),
+    };
+    for (setting_key, value) in values {
+        let Some(value) = value.filter(|value| !value.trim().is_empty()) else {
+            continue;
+        };
+        settings.retain(|setting| setting.setting_key != setting_key);
+        settings.push(ProviderAccountSettingValue {
+            setting_key: setting_key.to_string(),
+            value_kind: ProviderAccountSettingValueKind::String,
+            string_value: Some(value),
+            json_value: None,
+        });
+    }
+}
+
+fn load_provider_account_import_state(
+    connection: &Connection,
+    account_id: &str,
+) -> Result<Option<ProviderAccountImportState>, String> {
+    connection
+        .query_row(
+            "SELECT account_id, provider_user_id, provider_username, last_imported_at,
+                    backup_secret_ref, backup_imported_at
+             FROM provider_account_import_state
+             WHERE account_id = ?1",
+            params![account_id],
+            |row| {
+                Ok(ProviderAccountImportState {
+                    account_id: row.get(0)?,
+                    provider_user_id: row.get(1)?,
+                    provider_username: row.get(2)?,
+                    last_imported_at: row.get(3)?,
+                    can_revert: row.get::<_, Option<String>>(4)?.is_some(),
+                    backup_imported_at: row.get(5)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(|error| error.to_string())
 }
 
 fn save_provider_account_settings_with_connection(
@@ -4348,9 +4459,12 @@ fn save_provider_account_settings_with_connection(
     values: Vec<ProviderAccountSettingValue>,
 ) -> Result<ProviderAccountEditor, String> {
     ensure_provider_account_exists(connection, &account_id)?;
+    let account = load_provider_account_by_id(connection, &account_id)?;
+    let protect_authorization = load_provider_account_import_state(connection, &account_id)?.is_some();
 
     let mut seen_keys = HashSet::new();
     let mut serialized_values = Vec::new();
+    let mut protected_values = HashMap::new();
     for value in values {
         let setting_key = value.setting_key.trim();
         if setting_key.is_empty() {
@@ -4365,7 +4479,23 @@ fn save_provider_account_settings_with_connection(
         }
 
         let (value_kind, value_text) = serialize_provider_account_setting_value(&value)?;
+        if protect_authorization
+            && is_protected_authorization_setting(&account.provider, setting_key)
+        {
+            protected_values.insert(setting_key.to_string(), value_text);
+            continue;
+        }
         serialized_values.push((setting_key.to_string(), value_kind, value_text));
+    }
+
+    if !protected_values.is_empty() {
+        update_protected_authorization_metadata(
+            connection,
+            layout,
+            &account_id,
+            &account.provider,
+            &protected_values,
+        )?;
     }
 
     connection
@@ -4394,6 +4524,76 @@ fn save_provider_account_settings_with_connection(
     }
 
     load_provider_account_editor_with_connection(connection, layout, account_id)
+}
+
+fn is_protected_authorization_setting(provider: &str, setting_key: &str) -> bool {
+    match provider {
+        "instagram" => matches!(
+            setting_key,
+            "instagram.auth.csrfToken"
+                | "instagram.auth.appId"
+                | "instagram.auth.asbdId"
+                | "instagram.auth.igWwwClaim"
+                | "instagram.auth.userAgent"
+                | "instagram.auth.secChUa"
+                | "instagram.auth.secChUaFullVersionList"
+                | "instagram.auth.secChUaPlatformVersion"
+        ),
+        "twitter" => setting_key == "twitter.auth.userAgent",
+        "tiktok" => setting_key == "tiktok.auth.userAgent",
+        _ => false,
+    }
+}
+
+fn update_protected_authorization_metadata(
+    connection: &Connection,
+    layout: &StorageLayout,
+    account_id: &str,
+    provider: &str,
+    values: &HashMap<String, String>,
+) -> Result<(), String> {
+    let secret_ref = load_account_session_secret_ref(connection, account_id)?
+        .ok_or_else(|| "The account session secret is missing.".to_string())?;
+    let secret_payload = session_secret_store::load_secret(layout, &secret_ref)?;
+    let mut parsed = parse_session_payload(&secret_payload)?;
+    let optional = |key: &str| {
+        values
+            .get(key)
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    };
+    match provider {
+        "instagram" => {
+            parsed.metadata.csrf_token = optional("instagram.auth.csrfToken");
+            parsed.metadata.app_id = optional("instagram.auth.appId");
+            parsed.metadata.asbd_id = optional("instagram.auth.asbdId");
+            parsed.metadata.ig_www_claim = optional("instagram.auth.igWwwClaim");
+            parsed.metadata.user_agent = optional("instagram.auth.userAgent");
+            parsed.metadata.sec_ch_ua = optional("instagram.auth.secChUa");
+            parsed.metadata.sec_ch_ua_full_version_list =
+                optional("instagram.auth.secChUaFullVersionList");
+            parsed.metadata.sec_ch_ua_platform_version =
+                optional("instagram.auth.secChUaPlatformVersion");
+        }
+        "twitter" => parsed.metadata.user_agent = optional("twitter.auth.userAgent"),
+        "tiktok" => parsed.metadata.user_agent = optional("tiktok.auth.userAgent"),
+        _ => {}
+    }
+    let updated_payload = serialize_session_payload_for_storage(
+        &parsed.cookies,
+        parsed.current_url.as_deref(),
+        Some(&parsed.metadata),
+    )?;
+    session_secret_store::store_secret(layout, &secret_ref, &updated_payload)?;
+    connection
+        .execute(
+            "UPDATE provider_account_sessions
+             SET fingerprint = ?2, updated_at = ?3
+             WHERE account_id = ?1",
+            params![account_id, session_fingerprint(&updated_payload), now_timestamp()],
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(())
 }
 
 fn clone_provider_account_with_connection(
@@ -6261,7 +6461,8 @@ fn execute_twitter_source_sync_with_connection(
         .cache_root
         .join(format!("twitter-sync-{}", context.source.id));
 
-    let cookies = parse_session_cookies(&context.session_payload)?;
+    let parsed_session = parse_session_payload(&context.session_payload)?;
+    let cookies = parsed_session.cookies;
     let cookie_file = cache_root.join("cookies.txt");
     fs::create_dir_all(&cache_root).map_err(|error| error.to_string())?;
     write_netscape_cookie_file(&cookie_file, &cookies)?;
@@ -6274,6 +6475,7 @@ fn execute_twitter_source_sync_with_connection(
             .get("twitter.auth.userAgent")
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty())
+            .or_else(|| parsed_session.metadata.user_agent.clone())
     } else {
         None
     };
@@ -6694,7 +6896,8 @@ fn execute_tiktok_source_sync_with_connection(
         .join(format!("tiktok-sync-{}", context.source.id));
     fs::create_dir_all(&cache_root).map_err(|error| error.to_string())?;
 
-    let cookies = parse_session_cookies(&context.session_payload)?;
+    let parsed_session = parse_session_payload(&context.session_payload)?;
+    let cookies = parsed_session.cookies;
     let cookie_file = cache_root.join("cookies.txt");
     write_netscape_cookie_file(&cookie_file, &cookies)?;
     let use_user_agent = settings
@@ -6706,6 +6909,7 @@ fn execute_tiktok_source_sync_with_connection(
             .get("tiktok.auth.userAgent")
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty())
+            .or_else(|| parsed_session.metadata.user_agent.clone())
     } else {
         None
     };
@@ -7255,6 +7459,7 @@ struct AccountSyncContext {
     session_payload: String,
 }
 
+#[derive(Clone)]
 struct ProviderAccountSessionRecord {
     account_id: String,
     auth_mode: String,
@@ -10770,6 +10975,444 @@ fn upsert_app_setting_value(connection: &Connection, key: &str, value: &str) -> 
     Ok(())
 }
 
+#[derive(Default)]
+struct CompanionImportRecord {
+    provider_user_id: Option<String>,
+    provider_username: Option<String>,
+    backup_secret_ref: Option<String>,
+    backup_provider_user_id: Option<String>,
+    backup_provider_username: Option<String>,
+    backup_imported_at: Option<String>,
+}
+
+fn normalize_companion_provider(provider: &str) -> Result<String, String> {
+    let provider = provider.trim().to_ascii_lowercase();
+    match provider.as_str() {
+        "instagram" | "twitter" | "tiktok" => Ok(provider),
+        "reddit" => Err("Reddit account import is not supported yet.".to_string()),
+        _ => Err("This provider does not support Companion account import.".to_string()),
+    }
+}
+
+fn companion_username(value: &str) -> String {
+    value.trim().trim_start_matches('@').to_ascii_lowercase()
+}
+
+fn load_companion_import_record(
+    connection: &Connection,
+    account_id: &str,
+) -> Result<Option<CompanionImportRecord>, String> {
+    connection
+        .query_row(
+            "SELECT provider_user_id, provider_username, backup_secret_ref, backup_provider_user_id,
+                    backup_provider_username, backup_imported_at
+             FROM provider_account_import_state WHERE account_id = ?1",
+            params![account_id],
+            |row| Ok(CompanionImportRecord {
+                provider_user_id: row.get(0)?,
+                provider_username: row.get(1)?,
+                backup_secret_ref: row.get(2)?,
+                backup_provider_user_id: row.get(3)?,
+                backup_provider_username: row.get(4)?,
+                backup_imported_at: row.get(5)?,
+            }),
+        )
+        .optional()
+        .map_err(|error| error.to_string())
+}
+
+fn validate_companion_capture(
+    provider: &str,
+    capture: &CompanionAccountCapture,
+) -> Result<Vec<String>, String> {
+    if capture.cookies.is_empty() || capture.cookies.len() > 300 {
+        return Err("The captured cookie count is outside the supported range.".to_string());
+    }
+    validate_captured_cookies(&convert_provider_cookies_to_captured_cookies(
+        capture.cookies.clone(),
+    ))?;
+    let allowed_domains: &[&str] = match provider {
+        "instagram" => &["instagram.com"],
+        "twitter" => &["x.com", "twitter.com"],
+        "tiktok" => &["tiktok.com"],
+        _ => &[],
+    };
+    let cookie_names = capture.cookies.iter()
+        .filter(|cookie| !cookie.value.trim().is_empty())
+        .map(|cookie| cookie.name.to_ascii_lowercase())
+        .collect::<HashSet<_>>();
+    for cookie in &capture.cookies {
+        if cookie.value.len() > 16 * 1024
+            || !allowed_domains.iter().any(|domain| domain_matches_allowed(&cookie.domain, domain))
+        {
+            return Err("The capture contains an invalid provider cookie.".to_string());
+        }
+    }
+    let allowed_auth = [
+        "csrfToken", "appId", "asbdId", "igWwwClaim", "userAgent", "secChUa",
+        "secChUaFullVersionList", "secChUaPlatformVersion", "lsd", "dtsg",
+    ];
+    for (key, value) in &capture.authorization {
+        if !allowed_auth.contains(&key.as_str()) || value.len() > 16 * 1024 {
+            return Err(format!("Authorization field '{key}' is not supported."));
+        }
+    }
+    let mut missing = Vec::new();
+    if companion_username(&capture.identity.username).is_empty() {
+        missing.push("identity.username".to_string());
+    }
+    let required: &[&[&str]] = match provider {
+        "instagram" => &[&["sessionid"], &["csrftoken"]],
+        "twitter" => &[&["auth_token"], &["ct0"]],
+        "tiktok" => &[&["sessionid", "sessionid_ss"]],
+        _ => &[],
+    };
+    for group in required {
+        if !group.iter().any(|name| cookie_names.contains(*name)) {
+            missing.push(format!("cookie:{}", group.join("|")));
+        }
+    }
+    Ok(missing)
+}
+
+fn companion_metadata(
+    provider: &str,
+    capture: &CompanionAccountCapture,
+) -> CapturedBrowserMetadata {
+    let value = |key: &str| capture.authorization.get(key)
+        .map(|value| value.trim().to_string()).filter(|value| !value.is_empty());
+    let cookie = |name: &str| capture.cookies.iter()
+        .find(|cookie| cookie.name.eq_ignore_ascii_case(name))
+        .map(|cookie| cookie.value.trim().to_string()).filter(|value| !value.is_empty());
+    CapturedBrowserMetadata {
+        csrf_token: (provider == "instagram").then(|| value("csrfToken").or_else(|| cookie("csrftoken"))).flatten(),
+        app_id: (provider == "instagram").then(|| value("appId")).flatten(),
+        asbd_id: (provider == "instagram").then(|| value("asbdId")).flatten(),
+        ig_www_claim: (provider == "instagram").then(|| value("igWwwClaim")).flatten(),
+        user_agent: value("userAgent"),
+        sec_ch_ua: value("secChUa"),
+        sec_ch_ua_full_version_list: value("secChUaFullVersionList"),
+        sec_ch_ua_platform_version: value("secChUaPlatformVersion"),
+        lsd: (provider == "instagram").then(|| value("lsd")).flatten(),
+        dtsg: (provider == "instagram").then(|| value("dtsg")).flatten(),
+    }
+}
+
+fn preview_companion_account_with_connection(
+    connection: &Connection,
+    layout: &StorageLayout,
+    capture: &CompanionAccountCapture,
+) -> Result<CompanionAccountPreview, String> {
+    let provider = normalize_companion_provider(&capture.provider)?;
+    let missing_required_fields = validate_companion_capture(&provider, capture)?;
+    let username = companion_username(&capture.identity.username);
+    let captured_id = capture.identity.provider_user_id.as_deref()
+        .map(str::trim).filter(|value| !value.is_empty());
+    let mut candidates = Vec::new();
+    for account in load_accounts(connection)?.into_iter()
+        .filter(|account| account.provider.eq_ignore_ascii_case(&provider))
+    {
+        let state = load_companion_import_record(connection, &account.id)?;
+        let match_kind = state.as_ref().and_then(|state| {
+            if captured_id.is_some() && captured_id == state.provider_user_id.as_deref() {
+                Some("provider_user_id".to_string())
+            } else if !username.is_empty()
+                && state.provider_username.as_deref().map(companion_username).as_deref()
+                    == Some(username.as_str())
+            {
+                Some("username".to_string())
+            } else {
+                None
+            }
+        });
+        let has_session = load_account_session_record(connection, &account.id)?
+            .and_then(|session| session_secret_store::has_secret(layout, &session.secret_ref).ok())
+            .unwrap_or(false);
+        candidates.push(CompanionAccountCandidate {
+            account_id: account.id,
+            display_name: account.display_name,
+            match_kind,
+            has_session,
+        });
+    }
+    candidates.sort_by(|left, right| right.match_kind.is_some()
+        .cmp(&left.match_kind.is_some()).then_with(|| left.display_name.cmp(&right.display_name)));
+    let suggested_account_id = candidates.iter()
+        .find(|candidate| candidate.match_kind.as_deref() == Some("provider_user_id"))
+        .map(|candidate| candidate.account_id.clone());
+    let metadata = companion_metadata(&provider, capture);
+    let authorization_fields = [
+        ("csrfToken", metadata.csrf_token.as_ref()), ("appId", metadata.app_id.as_ref()),
+        ("asbdId", metadata.asbd_id.as_ref()), ("igWwwClaim", metadata.ig_www_claim.as_ref()),
+        ("userAgent", metadata.user_agent.as_ref()), ("secChUa", metadata.sec_ch_ua.as_ref()),
+        ("secChUaFullVersionList", metadata.sec_ch_ua_full_version_list.as_ref()),
+        ("secChUaPlatformVersion", metadata.sec_ch_ua_platform_version.as_ref()),
+        ("lsd", metadata.lsd.as_ref()), ("dtsg", metadata.dtsg.as_ref()),
+    ].into_iter().filter_map(|(key, value)| value.map(|_| key.to_string())).collect();
+    Ok(CompanionAccountPreview {
+        provider, username, cookie_count: capture.cookies.len(), authorization_fields,
+        missing_required_fields, candidates, suggested_account_id,
+    })
+}
+
+fn write_provider_account_session_record(
+    connection: &Connection,
+    account_id: &str,
+    secret_ref: &str,
+    payload: &str,
+    imported_at: &str,
+) -> Result<(), String> {
+    connection.execute(
+        "INSERT INTO provider_account_sessions (
+            account_id, auth_mode, session_format, session_hint, fingerprint, secret_ref,
+            expires_at, imported_at, last_validated_at, last_validation_error, created_at, updated_at
+         ) VALUES (?1, 'imported_session', 'cookie_json', '', ?2, ?3, NULL, ?4, NULL, NULL, ?4, ?4)
+         ON CONFLICT(account_id) DO UPDATE SET
+            auth_mode = excluded.auth_mode, session_format = excluded.session_format,
+            session_hint = '', fingerprint = excluded.fingerprint, secret_ref = excluded.secret_ref,
+            expires_at = NULL, imported_at = excluded.imported_at, last_validated_at = NULL,
+            last_validation_error = NULL, updated_at = excluded.updated_at",
+        params![account_id, session_fingerprint(payload), secret_ref, imported_at],
+    ).map_err(|error| error.to_string())?;
+    connection.execute(
+        "UPDATE provider_accounts SET auth_mode = 'imported_session', updated_at = ?2 WHERE id = ?1",
+        params![account_id, imported_at],
+    ).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+fn clear_plaintext_companion_authorization(
+    connection: &Connection,
+    account_id: &str,
+    provider: &str,
+) -> Result<(), String> {
+    connection.execute(
+        "DELETE FROM provider_account_settings WHERE account_id = ?1 AND setting_key LIKE ?2",
+        params![account_id, format!("{provider}.auth.%")],
+    ).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+fn import_companion_account_with_connection(
+    connection: &Connection,
+    layout: &StorageLayout,
+    input: CompanionAccountImportInput,
+) -> Result<CompanionAccountImportResult, String> {
+    let preview = preview_companion_account_with_connection(connection, layout, &input.capture)?;
+    if !preview.missing_required_fields.is_empty() {
+        return Err(format!("The browser session is incomplete: {}.",
+            preview.missing_required_fields.join(", ")));
+    }
+    let provider = preview.provider;
+    let username = preview.username;
+    let (account_id, created) = match input.target_account_id.as_deref()
+        .map(str::trim).filter(|value| !value.is_empty())
+    {
+        Some(id) => {
+            let account = load_provider_account_by_id(connection, id)?;
+            if !account.provider.eq_ignore_ascii_case(&provider) {
+                return Err("The selected account belongs to another provider.".to_string());
+            }
+            (id.to_string(), false)
+        }
+        None => (new_id(), true),
+    };
+    let old_session = load_account_session_record(connection, &account_id)?;
+    let old_state = load_companion_import_record(connection, &account_id)?;
+    let metadata = companion_metadata(&provider, &input.capture);
+    let payload = serialize_session_payload_for_storage(
+        &convert_provider_cookies_to_captured_cookies(input.capture.cookies.clone()),
+        Some(input.capture.current_url.trim()),
+        Some(&metadata),
+    )?;
+    let new_ref = format!("companion-{}-{}", account_id, Uuid::new_v4());
+    session_secret_store::store_secret(layout, &new_ref, &payload)?;
+    let imported_at = now_timestamp();
+    connection.execute_batch("BEGIN IMMEDIATE TRANSACTION").map_err(|error| error.to_string())?;
+    let persisted = (|| {
+        if created {
+            let descriptor = providers::provider_runtime(&provider)
+                .ok_or_else(|| "Provider runtime is unavailable.".to_string())?.descriptor();
+            upsert_provider_account_with_connection(connection, layout, ProviderAccountUpsert {
+                id: Some(account_id.clone()), provider: provider.clone(),
+                display_name: input.create_display_name.as_deref().map(str::trim)
+                    .filter(|value| !value.is_empty()).unwrap_or(&username).to_string(),
+                auth_mode: "imported_session".to_string(), auth_state: "ready".to_string(),
+                capabilities: descriptor.default_capabilities, last_validated_at: None,
+            })?;
+        }
+        write_provider_account_session_record(connection, &account_id, &new_ref, &payload, &imported_at)?;
+        clear_plaintext_companion_authorization(connection, &account_id, &provider)?;
+        connection.execute(
+            "INSERT INTO provider_account_import_state (
+                account_id, provider_user_id, provider_username, last_imported_at,
+                backup_secret_ref, backup_provider_user_id, backup_provider_username, backup_imported_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             ON CONFLICT(account_id) DO UPDATE SET provider_user_id=excluded.provider_user_id,
+                provider_username=excluded.provider_username, last_imported_at=excluded.last_imported_at,
+                backup_secret_ref=excluded.backup_secret_ref,
+                backup_provider_user_id=excluded.backup_provider_user_id,
+                backup_provider_username=excluded.backup_provider_username,
+                backup_imported_at=excluded.backup_imported_at",
+            params![
+                account_id,
+                input.capture.identity.provider_user_id.as_deref().map(str::trim).filter(|v| !v.is_empty()),
+                username, imported_at,
+                old_session.as_ref().map(|session| session.secret_ref.clone()),
+                old_state.as_ref().and_then(|state| state.provider_user_id.clone()),
+                old_state.as_ref().and_then(|state| state.provider_username.clone()),
+                old_session.as_ref().map(|session| session.imported_at.clone()),
+            ],
+        ).map_err(|error| error.to_string())?;
+        Ok::<(), String>(())
+    })();
+    if let Err(error) = persisted {
+        let _ = connection.execute_batch("ROLLBACK");
+        let _ = session_secret_store::delete_secret(layout, &new_ref);
+        return Err(error);
+    }
+    if let Err(error) = connection.execute_batch("COMMIT") {
+        let _ = session_secret_store::delete_secret(layout, &new_ref);
+        return Err(error.to_string());
+    }
+    if let Some(previous_backup) = old_state.and_then(|state| state.backup_secret_ref) {
+        if old_session.as_ref().map(|session| session.secret_ref.as_str()) != Some(previous_backup.as_str()) {
+            let _ = session_secret_store::delete_secret(layout, &previous_backup);
+        }
+    }
+    let snapshot = validate_provider_account_with_connection(connection, layout, account_id.clone())?;
+    let account = snapshot.accounts.iter().find(|account| account.id == account_id)
+        .ok_or_else(|| "Imported account disappeared after validation.".to_string())?;
+    let validation_error = snapshot.account_sessions.iter()
+        .find(|session| session.account_id == account_id)
+        .and_then(|session| session.last_validation_error.clone());
+    Ok(CompanionAccountImportResult {
+        account_id, created, auth_state: account.auth_state.clone(),
+        validation_error, can_revert: old_session.is_some(),
+    })
+}
+
+fn revert_provider_account_import_with_connection(
+    connection: &Connection,
+    layout: &StorageLayout,
+    account_id: &str,
+) -> Result<WorkspaceSnapshot, String> {
+    let account = load_provider_account_by_id(connection, account_id)?;
+    let current = load_account_session_record(connection, account_id)?
+        .ok_or_else(|| "The account does not have a current session.".to_string())?;
+    let state = load_companion_import_record(connection, account_id)?
+        .ok_or_else(|| "The account does not have a Companion import backup.".to_string())?;
+    let backup_ref = state.backup_secret_ref.clone()
+        .ok_or_else(|| "The account does not have a previous import to restore.".to_string())?;
+    let backup_payload = session_secret_store::load_secret(layout, &backup_ref)?;
+    let restored_at = state.backup_imported_at.clone().unwrap_or_else(now_timestamp);
+    connection.execute_batch("BEGIN IMMEDIATE TRANSACTION").map_err(|error| error.to_string())?;
+    let reverted = (|| {
+        write_provider_account_session_record(connection, account_id, &backup_ref, &backup_payload, &restored_at)?;
+        clear_plaintext_companion_authorization(connection, account_id, &account.provider)?;
+        connection.execute(
+            "UPDATE provider_account_import_state SET provider_user_id=?2, provider_username=?3,
+                last_imported_at=?4, backup_secret_ref=?5, backup_provider_user_id=?6,
+                backup_provider_username=?7, backup_imported_at=?8 WHERE account_id=?1",
+            params![account_id, state.backup_provider_user_id, state.backup_provider_username,
+                restored_at, current.secret_ref, state.provider_user_id,
+                state.provider_username, current.imported_at],
+        ).map_err(|error| error.to_string())?;
+        Ok::<(), String>(())
+    })();
+    if let Err(error) = reverted {
+        let _ = connection.execute_batch("ROLLBACK");
+        return Err(error);
+    }
+    connection.execute_batch("COMMIT").map_err(|error| error.to_string())?;
+    validate_provider_account_with_connection(connection, layout, account_id.to_string())
+}
+
+#[cfg(test)]
+mod companion_account_import_tests {
+    use super::*;
+
+    fn cookie(name: &str, value: &str) -> ProviderAccountCookie {
+        ProviderAccountCookie {
+            domain: ".x.com".to_string(), name: name.to_string(), value: value.to_string(),
+            path: "/".to_string(), expires_at: None, secure: true, http_only: true,
+        }
+    }
+
+    fn capture(token: &str) -> CompanionAccountCapture {
+        CompanionAccountCapture {
+            provider: "twitter".to_string(),
+            current_url: "https://x.com/home".to_string(),
+            identity: crate::domain::models::CompanionAccountIdentity {
+                provider_user_id: Some("42".to_string()), username: "ninja".to_string(),
+            },
+            cookies: vec![cookie("auth_token", token), cookie("ct0", &format!("csrf-{token}"))],
+            authorization: HashMap::from([("userAgent".to_string(), "Mozilla/5.0 Test".to_string())]),
+        }
+    }
+
+    #[test]
+    fn import_and_revert_swap_the_protected_session() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let layout = storage::workspace_layout_from_roots(
+            temp.path().join("localappdata"), temp.path().join("userprofile"),
+        ).expect("layout");
+        with_workspace_layout(layout, |connection, test_layout| {
+            upsert_provider_account_with_connection(connection, test_layout, ProviderAccountUpsert {
+                id: Some("account-1".to_string()), provider: "twitter".to_string(),
+                display_name: "Existing".to_string(), auth_mode: "imported_session".to_string(),
+                auth_state: "ready".to_string(), capabilities: vec!["posts".to_string()],
+                last_validated_at: None,
+            })?;
+            save_provider_account_cookies_with_connection(
+                connection, test_layout, "account-1",
+                vec![cookie("auth_token", "old"), cookie("ct0", "old-csrf")],
+            )?;
+            let result = import_companion_account_with_connection(
+                connection, test_layout, CompanionAccountImportInput {
+                    capture: capture("new"), target_account_id: Some("account-1".to_string()),
+                    create_display_name: None,
+                },
+            )?;
+            assert!(result.can_revert);
+            assert!(load_provider_account_cookies_with_connection(connection, test_layout, "account-1")?
+                .iter().any(|item| item.name == "auth_token" && item.value == "new"));
+            let plaintext = connection.query_row(
+                "SELECT COUNT(*) FROM provider_account_settings
+                 WHERE account_id='account-1' AND setting_key='twitter.auth.userAgent'",
+                [], |row| row.get::<_, i64>(0),
+            ).map_err(|error| error.to_string())?;
+            assert_eq!(plaintext, 0);
+            revert_provider_account_import_with_connection(connection, test_layout, "account-1")?;
+            assert!(load_provider_account_cookies_with_connection(connection, test_layout, "account-1")?
+                .iter().any(|item| item.name == "auth_token" && item.value == "old"));
+            Ok(())
+        }).expect("import and revert");
+    }
+
+    #[test]
+    fn preview_is_redacted_and_reddit_is_rejected() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let layout = storage::workspace_layout_from_roots(
+            temp.path().join("localappdata"), temp.path().join("userprofile"),
+        ).expect("layout");
+        with_workspace_layout(layout, |connection, test_layout| {
+            let preview = preview_companion_account_with_connection(
+                connection, test_layout, &capture("super-secret"),
+            )?;
+            assert_eq!(preview.cookie_count, 2);
+            assert!(!serde_json::to_string(&preview).map_err(|error| error.to_string())?
+                .contains("super-secret"));
+            let mut reddit = capture("token");
+            reddit.provider = "reddit".to_string();
+            assert!(preview_companion_account_with_connection(
+                connection, test_layout, &reddit,
+            ).is_err());
+            Ok(())
+        }).expect("preview");
+    }
+}
+
 fn load_provider_account_cookies_with_connection(
     connection: &Connection,
     layout: &StorageLayout,
@@ -10855,10 +11498,19 @@ fn clear_provider_account_cookies_with_connection(
     if let Some(secret_ref) = load_account_session_secret_ref(connection, account_id)? {
         let _ = session_secret_store::delete_secret(layout, &secret_ref);
     }
+    if let Some(secret_ref) = load_account_import_backup_secret_ref(connection, account_id)? {
+        let _ = session_secret_store::delete_secret(layout, &secret_ref);
+    }
 
     connection
         .execute(
             "DELETE FROM provider_account_sessions WHERE account_id = ?1",
+            params![account_id],
+        )
+        .map_err(|error| error.to_string())?;
+    connection
+        .execute(
+            "DELETE FROM provider_account_import_state WHERE account_id = ?1",
             params![account_id],
         )
         .map_err(|error| error.to_string())?;
@@ -11330,6 +11982,21 @@ fn load_account_session_secret_ref(
             |row| row.get::<_, String>(0),
         )
         .optional()
+        .map_err(|error| error.to_string())
+}
+
+fn load_account_import_backup_secret_ref(
+    connection: &Connection,
+    account_id: &str,
+) -> Result<Option<String>, String> {
+    connection
+        .query_row(
+            "SELECT backup_secret_ref FROM provider_account_import_state WHERE account_id = ?1",
+            params![account_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map(|value| value.flatten())
         .map_err(|error| error.to_string())
 }
 
@@ -14222,60 +14889,22 @@ fn persist_provider_account_session_payload(
     account_id: &str,
     secret_payload: &str,
 ) -> Result<(), String> {
-    let secret_ref = account_id.to_string();
+    let previous_secret_ref = load_account_session_secret_ref(connection, account_id)?;
+    let backup_secret_ref = load_account_import_backup_secret_ref(connection, account_id)?;
+    let secret_ref = format!("session-{}-{}", account_id, Uuid::new_v4());
     let imported_at = now_timestamp();
-    let fingerprint = session_fingerprint(secret_payload);
-
     session_secret_store::store_secret(layout, &secret_ref, secret_payload)?;
-
-    connection
-        .execute(
-            "INSERT INTO provider_account_sessions (
-                account_id,
-                auth_mode,
-                session_format,
-                session_hint,
-                fingerprint,
-                secret_ref,
-                expires_at,
-                imported_at,
-                last_validated_at,
-                last_validation_error,
-                created_at,
-                updated_at
-             )
-             VALUES (?1, ?2, ?3, '', ?4, ?5, NULL, ?6, NULL, NULL, ?6, ?6)
-             ON CONFLICT(account_id) DO UPDATE SET
-               auth_mode = excluded.auth_mode,
-               session_format = excluded.session_format,
-               session_hint = excluded.session_hint,
-               fingerprint = excluded.fingerprint,
-               secret_ref = excluded.secret_ref,
-               expires_at = excluded.expires_at,
-               imported_at = excluded.imported_at,
-               last_validated_at = NULL,
-               last_validation_error = NULL,
-               updated_at = excluded.updated_at",
-            params![
-                account_id,
-                "imported_session",
-                "cookie_json",
-                fingerprint,
-                secret_ref,
-                imported_at
-            ],
-        )
-        .map_err(|error| error.to_string())?;
-
-    connection
-        .execute(
-            "UPDATE provider_accounts
-             SET auth_mode = ?2, updated_at = ?3
-             WHERE id = ?1",
-            params![account_id, "imported_session", imported_at],
-        )
-        .map_err(|error| error.to_string())?;
-
+    if let Err(error) = write_provider_account_session_record(
+        connection, account_id, &secret_ref, secret_payload, &imported_at,
+    ) {
+        let _ = session_secret_store::delete_secret(layout, &secret_ref);
+        return Err(error);
+    }
+    if let Some(previous) = previous_secret_ref {
+        if Some(previous.as_str()) != backup_secret_ref.as_deref() {
+            let _ = session_secret_store::delete_secret(layout, &previous);
+        }
+    }
     Ok(())
 }
 
