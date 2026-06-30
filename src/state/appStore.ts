@@ -34,6 +34,7 @@ import {
   skipSyncPlan as skipSyncPlanCommand,
   upsertAppSetting as upsertAppSettingCommand,
   validateProviderAccount as validateProviderAccountCommand,
+  revertProviderAccountImport as revertProviderAccountImportCommand,
   upsertProviderAccount as upsertProviderAccountCommand,
   upsertSchedulerGroup as upsertSchedulerGroupCommand,
   upsertSchedulerSet as upsertSchedulerSetCommand,
@@ -119,6 +120,7 @@ interface AppStore {
   setConnectorCustomOverride: (key: string, customPath: string) => Promise<WorkspaceSnapshot>
   clearConnectorCustomOverride: (key: string) => Promise<WorkspaceSnapshot>
   validateProviderAccount: (id: string) => Promise<WorkspaceSnapshot>
+  revertProviderAccountImport: (accountId: string) => Promise<WorkspaceSnapshot>
   upsertSourceProfile: (draft: SourceProfileUpsert) => Promise<WorkspaceSnapshot>
   deleteSourceProfile: (id: string, mode: SourceProfileDeleteMode) => Promise<WorkspaceSnapshot>
   cancelSourceSyncProfile: (sourceId: string) => Promise<WorkspaceSnapshot>
@@ -303,6 +305,8 @@ export const useAppStore = create<AppStore>((set) => {
       runConnectorMutation('clear_connector_custom_override', () => clearConnectorCustomOverrideCommand(key)),
     validateProviderAccount: (id) =>
       runSnapshotMutation('validate_provider_account', () => validateProviderAccountCommand(id)),
+    revertProviderAccountImport: (accountId) =>
+      runSnapshotMutation('revert_provider_account_import', () => revertProviderAccountImportCommand(accountId)),
     upsertSourceProfile: (draft) =>
       runSnapshotMutation('upsert_source_profile', () => upsertSourceProfileCommand(draft)),
     deleteSourceProfile: (id, mode) =>

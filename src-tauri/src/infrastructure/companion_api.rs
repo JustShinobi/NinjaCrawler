@@ -1,6 +1,7 @@
 use crate::domain::models::{
-    InstagramSourceSyncOptions, RunSourceSyncInput, SourceEditorSeedIntent,
-    SourceEditorWindowIntent, SourceProfile, SourceSyncOptions,
+    CompanionAccountCapture, CompanionAccountImportInput, InstagramSourceSyncOptions,
+    RunSourceSyncInput, SourceEditorSeedIntent, SourceEditorWindowIntent, SourceProfile,
+    SourceSyncOptions,
 };
 use crate::infrastructure::{desktop_runtime, source_sync_runtime, workspace_repository};
 use serde::{Deserialize, Serialize};
@@ -71,6 +72,7 @@ struct HttpRequest {
     method: String,
     path: String,
     query: HashMap<String, String>,
+    headers: HashMap<String, String>,
     body: Vec<u8>,
 }
 
@@ -155,8 +157,10 @@ fn read_request(stream: &mut TcpStream) -> Result<HttpRequest, String> {
     let target = target.to_string();
 
     let mut content_length = 0_usize;
+    let mut headers = HashMap::new();
     for line in lines {
         if let Some((name, value)) = line.split_once(':') {
+            headers.insert(name.trim().to_ascii_lowercase(), value.trim().to_string());
             if name.eq_ignore_ascii_case("content-length") {
                 content_length = value
                     .trim()
@@ -188,6 +192,7 @@ fn read_request(stream: &mut TcpStream) -> Result<HttpRequest, String> {
         method,
         path,
         query,
+        headers,
         body,
     })
 }
@@ -252,8 +257,54 @@ fn route_request(app: AppHandle, request: HttpRequest) -> Vec<u8> {
                 Err(error) => error_response(400, &error),
             }
         }
+        ("POST", path) if path == format!("{API_PREFIX}/account/preview") => {
+            match ensure_sensitive_companion_request(&request)
+                .and_then(|_| parse_json::<CompanionAccountCapture>(&request.body))
+                .and_then(workspace_repository::preview_companion_account)
+            {
+                Ok(payload) => json_response(200, &payload),
+                Err(error) => error_response(400, &error),
+            }
+        }
+        ("POST", path) if path == format!("{API_PREFIX}/account/import") => {
+            match ensure_sensitive_companion_request(&request)
+                .and_then(|_| parse_json::<CompanionAccountImportInput>(&request.body))
+                .and_then(|input| {
+                    let result = workspace_repository::import_companion_account(input)?;
+                    let snapshot = workspace_repository::bootstrap_workspace()?;
+                    desktop_runtime::publish_workspace_runtime(&app, &snapshot)?;
+                    Ok(result)
+                }) {
+                Ok(payload) => json_response(200, &payload),
+                Err(error) => error_response(400, &error),
+            }
+        }
         _ => error_response(404, "Unknown NinjaCrawler Companion API endpoint."),
     }
+}
+
+fn ensure_sensitive_companion_request(request: &HttpRequest) -> Result<(), String> {
+    if request.body.len() > 128 * 1024 {
+        return Err("Sensitive Companion request is too large.".to_string());
+    }
+    let origin = request
+        .headers
+        .get("origin")
+        .map(String::as_str)
+        .unwrap_or_default();
+    if !origin.starts_with("chrome-extension://") {
+        return Err("Sensitive Companion requests require a Chrome extension origin.".to_string());
+    }
+    let content_type = request
+        .headers
+        .get("content-type")
+        .map(String::as_str)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if !content_type.starts_with("application/json") {
+        return Err("Sensitive Companion requests require application/json.".to_string());
+    }
+    Ok(())
 }
 
 fn build_context(url: Option<&str>) -> Result<CompanionContext, String> {
@@ -731,5 +782,31 @@ mod tests {
         for url in cases {
             assert!(detect_target_from_url(url).is_none(), "{url}");
         }
+    }
+
+    #[test]
+    fn sensitive_account_routes_require_extension_json_requests() {
+        let mut request = HttpRequest {
+            method: "POST".to_string(),
+            path: format!("{API_PREFIX}/account/preview"),
+            query: HashMap::new(),
+            headers: HashMap::from([
+                ("origin".to_string(), "https://example.com".to_string()),
+                ("content-type".to_string(), "application/json".to_string()),
+            ]),
+            body: b"{}".to_vec(),
+        };
+        assert!(ensure_sensitive_companion_request(&request).is_err());
+
+        request.headers.insert(
+            "origin".to_string(),
+            "chrome-extension://abcdefghijklmnop".to_string(),
+        );
+        assert!(ensure_sensitive_companion_request(&request).is_ok());
+
+        request
+            .headers
+            .insert("content-type".to_string(), "text/plain".to_string());
+        assert!(ensure_sensitive_companion_request(&request).is_err());
     }
 }

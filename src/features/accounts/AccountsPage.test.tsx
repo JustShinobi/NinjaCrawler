@@ -96,6 +96,7 @@ function renderPage(
     ),
     upsertAppSetting: vi.fn(),
     validateProviderAccount: vi.fn<(id: string) => Promise<WorkspaceSnapshot>>(),
+    revertProviderAccountImport: vi.fn<(accountId: string) => Promise<WorkspaceSnapshot>>(),
     ...storeOverrides,
   }
 
@@ -489,5 +490,44 @@ describe('AccountsPage', () => {
     expect(await screen.findByRole('button', { name: /^validate account$/i })).toBeTruthy()
     expect(screen.queryByRole('button', { name: /^run saved posts$/i })).toBeNull()
     expect(screen.queryByRole('tab', { name: /^history$/i })).toBeNull()
+  })
+
+  it('offers the single Companion backup and reverts it after confirmation', async () => {
+    const account = createAccount()
+    const editor: ProviderAccountEditor = {
+      ...createEditor(account),
+      importState: {
+        accountId: account.id,
+        providerUserId: '42',
+        providerUsername: 'ninja',
+        lastImportedAt: '2026-06-30T10:00:00Z',
+        canRevert: true,
+        backupImportedAt: '2026-06-29T10:00:00Z',
+      },
+    }
+    const revertedSnapshot: WorkspaceSnapshot = {
+      ...createEmptyWorkspaceSnapshot(),
+      accounts: [account],
+      accountSessions: [createSession()],
+    }
+    const revertProviderAccountImport = vi
+      .fn<(accountId: string) => Promise<WorkspaceSnapshot>>()
+      .mockResolvedValue(revertedSnapshot)
+    const confirm = vi.spyOn(globalThis, 'confirm').mockReturnValue(true)
+
+    renderPage(
+      { accounts: [account], accountSessions: [createSession()] },
+      { initialAccountId: account.id },
+      {
+        loadProviderAccountEditor: vi.fn().mockResolvedValue(editor),
+        revertProviderAccountImport,
+      },
+    )
+
+    fireEvent.click(await screen.findByRole('button', { name: /^revert last import$/i }))
+    await waitFor(() => {
+      expect(revertProviderAccountImport).toHaveBeenCalledWith(account.id)
+    })
+    confirm.mockRestore()
   })
 })

@@ -11,6 +11,7 @@ import type {
   InstagramSourceSyncPreset,
   ProviderAccount,
   ProviderAccountCookie,
+  ProviderAccountImportState,
   ProviderAccountSession,
   ProviderAccountUpsert,
   ProviderDescriptor,
@@ -144,6 +145,7 @@ export function AccountsPage({
   const saveProviderAccountSettings = useAppStore((state) => state.saveProviderAccountSettings)
   const upsertAppSetting = useAppStore((state) => state.upsertAppSetting)
   const validateProviderAccount = useAppStore((state) => state.validateProviderAccount)
+  const revertProviderAccountImport = useAppStore((state) => state.revertProviderAccountImport)
 
   const accounts = snapshot?.accounts ?? EMPTY_ACCOUNTS
   const accountSessions = snapshot?.accountSessions ?? EMPTY_ACCOUNT_SESSIONS
@@ -166,6 +168,7 @@ export function AccountsPage({
   }))
   const [savingGlobalPreset, setSavingGlobalPreset] = useState<InstagramPresetSlot>()
   const [justSaved, setJustSaved] = useState(false)
+  const [importState, setImportState] = useState<ProviderAccountImportState | null>(null)
   const settingsRequestRef = useRef(0)
 
   const selectedAccount = useMemo(
@@ -202,6 +205,7 @@ export function AccountsPage({
 
       const nextSettingsDraft = buildProviderAccountSettingsDraft(provider, editor.settings)
       setSettingsDraft(nextSettingsDraft)
+      setImportState(editor.importState ?? null)
       applySavedSignatures(baselineDraft, nextSettingsDraft)
     } finally {
       if (settingsRequestRef.current === requestId) {
@@ -218,6 +222,7 @@ export function AccountsPage({
     setDraft(nextDraft)
     setDraftCookies([])
     setCookieDialogOpen(false)
+    setImportState(null)
     const nextSettingsDraft = resetSettingsDraft(nextDraft.provider)
     applySavedSignatures(nextDraft, nextSettingsDraft)
   }, [applySavedSignatures, providerCatalog, resetSettingsDraft])
@@ -230,6 +235,7 @@ export function AccountsPage({
     setDraft(nextDraft)
     setDraftCookies([])
     setCookieDialogOpen(false)
+    setImportState(null)
     const defaultSettings = resetSettingsDraft(account.provider)
     applySavedSignatures(nextDraft, defaultSettings)
     void loadSettings(account.id, account.provider, nextDraft)
@@ -324,6 +330,7 @@ export function AccountsPage({
         const editor = await saveProviderAccountSettings(savedAccount.id, serializedSettings)
         nextSettingsDraft = buildProviderAccountSettingsDraft(savedAccount.provider, editor.settings)
         setSettingsDraft(nextSettingsDraft)
+        setImportState(editor.importState ?? null)
       } else {
         nextSettingsDraft = resetSettingsDraft(savedAccount.provider)
       }
@@ -374,6 +381,23 @@ export function AccountsPage({
       setDraft(nextDraft)
       setSelectedAccountId(savedAccount.id)
       setMode('edit')
+      void loadSettings(savedAccount.id, savedAccount.provider, nextDraft)
+    }
+  }
+
+  async function handleRevertLastImport() {
+    if (!selectedAccount || !importState?.canRevert) {
+      return
+    }
+    if (!globalThis.confirm('Revert this account to the session from before the last Companion import?')) {
+      return
+    }
+
+    const savedSnapshot = await revertProviderAccountImport(selectedAccount.id)
+    const savedAccount = savedSnapshot.accounts.find((account) => account.id === selectedAccount.id)
+    if (savedAccount) {
+      const nextDraft = mapAccountToDraft(savedAccount, providerCatalog)
+      setDraft(nextDraft)
       void loadSettings(savedAccount.id, savedAccount.provider, nextDraft)
     }
   }
@@ -596,6 +620,32 @@ export function AccountsPage({
                 </button>
               </div>
             </section>
+
+            {selectedAccount && importState ? (
+              <section className="panel accounts-panel">
+                <div className="panel-header compact-header">
+                  <div>
+                    <p className="eyebrow">Companion</p>
+                    <h2>Browser import</h2>
+                  </div>
+                  <span className="pill">{importState.providerUsername ? `@${importState.providerUsername}` : 'Imported'}</span>
+                </div>
+                <p className="source-editor-note">
+                  Last import {importState.lastImportedAt}.
+                  {importState.backupImportedAt ? ` Previous session from ${importState.backupImportedAt} is available.` : ' No previous session is available.'}
+                </p>
+                <div className="action-row">
+                  <button
+                    className="ghost-button"
+                    disabled={Boolean(pendingCommand) || !importState.canRevert}
+                    onClick={() => void handleRevertLastImport()}
+                    type="button"
+                  >
+                    Revert last import
+                  </button>
+                </div>
+              </section>
+            ) : null}
           </section>
         ) : null}
 

@@ -52,6 +52,74 @@ pub struct ProviderAccountCookie {
 }
 
 #[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CompanionAccountIdentity {
+    pub provider_user_id: Option<String>,
+    pub username: String,
+}
+
+#[derive(Clone, Serialize, Deserialize, Debug)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CompanionAccountCapture {
+    pub provider: String,
+    pub current_url: String,
+    pub identity: CompanionAccountIdentity,
+    pub cookies: Vec<ProviderAccountCookie>,
+    #[serde(default)]
+    pub authorization: HashMap<String, String>,
+}
+
+#[derive(Clone, Serialize, Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct CompanionAccountCandidate {
+    pub account_id: String,
+    pub display_name: String,
+    pub match_kind: Option<String>,
+    pub has_session: bool,
+}
+
+#[derive(Clone, Serialize, Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct CompanionAccountPreview {
+    pub provider: String,
+    pub username: String,
+    pub cookie_count: usize,
+    pub authorization_fields: Vec<String>,
+    pub missing_required_fields: Vec<String>,
+    pub candidates: Vec<CompanionAccountCandidate>,
+    pub suggested_account_id: Option<String>,
+}
+
+#[derive(Clone, Deserialize, Debug)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CompanionAccountImportInput {
+    pub capture: CompanionAccountCapture,
+    pub target_account_id: Option<String>,
+    pub create_display_name: Option<String>,
+}
+
+#[derive(Clone, Serialize, Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct CompanionAccountImportResult {
+    pub account_id: String,
+    pub created: bool,
+    pub auth_state: String,
+    pub validation_error: Option<String>,
+    pub can_revert: bool,
+}
+
+#[derive(Clone, Serialize, Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderAccountImportState {
+    pub account_id: String,
+    pub provider_user_id: Option<String>,
+    pub provider_username: Option<String>,
+    pub last_imported_at: String,
+    pub can_revert: bool,
+    pub backup_imported_at: Option<String>,
+}
+
+#[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ProviderAccountSettingValueKind {
     String,
@@ -73,6 +141,7 @@ pub struct ProviderAccountEditor {
     pub account: ProviderAccount,
     pub session: Option<ProviderAccountSession>,
     pub settings: Vec<ProviderAccountSettingValue>,
+    pub import_state: Option<ProviderAccountImportState>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]

@@ -44,6 +44,7 @@ import type {
   ProviderAccountCookie,
   ProviderAccountCookieImport,
   ProviderAccountEditor,
+  ProviderAccountImportState,
   ProviderAccountSession,
   ProviderAccountSettingValue,
   ProviderAccountSettingValueKind,
@@ -763,10 +764,23 @@ function normalizeProviderAccountEditor(value: unknown, snapshot: WorkspaceSnaps
     .map((entry) => normalizeProviderAccountSettingValue(entry))
     .filter((entry): entry is ProviderAccountSettingValue => entry !== null)
 
+  const rawImportState = pick(value, 'importState', 'import_state')
+  const importState: ProviderAccountImportState | null = isRecord(rawImportState)
+    ? {
+        accountId: stringValue(rawImportState, ['accountId', 'account_id']),
+        providerUserId: optionalStringValue(rawImportState, ['providerUserId', 'provider_user_id']),
+        providerUsername: optionalStringValue(rawImportState, ['providerUsername', 'provider_username']),
+        lastImportedAt: stringValue(rawImportState, ['lastImportedAt', 'last_imported_at']),
+        canRevert: booleanValue(rawImportState, ['canRevert', 'can_revert']),
+        backupImportedAt: optionalStringValue(rawImportState, ['backupImportedAt', 'backup_imported_at']),
+      }
+    : null
+
   return {
     account,
     session,
     settings,
+    importState,
   }
 }
 
@@ -2191,6 +2205,13 @@ export async function validateProviderAccount(id: string): Promise<WorkspaceSnap
   return invokeWorkspaceCommand(
     'validate_provider_account',
     buildInvokeArgs({ id }, { accountId: id, account_id: id }),
+  )
+}
+
+export async function revertProviderAccountImport(accountId: string): Promise<WorkspaceSnapshot> {
+  return invokeWorkspaceCommand(
+    'revert_provider_account_import',
+    buildInvokeArgs({ accountId }, { accountId, account_id: accountId }),
   )
 }
 

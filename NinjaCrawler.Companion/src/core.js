@@ -22,6 +22,20 @@ export const PROVIDER_LABELS = {
   twitter: 'X / Twitter',
 }
 
+export function detectProviderFromUrl(rawUrl) {
+  if (!rawUrl) return null
+  try {
+    const host = new URL(rawUrl).hostname.replace(/^www\./, '').toLowerCase()
+    if (host === 'instagram.com' || host.endsWith('.instagram.com')) return 'instagram'
+    if (host === 'x.com' || host.endsWith('.x.com') || host === 'twitter.com' || host.endsWith('.twitter.com')) return 'twitter'
+    if (host === 'tiktok.com' || host.endsWith('.tiktok.com')) return 'tiktok'
+    if (host === 'reddit.com' || host.endsWith('.reddit.com')) return 'reddit'
+  } catch {
+    return null
+  }
+  return null
+}
+
 export function detectTargetFromUrl(rawUrl) {
   if (!rawUrl) return null
 
@@ -147,6 +161,26 @@ export async function syncSource(payload) {
 
 export async function downloadTarget(payload) {
   const response = await fetch(`${API_BASE}/target`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  if (!response.ok) throw new Error(await readError(response))
+  return response.json()
+}
+
+export async function previewAccount(capture) {
+  const response = await fetch(`${API_BASE}/account/preview`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(capture),
+  })
+  if (!response.ok) throw new Error(await readError(response))
+  return response.json()
+}
+
+export async function importAccount(payload) {
+  const response = await fetch(`${API_BASE}/account/import`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),

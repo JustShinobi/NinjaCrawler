@@ -36,10 +36,32 @@
           <button id="targetButton" type="button" class="secondary hidden">Download selected story</button>
           <button id="syncButton" type="button" class="secondary hidden">Sync</button>
           <button id="addButton" type="button" class="primary">Add in NinjaCrawler</button>
+          <button id="importAccountButton" type="button">Import account</button>
         </div>
 
         <p id="message" class="message" aria-live="polite"></p>
       </form>
+
+      <section id="accountImportPanel" class="panel hidden">
+        <div>
+          <h2>Import account</h2>
+          <p id="accountImportSummary" class="muted"></p>
+          <p id="accountImportFields" class="muted"></p>
+        </div>
+        <label class="field">
+          Destination
+          <select id="accountDestination"></select>
+        </label>
+        <label id="newAccountNameField" class="field">
+          Account name
+          <input id="newAccountName" type="text" autocomplete="off">
+        </label>
+        <div class="actions inline-actions">
+          <button id="confirmAccountImport" type="button" class="primary">Import</button>
+          <button id="cancelAccountImport" type="button">Cancel</button>
+        </div>
+        <p id="accountImportMessage" class="message" aria-live="polite"></p>
+      </section>
     </main>
 
     <script type="module" src="src/popup.js"></script>
