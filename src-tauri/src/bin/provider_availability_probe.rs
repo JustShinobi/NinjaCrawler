@@ -294,6 +294,7 @@ fn build_instagram_identity_probe_request(
         profile_root: PathBuf::new(),
         saved_posts_root: PathBuf::new(),
         ledger_post_keys: HashSet::new(),
+        deleted_post_keys: HashSet::new(),
         existing_media_keys: HashSet::new(),
         ledger_media_keys: HashSet::new(),
         existing_relative_paths: HashSet::new(),

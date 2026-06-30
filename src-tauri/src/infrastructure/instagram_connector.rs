@@ -70,6 +70,10 @@ pub struct InstagramConnectorRequest {
     pub profile_root: PathBuf,
     pub saved_posts_root: PathBuf,
     pub ledger_post_keys: HashSet<String>,
+    /// Posts explicitamente deletados pelo usuário (tombstone). Mesmo nas seções
+    /// que ignoram o post-ledger (highlights, para baixar o que falta), estes
+    /// continuam suprimidos — deleção é intenção do usuário e deve ser honrada.
+    pub deleted_post_keys: HashSet<String>,
     pub existing_media_keys: HashSet<String>,
     pub ledger_media_keys: HashSet<String>,
     pub existing_relative_paths: HashSet<String>,
@@ -131,8 +135,18 @@ pub struct InstagramConnectorResult {
     pub resolved_username: Option<String>,
     pub profile_description: Option<String>,
     pub manifest_summary: Option<InstagramManifestSummary>,
+    /// Associação post→álbum de highlight para TODOS os itens descobertos nos
+    /// destaques (inclusive os já existentes no ledger, que não rebaixam bytes).
+    pub highlight_memberships: Vec<InstagramHighlightMembership>,
     pub updated_headers: InstagramAuthHeaders,
     pub rate_limited: bool,
+}
+
+#[derive(Clone)]
+pub struct InstagramHighlightMembership {
+    pub album: String,
+    /// Chave de mídia do CDN (stem do arquivo) — junta com o arquivo já em disco.
+    pub provider_media_key: String,
 }
 
 #[derive(Clone)]
@@ -220,11 +234,16 @@ struct InstagramManifestSection {
     profile_user_id: Option<String>,
     discovered_asset_count: usize,
     normalized_post_count: usize,
+    /// Itens descartados pelo filtro de data (cutoff/date range) antes do loop.
+    skipped_out_of_range_item_count: usize,
     skipped_existing_post_count: usize,
     skipped_duplicate_post_count: usize,
     skipped_unavailable_post_count: usize,
     skipped_existing_asset_count: usize,
     skipped_duplicate_asset_count: usize,
+    /// Media keys de TODOS os assets descobertos (highlights), p/ associação ao
+    /// álbum mesmo quando o asset é pulado por já existir em disco.
+    highlight_media_keys: Vec<String>,
     posts: Vec<InstagramManifestPost>,
 }
 
@@ -242,6 +261,7 @@ pub struct InstagramManifestSectionSummary {
     pub normalized_post_count: u32,
     pub discovered_asset_count: u32,
     pub queued_asset_count: u32,
+    pub skipped_out_of_range_item_count: u32,
     pub skipped_existing_post_count: u32,
     pub skipped_duplicate_post_count: u32,
     pub skipped_unavailable_post_count: u32,
@@ -907,6 +927,7 @@ where
             downloaded_asset_count,
             Some(&profile.user_id),
         )),
+        highlight_memberships: collect_highlight_memberships(&manifest),
         updated_headers: client.headers.clone(),
         rate_limited,
     })
@@ -931,6 +952,7 @@ where
             resolved_username: None,
             profile_description: None,
             manifest_summary: None,
+            highlight_memberships: Vec::new(),
             updated_headers: request.headers.clone(),
             rate_limited: false,
         });
@@ -986,6 +1008,7 @@ where
         resolved_username: None,
         profile_description: None,
         manifest_summary: None,
+        highlight_memberships: Vec::new(),
         updated_headers: client.headers.clone(),
         rate_limited,
     })
@@ -1006,11 +1029,13 @@ fn build_manifest_section(
         profile_user_id: profile_user_id.map(str::to_string),
         discovered_asset_count: 0,
         normalized_post_count: 0,
+        skipped_out_of_range_item_count: 0,
         skipped_existing_post_count: 0,
         skipped_duplicate_post_count: 0,
         skipped_unavailable_post_count: 0,
         skipped_existing_asset_count: 0,
         skipped_duplicate_asset_count: 0,
+        highlight_media_keys: Vec::new(),
         posts: Vec::new(),
     }
 }
@@ -1085,12 +1110,27 @@ where
             true,
         );
 
+        let mut out_of_range_count = 0usize;
         let filtered_items = section
             .items
             .iter()
-            .filter(|item| item_matches_requested_date_range(item, request))
+            .filter(|item| {
+                let in_range = item_matches_requested_date_range(item, request);
+                if !in_range {
+                    out_of_range_count += 1;
+                }
+                in_range
+            })
             .cloned()
             .collect::<Vec<_>>();
+        section.skipped_out_of_range_item_count = out_of_range_count;
+
+        // Highlights (`stories`) costumam ter posts já registrados no post-ledger
+        // (observados em syncs antigas) cuja mídia nunca foi baixada — o skip por
+        // post-ledger os bloquearia para sempre. Para essas seções, decidimos a
+        // re-descida pela presença do arquivo em disco (como `missing_only`), mas
+        // ainda honrando as tombstones de deleção.
+        let effective_missing_only = request.missing_only || section.media_section == "stories";
 
         for item in filtered_items {
             ensure_sync_not_cancelled(should_cancel)?;
@@ -1111,8 +1151,23 @@ where
                     .provider_post_code
                     .as_ref()
                     .is_some_and(|code| request.ledger_post_keys.contains(code));
+            let known_as_deleted = request
+                .deleted_post_keys
+                .contains(&identity.provider_post_key)
+                || identity
+                    .provider_post_code
+                    .as_ref()
+                    .is_some_and(|code| request.deleted_post_keys.contains(code));
 
-            if !request.missing_only && known_in_post_ledger {
+            // Em highlights ignoramos o post-ledger (mídia faltante deve baixar),
+            // mas a deleção explícita sempre suprime. Nas demais seções, o
+            // post-ledger já cobre as tombstones (a deleção escreve nele).
+            let post_suppressed = if effective_missing_only {
+                known_as_deleted
+            } else {
+                known_in_post_ledger
+            };
+            if post_suppressed {
                 section.skipped_existing_post_count += 1;
                 continue;
             }
@@ -1141,6 +1196,16 @@ where
             let discovered_asset_count = assets.len();
             section.discovered_asset_count += discovered_asset_count;
 
+            // Registra a media key de TODO asset de highlight (baixado ou não),
+            // para associar o álbum ao arquivo já existente em disco (no Feed).
+            if section.media_section == "stories" {
+                for asset in &assets {
+                    section
+                        .highlight_media_keys
+                        .push(asset.provider_media_key.clone());
+                }
+            }
+
             let mut planned_assets = Vec::new();
             for asset in assets {
                 let base_destination_path =
@@ -1160,7 +1225,7 @@ where
                     || request
                         .ledger_relative_paths
                         .contains(&base_relative_path_key);
-                let should_skip_existing = if request.missing_only {
+                let should_skip_existing = if effective_missing_only {
                     known_in_filesystem
                 } else {
                     known_in_filesystem || known_in_ledger
@@ -1187,7 +1252,7 @@ where
                 let resolved_known_in_ledger = request
                     .ledger_relative_paths
                     .contains(&resolved_relative_path_key);
-                let should_skip_resolved_destination = if request.missing_only {
+                let should_skip_resolved_destination = if effective_missing_only {
                     resolved_known_in_filesystem
                 } else {
                     resolved_known_in_filesystem || resolved_known_in_ledger
@@ -1789,6 +1854,38 @@ fn media_item_timestamp(item: &Value) -> Option<i64> {
         .or_else(|| item.get("taken_at_timestamp").and_then(Value::as_i64))
 }
 
+/// Associação post→álbum para todos os itens descobertos nas seções de highlight
+/// (`stories`), independentemente de terem sido baixados ou pulados por já
+/// existirem no ledger. O álbum é o nome da subpasta sob `Stories/`.
+fn collect_highlight_memberships(
+    manifest: &InstagramSyncManifest,
+) -> Vec<InstagramHighlightMembership> {
+    let mut memberships = Vec::new();
+    for section in &manifest.sections {
+        if section.media_section != "stories" {
+            continue;
+        }
+        let album = section
+            .section_root
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_default();
+        if album.is_empty() {
+            continue;
+        }
+        for media_key in &section.highlight_media_keys {
+            if media_key.trim().is_empty() {
+                continue;
+            }
+            memberships.push(InstagramHighlightMembership {
+                album: album.clone(),
+                provider_media_key: media_key.clone(),
+            });
+        }
+    }
+    memberships
+}
+
 fn summarize_profile_sync_manifest(
     manifest: &InstagramSyncManifest,
     downloaded_asset_count: u32,
@@ -1808,6 +1905,7 @@ fn summarize_profile_sync_manifest(
                 .iter()
                 .map(|post| post.planned_assets.len() as u32)
                 .sum(),
+            skipped_out_of_range_item_count: section.skipped_out_of_range_item_count as u32,
             skipped_existing_post_count: section.skipped_existing_post_count as u32,
             skipped_duplicate_post_count: section.skipped_duplicate_post_count as u32,
             skipped_unavailable_post_count: section.skipped_unavailable_post_count as u32,
@@ -3621,6 +3719,7 @@ mod tests {
             profile_root: Path::new(r"C:\Media\Stories").to_path_buf(),
             saved_posts_root: Path::new(r"C:\Media\Saved").to_path_buf(),
             ledger_post_keys: HashSet::new(),
+            deleted_post_keys: HashSet::new(),
             existing_media_keys: HashSet::new(),
             ledger_media_keys: HashSet::new(),
             existing_relative_paths: HashSet::new(),
@@ -4239,11 +4338,13 @@ mod tests {
             profile_user_id: None,
             discovered_asset_count: 1,
             normalized_post_count: 1,
+            skipped_out_of_range_item_count: 0,
             skipped_existing_post_count: 0,
             skipped_duplicate_post_count: 0,
             skipped_unavailable_post_count: 0,
             skipped_existing_asset_count: 0,
             skipped_duplicate_asset_count: 0,
+            highlight_media_keys: Vec::new(),
             posts: vec![InstagramManifestPost {
                 item: json!({ "id": "media-1" }),
                 provider_post_key: "media-1".to_string(),

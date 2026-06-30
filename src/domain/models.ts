@@ -494,6 +494,11 @@ export interface MediaGalleryPost {
   capturedAt?: number
   mediaType: 'video' | 'image' | 'slideshow'
   section: string
+  /**
+   * Highlight albums this post belongs to (the `Stories/<album>/` subfolder
+   * and/or membership of a highlight whose media lives in another folder).
+   */
+  albums?: string[]
   posterPath?: string
   files: MediaGalleryFile[]
 }

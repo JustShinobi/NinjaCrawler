@@ -18,9 +18,15 @@ interface ProfileViewPageProps {
 }
 
 type ViewMode = 'day' | 'grid'
+/** Modos de visualização dos Highlights: por álbum (padrão) ou os comuns. */
+type HighlightsMode = 'album' | 'day' | 'grid'
 
 const VIEW_MODE_STORAGE_KEY = 'profileView.mode'
+const HIGHLIGHTS_MODE_STORAGE_KEY = 'profileView.highlightsMode'
 const DENSITY_STORAGE_KEY = 'profileView.density'
+
+/** Seção dos Highlights do Instagram (ver isEphemeralStorySection). */
+const HIGHLIGHTS_SECTION = 'stories'
 
 /** Largura mínima do thumbnail (px) por nível de densidade — do mais denso ao maior. */
 const DENSITY_STEPS = [110, 140, 160, 190, 230] as const
@@ -32,6 +38,16 @@ function readStoredMode(): ViewMode {
   } catch {
     return 'day'
   }
+}
+
+function readStoredHighlightsMode(): HighlightsMode {
+  try {
+    const stored = localStorage.getItem(HIGHLIGHTS_MODE_STORAGE_KEY)
+    if (stored === 'day' || stored === 'grid') return stored
+  } catch {
+    /* ignore */
+  }
+  return 'album'
 }
 
 function readStoredDensity(): number {
@@ -58,6 +74,14 @@ interface DayGroup {
   key: string
   label: string
   posts: MediaGalleryPost[]
+}
+
+interface AlbumGroup {
+  key: string
+  label: string
+  posts: MediaGalleryPost[]
+  /** Capa do álbum: poster/1ª imagem do post mais recente que tiver. */
+  coverSrc?: string
 }
 
 function providerDisplayName(provider: ProviderKey): string {
@@ -151,6 +175,7 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
   const [error, setError] = useState<string>()
   const [lightboxIndex, setLightboxIndex] = useState<number>()
   const [viewMode, setViewMode] = useState<ViewMode>(readStoredMode)
+  const [highlightsMode, setHighlightsMode] = useState<HighlightsMode>(readStoredHighlightsMode)
   const [densityIndex, setDensityIndex] = useState<number>(readStoredDensity)
   const [sectionFilter, setSectionFilter] = useState<string>(SECTION_FILTER_ALL)
   const [renderLimit, setRenderLimit] = useState(INITIAL_RENDER_LIMIT)
@@ -171,6 +196,13 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
       /* ignore */
     }
   }, [viewMode])
+  useEffect(() => {
+    try {
+      localStorage.setItem(HIGHLIGHTS_MODE_STORAGE_KEY, highlightsMode)
+    } catch {
+      /* ignore */
+    }
+  }, [highlightsMode])
   useEffect(() => {
     try {
       localStorage.setItem(DENSITY_STORAGE_KEY, String(densityIndex))
@@ -215,12 +247,17 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
     }
   }, [sourceId, load])
 
-  // Seções presentes (feed/reels/stories/…), em ordem estável.
+  // Seções presentes (feed/reels/stories/…), em ordem estável. O chip de
+  // Highlights aparece se qualquer post pertence a um álbum, mesmo que o arquivo
+  // viva no Feed (associação) e o post não tenha a seção física `stories`.
   const sections = useMemo<string[]>(() => {
     if (!gallery) return []
     const present = new Set<string>()
     for (const post of gallery.posts) {
       present.add(post.section || 'timeline')
+      if (post.albums && post.albums.length > 0) {
+        present.add(HIGHLIGHTS_SECTION)
+      }
     }
     return sortSections([...present])
   }, [gallery])
@@ -235,6 +272,11 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
   const visiblePosts = useMemo<MediaGalleryPost[]>(() => {
     if (!gallery) return []
     if (sectionFilter === SECTION_FILTER_ALL) return gallery.posts
+    // Highlights reúne todos os posts que pertencem a algum álbum (inclusive os
+    // que moram no Feed via associação), não só os da seção física `stories`.
+    if (sectionFilter === HIGHLIGHTS_SECTION) {
+      return gallery.posts.filter((post) => (post.albums?.length ?? 0) > 0)
+    }
     return gallery.posts.filter((post) => (post.section || 'timeline') === sectionFilter)
   }, [gallery, sectionFilter])
 
@@ -263,6 +305,43 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
     }
     return groups
   }, [renderedPosts])
+
+  // Agrupa os Highlights por álbum (subpasta sob `Stories/`). Os posts já vêm
+  // do mais recente ao mais antigo, então a 1ª aparição ordena os álbuns pelo
+  // item mais recente; o 1º post de cada álbum vira a capa.
+  const albums = useMemo<AlbumGroup[]>(() => {
+    const groups: AlbumGroup[] = []
+    const byKey = new Map<string, AlbumGroup>()
+    for (const post of renderedPosts) {
+      // Um post pode pertencer a vários álbuns → aparece em cada seção.
+      const labels = post.albums && post.albums.length > 0 ? post.albums : ['Highlights']
+      for (const label of labels) {
+        let group = byKey.get(label)
+        if (!group) {
+          group = { key: label, label, posts: [] }
+          byKey.set(label, group)
+          groups.push(group)
+        }
+        group.posts.push(post)
+        if (!group.coverSrc) {
+          const cover =
+            post.posterPath ??
+            post.files.find((file) => !isVideo(file.mediaType))?.absolutePath
+          if (cover) group.coverSrc = convertFileSrc(cover)
+        }
+      }
+    }
+    return groups
+  }, [renderedPosts])
+
+  // "By album" só faz sentido nos Highlights; nas demais seções vale o viewMode.
+  // Cobre também o perfil que só tem Highlights (sem chip de seção para clicar).
+  const isHighlights =
+    sectionFilter === HIGHLIGHTS_SECTION ||
+    (sectionFilter === SECTION_FILTER_ALL &&
+      sections.length === 1 &&
+      sections[0] === HIGHLIGHTS_SECTION)
+  const effectiveMode: HighlightsMode = isHighlights ? highlightsMode : viewMode
 
   // Cresce a janela quando o sentinel (fim da lista) entra na viewport. O
   // rootMargin pré-carrega antes de chegar ao fim; re-observa a cada cresc.
@@ -612,22 +691,55 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
           ) : (
             <>
               <div className="profile-view-segmented" role="group" aria-label="View mode">
-                <button
-                  className={viewMode === 'day' ? 'is-active' : ''}
-                  onClick={() => setViewMode('day')}
-                  type="button"
-                  aria-pressed={viewMode === 'day'}
-                >
-                  By day
-                </button>
-                <button
-                  className={viewMode === 'grid' ? 'is-active' : ''}
-                  onClick={() => setViewMode('grid')}
-                  type="button"
-                  aria-pressed={viewMode === 'grid'}
-                >
-                  All media
-                </button>
+                {isHighlights ? (
+                  // Nos Highlights o controle alterna o agrupamento por álbum
+                  // (padrão) com as formas comuns — preferência própria, persistida.
+                  <>
+                    <button
+                      className={highlightsMode === 'album' ? 'is-active' : ''}
+                      onClick={() => setHighlightsMode('album')}
+                      type="button"
+                      aria-pressed={highlightsMode === 'album'}
+                    >
+                      By album
+                    </button>
+                    <button
+                      className={highlightsMode === 'day' ? 'is-active' : ''}
+                      onClick={() => setHighlightsMode('day')}
+                      type="button"
+                      aria-pressed={highlightsMode === 'day'}
+                    >
+                      By day
+                    </button>
+                    <button
+                      className={highlightsMode === 'grid' ? 'is-active' : ''}
+                      onClick={() => setHighlightsMode('grid')}
+                      type="button"
+                      aria-pressed={highlightsMode === 'grid'}
+                    >
+                      All media
+                    </button>
+                  </>
+                ) : (
+                  <>
+                    <button
+                      className={viewMode === 'day' ? 'is-active' : ''}
+                      onClick={() => setViewMode('day')}
+                      type="button"
+                      aria-pressed={viewMode === 'day'}
+                    >
+                      By day
+                    </button>
+                    <button
+                      className={viewMode === 'grid' ? 'is-active' : ''}
+                      onClick={() => setViewMode('grid')}
+                      type="button"
+                      aria-pressed={viewMode === 'grid'}
+                    >
+                      All media
+                    </button>
+                  </>
+                )}
               </div>
               {sections.length > 1 ? (
                 <div className="profile-view-sections" role="group" aria-label="Section filter">
@@ -695,7 +807,22 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
         <div className="runtime-log-window-empty">No downloaded media found for this profile.</div>
       ) : (
         <div className="profile-view-days" ref={scrollRef}>
-          {viewMode === 'grid' ? (
+          {effectiveMode === 'album' ? (
+            albums.map((album) => (
+              <section className="profile-view-day profile-view-album" key={album.key}>
+                <div className="profile-view-day-header profile-view-album-header">
+                  <span className="profile-view-album-cover" aria-hidden="true">
+                    {album.coverSrc ? <img src={album.coverSrc} alt="" loading="lazy" /> : null}
+                  </span>
+                  <span className="eyebrow profile-view-album-title">{album.label}</span>
+                  <span className="pill">{album.posts.length}</span>
+                </div>
+                <div className="profile-view-grid" style={gridStyle}>
+                  {album.posts.map((post, index) => renderCard(post, post.postId ?? `${album.key}-${index}`))}
+                </div>
+              </section>
+            ))
+          ) : effectiveMode === 'grid' ? (
             <div className="profile-view-grid" style={gridStyle}>
               {renderedPosts.map((post, index) => renderCard(post, post.postId ?? `post-${index}`))}
             </div>

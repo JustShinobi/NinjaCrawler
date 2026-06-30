@@ -9537,6 +9537,43 @@ p {
   background: var(--bg-profile-shell);
 }
 
+/* Highlight album header — Instagram-style cover circle + the album's real name
+   (casing/emoji preserved, unlike the uppercased .eyebrow day labels). */
+.profile-view-album-header {
+  justify-content: flex-start;
+}
+
+.profile-view-album-cover {
+  width: 1.9rem;
+  height: 1.9rem;
+  border-radius: 999px;
+  overflow: hidden;
+  flex-shrink: 0;
+  border: 1px solid var(--line);
+  background: var(--surface-input);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.profile-view-album-cover img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.profile-view-album-title {
+  text-transform: none;
+  letter-spacing: 0.01em;
+  font-size: 0.85rem;
+  color: var(--text);
+}
+
+.profile-view-album-header .pill {
+  margin-left: auto;
+}
+
 .profile-view-toolbar {
   display: flex;
   align-items: center;

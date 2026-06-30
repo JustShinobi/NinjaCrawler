@@ -107,6 +107,14 @@ const MIGRATIONS: &[(i64, &str)] = &[
         27,
         include_str!("../../migrations/0027_deleted_media.sql"),
     ),
+    (
+        28,
+        include_str!("../../migrations/0028_instagram_highlight_membership.sql"),
+    ),
+    (
+        29,
+        include_str!("../../migrations/0029_instagram_highlight_media_membership.sql"),
+    ),
 ];
 
 pub fn open_connection(path: &Path) -> rusqlite::Result<Connection> {

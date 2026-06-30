@@ -360,6 +360,10 @@ pub struct MediaGalleryPost {
     pub media_type: String,
     /// Subpasta do perfil ("timeline"/raiz, "stories", "reposts", "video").
     pub section: String,
+    /// Álbuns de highlight a que o post pertence (subpasta sob `Stories/` e/ou
+    /// associações de `instagram_highlight_membership`). Um post do Feed pode
+    /// pertencer a vários destaques sem ter o arquivo duplicado em disco.
+    pub albums: Vec<String>,
     /// Caminho absoluto de uma miniatura/poster (cover do vídeo, quando houver).
     pub poster_path: Option<String>,
     pub files: Vec<MediaGalleryFile>,

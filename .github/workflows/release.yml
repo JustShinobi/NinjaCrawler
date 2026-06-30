@@ -93,6 +93,8 @@ jobs:
 
       - name: Build Release
         shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: >
           powershell -ExecutionPolicy Bypass
           -File Tools\Build-NinjaCrawler.ps1

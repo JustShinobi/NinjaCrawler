@@ -340,4 +340,64 @@ describe('ProfileViewPage', () => {
     expect(screen.getByRole('button', { name: 'Highlights' })).toBeTruthy()
     expect(screen.getByRole('button', { name: 'Stories' })).toBeTruthy()
   })
+
+  it('groups highlights by album and can switch back to by-day', async () => {
+    const day = Math.floor(Date.parse('2026-05-19T12:00:00Z') / 1000)
+    const story = (id: string, albums: string[], at: number) => ({
+      postId: id,
+      capturedAt: at,
+      mediaType: 'image' as const,
+      section: 'stories',
+      albums,
+      files: [{ relativePath: `${id}.jpg`, absolutePath: `S:/${id}.jpg`, mediaType: 'image' }],
+    })
+    bridgeMocks.loadSourceMediaGallery.mockResolvedValue({
+      sourceId: 'ig-1',
+      provider: 'instagram',
+      handle: 'someone',
+      profileUrl: 'https://www.instagram.com/someone/',
+      posts: [
+        {
+          // Plain feed post — not a highlight member, stays out of Highlights.
+          postId: 'feed',
+          postUrl: 'https://www.instagram.com/p/AAA/',
+          capturedAt: day,
+          mediaType: 'image',
+          section: 'timeline',
+          albums: [],
+          files: [{ relativePath: 'f.jpg', absolutePath: 'S:/f.jpg', mediaType: 'image' }],
+        },
+        {
+          // Feed post that is ALSO a highlight member (cross-ref, file lives in
+          // the feed) — must appear under the "Venda" album in Highlights.
+          postId: 'feedmember',
+          postUrl: 'https://www.instagram.com/p/BBB/',
+          capturedAt: day - 5,
+          mediaType: 'image',
+          section: 'timeline',
+          albums: ['Venda'],
+          files: [{ relativePath: 'b.jpg', absolutePath: 'S:/b.jpg', mediaType: 'image' }],
+        },
+        story('v1', ['Venda'], day - 10),
+        story('c1', ['CATSU'], day - 20),
+        story('c2', ['CATSU'], day - 30),
+      ],
+    } as SourceMediaGallery)
+
+    render(<ProfileViewPage initialSourceId="ig-1" />)
+    await screen.findByRole('button', { name: 'Highlights' })
+
+    // Enter the Highlights section → defaults to album grouping.
+    fireEvent.click(screen.getByRole('button', { name: 'Highlights' }))
+    expect(screen.getByRole('button', { name: /by album/i })).toBeTruthy()
+    expect(screen.getByText('Venda')).toBeTruthy()
+    expect(screen.getByText('CATSU')).toBeTruthy()
+    // Highlights shows the 4 album members (v1, c1, c2, feed-member) but not the
+    // plain feed post → 4 preview tiles, not 5.
+    expect(screen.getAllByRole('button', { name: /open preview/i }).length).toBe(4)
+
+    // Switching to "By day" leaves album mode (album headers gone).
+    fireEvent.click(screen.getByRole('button', { name: /by day/i }))
+    expect(screen.queryByText('Venda')).toBeNull()
+  })
 })

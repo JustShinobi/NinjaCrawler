@@ -2,7 +2,7 @@ use chrono::{DateTime, Duration, Local, NaiveDate, NaiveDateTime, TimeZone, Utc}
 use image::{imageops::FilterType, GenericImageView};
 use rusqlite::{params, Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
-use std::collections::{hash_map::DefaultHasher, HashMap, HashSet};
+use std::collections::{hash_map::DefaultHasher, BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::io::Read;
@@ -835,6 +835,73 @@ fn implicit_instagram_imported_cutoff_timestamp(
         .as_deref()
         .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
         .map(|value| value.timestamp())
+}
+
+/// Grava (append-only) a participação de posts em álbuns de highlight. Mantém
+/// `first_seen_at` no conflito e nunca remove linhas — é um snapshot: o item
+/// permanece no álbum mesmo se for retirado do destaque online depois.
+fn upsert_instagram_highlight_memberships(
+    connection: &Connection,
+    source_id: &str,
+    memberships: &[instagram_connector::InstagramHighlightMembership],
+    seen_at: &str,
+) -> Result<(), String> {
+    if memberships.is_empty() {
+        return Ok(());
+    }
+    let mut statement = connection
+        .prepare(
+            "INSERT INTO instagram_highlight_media_membership
+                 (source_id, provider_media_key, album, first_seen_at, last_seen_at)
+             VALUES (?1, ?2, ?3, ?4, ?4)
+             ON CONFLICT(source_id, provider_media_key, album) DO UPDATE SET
+                 last_seen_at = excluded.last_seen_at",
+        )
+        .map_err(|error| error.to_string())?;
+    for membership in memberships {
+        let media_key = membership.provider_media_key.trim();
+        let album = membership.album.trim();
+        if media_key.is_empty() || album.is_empty() {
+            continue;
+        }
+        statement
+            .execute(rusqlite::params![source_id, media_key, album, seen_at])
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+/// Mapa media key → álbuns de highlight. A galeria resolve o álbum casando a
+/// media key de cada arquivo em disco (mesmo método de `existing_media_keys`),
+/// então a mídia que vive no Feed aparece sob o destaque. Best-effort: tabela
+/// ausente ou query falha → vazio (sem regressão).
+fn load_instagram_highlight_membership(
+    connection: &Connection,
+    source_id: &str,
+) -> HashMap<String, BTreeSet<String>> {
+    let mut map: HashMap<String, BTreeSet<String>> = HashMap::new();
+    let Ok(mut statement) = connection.prepare(
+        "SELECT provider_media_key, album
+         FROM instagram_highlight_media_membership WHERE source_id = ?1",
+    ) else {
+        return map;
+    };
+    let Ok(rows) = statement.query_map([source_id], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    }) else {
+        return map;
+    };
+    for (media_key, album) in rows.flatten() {
+        let media_key = media_key.trim();
+        let album = album.trim();
+        if media_key.is_empty() || album.is_empty() {
+            continue;
+        }
+        map.entry(media_key.to_string())
+            .or_default()
+            .insert(album.to_string());
+    }
+    map
 }
 
 fn validate_source_sync_override(
@@ -1917,6 +1984,11 @@ struct GalleryPostAcc {
     captured_at: Option<i64>,
     media_type: String,
     section: String,
+    /// Highlight album (subpasta sob `Stories/`), quando o post for um highlight.
+    album: Option<String>,
+    /// Álbuns de highlight resolvidos por associação (mídia que mora no Feed mas
+    /// pertence a um destaque), casados pela media key dos arquivos.
+    membership_albums: BTreeSet<String>,
     files: Vec<(Option<usize>, MediaGalleryFile)>,
     /// Authoritative metadata joined from the sync ledger by relative path
     /// (preferred over the values derived from the file name).
@@ -2083,6 +2155,13 @@ pub fn load_source_media_gallery(source_id: String) -> Result<SourceMediaGallery
         } else {
             HashMap::new()
         };
+        // Associações de álbum de highlight (Instagram), media key → álbuns.
+        // Vazio para outros providers / quando não há associação.
+        let highlight_membership = if provider.eq_ignore_ascii_case("instagram") {
+            load_instagram_highlight_membership(connection, &source_id)
+        } else {
+            HashMap::new()
+        };
 
         let mut grouped: HashMap<String, GalleryPostAcc> = HashMap::new();
         let mut order: Vec<String> = Vec::new();
@@ -2138,6 +2217,18 @@ pub fn load_source_media_gallery(source_id: String) -> Result<SourceMediaGallery
                 "stories" | "reposts" | "video" => top_segment.clone(),
                 _ => "timeline".to_string(),
             };
+            // Highlights ficam em `Stories/<álbum>/arquivo` — o 2º segmento é o
+            // título do álbum (preserva casing/emoji do nome da pasta original).
+            let album = if top_segment == "stories" {
+                relative_path
+                    .split('/')
+                    .nth(1)
+                    .map(str::trim)
+                    .filter(|segment| !segment.is_empty())
+                    .map(str::to_string)
+            } else {
+                None
+            };
             // Liga ao ledger pelo relative_path (que no banco é lowercased).
             let link = ledger_links.get(&relative_path.to_ascii_lowercase()).cloned();
             // Instagram: agrupa o carrossel pelo shortcode — todas as fotos do
@@ -2165,6 +2256,8 @@ pub fn load_source_media_gallery(source_id: String) -> Result<SourceMediaGallery
                     captured_at: derived.captured_at,
                     media_type: derived.media_type.to_string(),
                     section,
+                    album,
+                    membership_albums: BTreeSet::new(),
                     files: Vec::new(),
                     ledger_post_key: None,
                     ledger_post_code: None,
@@ -2173,6 +2266,18 @@ pub fn load_source_media_gallery(source_id: String) -> Result<SourceMediaGallery
                 }
             });
             entry.files.push((derived.index, file));
+            // Resolve a participação em álbuns de highlight pela media key deste
+            // arquivo (mesmo método de `existing_media_keys`), cobrindo a mídia
+            // que mora no Feed mas pertence a um destaque.
+            if !highlight_membership.is_empty() {
+                for candidate in extract_instagram_media_identity_candidates_from_path(&path) {
+                    if let Some(member_albums) = highlight_membership.get(&candidate) {
+                        entry
+                            .membership_albums
+                            .extend(member_albums.iter().cloned());
+                    }
+                }
+            }
             if entry.captured_at.is_none() {
                 entry.captured_at = derived.captured_at;
             }
@@ -2258,12 +2363,28 @@ pub fn load_source_media_gallery(source_id: String) -> Result<SourceMediaGallery
                             None
                         }
                     });
+                // Álbuns: o da subpasta física (`Stories/<álbum>/`) unido aos das
+                // associações de highlight (mídia que mora no Feed mas pertence a
+                // um destaque), já resolvidas por media key no loop acima.
+                let mut albums: Vec<String> = Vec::new();
+                let mut seen_albums = BTreeSet::new();
+                if let Some(path_album) = acc.album {
+                    if seen_albums.insert(path_album.clone()) {
+                        albums.push(path_album);
+                    }
+                }
+                for album in acc.membership_albums {
+                    if seen_albums.insert(album.clone()) {
+                        albums.push(album);
+                    }
+                }
                 posts.push(MediaGalleryPost {
                     post_id: acc.post_id,
                     post_url,
                     captured_at,
                     media_type,
                     section,
+                    albums,
                     poster_path,
                     files,
                 });
@@ -7928,6 +8049,7 @@ fn build_instagram_identity_probe_request(
         profile_root: PathBuf::new(),
         saved_posts_root: PathBuf::new(),
         ledger_post_keys: HashSet::new(),
+        deleted_post_keys: HashSet::new(),
         existing_media_keys: HashSet::new(),
         ledger_media_keys: HashSet::new(),
         existing_relative_paths: HashSet::new(),
@@ -7977,6 +8099,7 @@ fn build_instagram_authenticated_identity_probe_request(
         profile_root: PathBuf::new(),
         saved_posts_root: PathBuf::new(),
         ledger_post_keys: HashSet::new(),
+        deleted_post_keys: HashSet::new(),
         existing_media_keys: HashSet::new(),
         ledger_media_keys: HashSet::new(),
         existing_relative_paths: HashSet::new(),
@@ -8642,6 +8765,49 @@ fn execute_instagram_source_sync_with_connection(
                 &finished_at,
             )?;
 
+            // Diagnóstico (nível debug): por seção de stories/highlights, registra
+            // onde os itens descobertos somem (filtro de data vs dedupe vs já
+            // existente). Útil para investigar highlights subdimensionados.
+            if let Some(summary) = result.manifest_summary.as_ref() {
+                for section in &summary.sections {
+                    if section.section != "stories" && section.section != "stories_user" {
+                        continue;
+                    }
+                    let message = format!(
+                        "Highlights diagnostic — {}: discovered={}, skipped_out_of_range_date={}, skipped_existing_post={}, skipped_duplicate_post={}, skipped_unavailable_post={}, skipped_existing_asset={}, queued_assets={}",
+                        section.label,
+                        section.item_count,
+                        section.skipped_out_of_range_item_count,
+                        section.skipped_existing_post_count,
+                        section.skipped_duplicate_post_count,
+                        section.skipped_unavailable_post_count,
+                        section.skipped_existing_asset_count,
+                        section.queued_asset_count,
+                    );
+                    log_runtime_event(
+                        layout,
+                        "sync.highlights.diagnostic",
+                        "debug",
+                        Some(&context.account.id),
+                        Some(&context.source.provider),
+                        Some(&context.source.id),
+                        Some(&context.source.handle),
+                        message,
+                        None,
+                    );
+                }
+            }
+
+            // Snapshot append-only da participação de posts em álbuns de highlight.
+            // Cobre os itens "já existentes" (pulados no download) para que a
+            // galeria os mostre sob o destaque sem rebaixar bytes.
+            upsert_instagram_highlight_memberships(
+                connection,
+                &context.source.id,
+                &result.highlight_memberships,
+                &finished_at,
+            )?;
+
             if let Some(resolved_username) = result.resolved_username.as_deref() {
                 let resolved_handle = sanitize_source_handle("instagram", resolved_username);
                 if !resolved_handle.is_empty()
@@ -9179,6 +9345,8 @@ fn build_instagram_profile_sync_request(
     let mut ledger_media_keys = media_ledger_snapshot.media_keys;
     ledger_media_keys.extend(media_alias_snapshot.keys);
     let explicit_date_from_timestamp = instagram_date_from_timestamp(&source_options);
+    let deleted_post_keys =
+        load_instagram_deleted_post_keys(connection, &context.source.id).unwrap_or_default();
 
     Ok(instagram_connector::InstagramConnectorRequest {
         username,
@@ -9194,6 +9362,7 @@ fn build_instagram_profile_sync_request(
         profile_root,
         saved_posts_root,
         ledger_post_keys: post_ledger_snapshot.keys,
+        deleted_post_keys,
         existing_media_keys,
         ledger_media_keys,
         existing_relative_paths,
@@ -9313,6 +9482,7 @@ fn build_instagram_saved_posts_request(
         ),
         saved_posts_root: resolve_instagram_saved_posts_root(layout, Some(&context.settings)),
         ledger_post_keys: HashSet::new(),
+        deleted_post_keys: HashSet::new(),
         existing_media_keys: HashSet::new(),
         ledger_media_keys: HashSet::new(),
         existing_relative_paths: HashSet::new(),
@@ -12812,6 +12982,42 @@ fn load_instagram_post_ledger_snapshot_for_source(
     Ok(snapshot)
 }
 
+/// Chaves de posts deletados pelo usuário (tombstone) para Instagram, na mesma
+/// normalização do post-ledger. Usadas para suprimir re-download mesmo nas
+/// seções que ignoram o post-ledger (highlights).
+fn load_instagram_deleted_post_keys(
+    connection: &Connection,
+    source_id: &str,
+) -> Result<HashSet<String>, String> {
+    ensure_provider_deleted_media_table(connection)?;
+    let mut statement = connection
+        .prepare(
+            "SELECT provider_post_key, provider_post_code
+             FROM provider_deleted_media
+             WHERE provider = 'instagram' AND source_id = ?1",
+        )
+        .map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map(params![source_id], |row| {
+            Ok((
+                row.get::<_, Option<String>>(0)?,
+                row.get::<_, Option<String>>(1)?,
+            ))
+        })
+        .map_err(|error| error.to_string())?;
+    let mut keys = HashSet::new();
+    for row in rows {
+        let (post_key, post_code) = row.map_err(|error| error.to_string())?;
+        for value in [post_key, post_code].into_iter().flatten() {
+            let normalized = normalize_instagram_post_ledger_key(&value);
+            if !normalized.is_empty() {
+                keys.insert(normalized);
+            }
+        }
+    }
+    Ok(keys)
+}
+
 fn upsert_instagram_post_ledger_entries(
     connection: &Connection,
     source_id: &str,
@@ -14970,6 +15176,7 @@ mod tests {
             captured_at: None,
             media_type: "image".to_string(),
             section: "timeline".to_string(),
+            albums: Vec::new(),
             poster_path: None,
             files: Vec::new(),
         };

@@ -116,10 +116,19 @@ foreach ($connector in $manifest.connectors) {
         $connector.PSObject.Properties.Name -contains 'assetSuffix'
     ) {
         $releaseUrl = "$($connector.releaseApiUrl.TrimEnd('/'))/tags/$releaseTag"
-        $release = Invoke-RestMethod -Uri $releaseUrl -Headers @{
+        # Authenticate the GitHub API call when a token is present (CI). Anonymous
+        # requests share a 60/hr-per-IP limit and intermittently fail on hosted
+        # runners; an authenticated token raises this to 5,000/hr. Falls back to
+        # anonymous locally where no token is set.
+        $headers = @{
             "Accept" = "application/vnd.github+json"
             "User-Agent" = "NinjaCrawler-Bootstrap/0.1.0"
         }
+        $bootstrapToken = if ($env:GITHUB_TOKEN) { $env:GITHUB_TOKEN } elseif ($env:GH_TOKEN) { $env:GH_TOKEN } else { $null }
+        if ($bootstrapToken) {
+            $headers["Authorization"] = "Bearer $bootstrapToken"
+        }
+        $release = Invoke-RestMethod -Uri $releaseUrl -Headers $headers
         $assets = @($release.assets | Where-Object {
             $_.name.StartsWith([string]$connector.assetPrefix) -and
             $_.name.EndsWith([string]$connector.assetSuffix)

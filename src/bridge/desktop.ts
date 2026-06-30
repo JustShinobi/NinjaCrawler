@@ -2447,6 +2447,9 @@ function parseSourceMediaGallery(raw: unknown, sourceId: string): SourceMediaGal
       capturedAt: optionalNumberValue(post, ['capturedAt', 'captured_at']),
       mediaType: stringValue(post, ['mediaType', 'media_type'], 'image') as MediaGalleryPost['mediaType'],
       section: stringValue(post, ['section'], 'timeline'),
+      albums: Array.isArray(post.albums)
+        ? post.albums.filter((album): album is string => typeof album === 'string')
+        : [],
       posterPath: optionalStringValue(post, ['posterPath', 'poster_path']),
       files: (Array.isArray(post.files) ? post.files : []).filter(isRecord).map((file) => ({
         relativePath: stringValue(file, ['relativePath', 'relative_path'], ''),
