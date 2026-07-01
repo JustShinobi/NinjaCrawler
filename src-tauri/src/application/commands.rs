@@ -688,6 +688,11 @@ pub fn open_connector_runtimes_window(app: tauri::AppHandle) -> Result<(), Strin
 }
 
 #[tauri::command]
+pub fn open_single_videos_window(app: tauri::AppHandle) -> Result<(), String> {
+    desktop_runtime::open_single_videos_window(&app)
+}
+
+#[tauri::command]
 pub fn open_accounts_window(
     app: tauri::AppHandle,
     intent: Option<AccountsWindowIntent>,

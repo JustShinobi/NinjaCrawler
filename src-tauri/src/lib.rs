@@ -123,6 +123,7 @@ pub fn run() {
             application::commands::open_source_sync_queue_window,
             application::commands::open_profile_view_window,
             application::commands::open_connector_runtimes_window,
+            application::commands::open_single_videos_window,
             application::commands::open_accounts_window,
             application::commands::open_source_editor_window,
             application::commands::open_profile_editor_window,

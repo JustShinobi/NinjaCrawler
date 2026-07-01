@@ -22,6 +22,7 @@ export default defineConfig(({ command }) => ({
         plans: resolve(__dirname, 'plans.html'),
         batchEditor: resolve(__dirname, 'batch-editor.html'),
         profileView: resolve(__dirname, 'profile-view.html'),
+        singleVideos: resolve(__dirname, 'single-videos.html'),
       },
     },
   },

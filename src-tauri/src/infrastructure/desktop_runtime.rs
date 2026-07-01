@@ -42,6 +42,7 @@ const RUNTIME_LOG_WINDOW_LABEL: &str = "runtime-log";
 const SCHEDULER_WINDOW_LABEL: &str = "scheduler-plans";
 const SOURCE_SYNC_QUEUE_WINDOW_LABEL: &str = "source-sync-queue";
 const CONNECTOR_RUNTIMES_WINDOW_LABEL: &str = "connector-runtimes";
+const SINGLE_VIDEOS_WINDOW_LABEL: &str = "single-videos";
 const IMPORT_WINDOW_LABEL: &str = "import";
 const BATCH_EDITOR_WINDOW_LABEL: &str = "batch-editor";
 const PROFILE_VIEW_WINDOW_LABEL: &str = "profile-view";
@@ -335,6 +336,24 @@ pub fn open_profile_view_window(
     std::thread::spawn(move || {
         if let Err(error) = create_profile_view_window(&app_handle, &source_id) {
             eprintln!("[profile-view] failed to create window: {error}");
+        }
+    });
+
+    Ok(())
+}
+
+pub fn open_single_videos_window(app: &tauri::AppHandle) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window(SINGLE_VIDEOS_WINDOW_LABEL) {
+        window.show().map_err(|error| error.to_string())?;
+        window.unminimize().map_err(|error| error.to_string())?;
+        window.set_focus().map_err(|error| error.to_string())?;
+        return Ok(());
+    }
+
+    let app_handle = app.clone();
+    std::thread::spawn(move || {
+        if let Err(error) = create_single_videos_window(&app_handle) {
+            eprintln!("[single-videos] failed to create window: {error}");
         }
     });
 
@@ -636,6 +655,32 @@ fn create_plans_window(
             height: 900,
         },
         apply_plans_window_constraints,
+    )
+}
+
+fn create_single_videos_window(app: &tauri::AppHandle) -> Result<(), String> {
+    let window = tauri::WebviewWindowBuilder::new(
+        app,
+        SINGLE_VIDEOS_WINDOW_LABEL,
+        tauri::WebviewUrl::App(single_videos_entrypoint().into()),
+    )
+    .title("Single Videos")
+    .inner_size(1280.0, 860.0)
+    .min_inner_size(940.0, 600.0)
+    .resizable(true)
+    .closable(true)
+    .visible(false)
+    .build()
+    .map_err(|error| error.to_string())?;
+
+    show_new_standalone_window(
+        app,
+        &window,
+        WindowSizeSpec {
+            width: 1280,
+            height: 860,
+        },
+        |_| Ok(()),
     )
 }
 
@@ -1107,6 +1152,10 @@ fn profile_view_entrypoint(source_id: &str) -> String {
 
 fn connector_runtimes_entrypoint() -> String {
     "connector-runtimes.html".to_string()
+}
+
+fn single_videos_entrypoint() -> String {
+    "single-videos.html".to_string()
 }
 
 fn profile_editor_entrypoint(intent: Option<&SourceEditorWindowIntent>) -> String {

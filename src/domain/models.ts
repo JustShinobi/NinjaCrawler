@@ -521,6 +521,20 @@ export interface SourceMediaGallery {
   posts: MediaGalleryPost[]
 }
 
+export interface SingleVideo {
+  id: string
+  provider: string
+  sourceUrl: string
+  providerVideoId?: string
+  uploader?: string
+  title?: string
+  relativePath: string
+  absolutePath: string
+  mediaType: string
+  capturedAt?: number
+  downloadedAt: string
+}
+
 export interface SourceSyncQueueProviderStatus {
   provider: ProviderKey
   displayName: string

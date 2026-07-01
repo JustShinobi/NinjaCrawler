@@ -67,6 +67,7 @@ import type {
   SourceSyncQueueProviderStatus,
   SourceSyncQueueRecentResult,
   SourceSyncQueueStatus,
+  SingleVideo,
   SourceMediaGallery,
   MediaGalleryPost,
   SchedulerSet,
@@ -2487,6 +2488,37 @@ export async function loadSourceMediaGallery(sourceId: string): Promise<SourceMe
     buildInvokeArgs({ sourceId }, { source_id: sourceId }),
   )
   return parseSourceMediaGallery(raw, sourceId)
+}
+
+export async function openSingleVideosWindow(): Promise<void> {
+  await invoke<void>('open_single_videos_window')
+}
+
+function parseSingleVideo(raw: unknown): SingleVideo {
+  const value = isRecord(raw) ? raw : {}
+  return {
+    id: stringValue(value, ['id'], ''),
+    provider: stringValue(value, ['provider'], ''),
+    sourceUrl: stringValue(value, ['sourceUrl', 'source_url'], ''),
+    providerVideoId: optionalStringValue(value, ['providerVideoId', 'provider_video_id']),
+    uploader: optionalStringValue(value, ['uploader']),
+    title: optionalStringValue(value, ['title']),
+    relativePath: stringValue(value, ['relativePath', 'relative_path'], ''),
+    absolutePath: stringValue(value, ['absolutePath', 'absolute_path'], ''),
+    mediaType: stringValue(value, ['mediaType', 'media_type'], 'video'),
+    capturedAt: optionalNumberValue(value, ['capturedAt', 'captured_at']),
+    downloadedAt: stringValue(value, ['downloadedAt', 'downloaded_at'], ''),
+  }
+}
+
+export async function downloadSingleVideo(url: string): Promise<SingleVideo> {
+  const raw = await invoke<unknown>('download_single_video', buildInvokeArgs({ url }, { url }))
+  return parseSingleVideo(raw)
+}
+
+export async function listSingleVideos(): Promise<SingleVideo[]> {
+  const raw = await invoke<unknown>('list_single_videos')
+  return (Array.isArray(raw) ? raw : []).map(parseSingleVideo)
 }
 
 export async function deleteSourceMedia(

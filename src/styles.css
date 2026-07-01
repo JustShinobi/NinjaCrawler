@@ -10033,3 +10033,56 @@ p {
 
 .profile-view-lightbox-nav.prev { left: 1.2rem; }
 .profile-view-lightbox-nav.next { right: 1.2rem; }
+
+/* ── Single videos window ─────────────────────────────────────────────── */
+.single-videos-add {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  flex-shrink: 0;
+}
+
+.single-videos-add-input,
+.single-videos-search {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 0.45rem 0.7rem;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: var(--surface-input);
+  color: var(--ink);
+  font: inherit;
+  font-size: 0.85rem;
+}
+
+.single-videos-toolbar {
+  gap: 0.6rem;
+}
+
+.single-videos-search {
+  flex: 0 1 260px;
+}
+
+.single-videos-card-body {
+  display: grid;
+  gap: 0.1rem;
+  padding: 0.35rem 0.15rem 0.1rem;
+  min-width: 0;
+}
+
+.single-videos-uploader {
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.single-videos-title {
+  font-size: 0.72rem;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
