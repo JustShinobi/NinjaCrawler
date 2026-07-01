@@ -105,6 +105,8 @@ pub fn run() {
             application::commands::clone_sync_plan,
             application::commands::open_source_folder,
             application::commands::load_source_media_gallery,
+            application::commands::download_single_video,
+            application::commands::list_single_videos,
             application::commands::delete_source_media,
             application::commands::upsert_app_setting,
             application::commands::check_connector_updates,

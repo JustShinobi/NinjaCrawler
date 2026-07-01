@@ -562,6 +562,18 @@ pub fn load_source_media_gallery(
 }
 
 #[tauri::command]
+pub fn download_single_video(
+    url: String,
+) -> Result<crate::domain::models::SingleVideo, String> {
+    workspace_repository::download_single_video(url)
+}
+
+#[tauri::command]
+pub fn list_single_videos() -> Result<Vec<crate::domain::models::SingleVideo>, String> {
+    workspace_repository::list_single_videos()
+}
+
+#[tauri::command]
 pub fn delete_source_media(
     source_id: String,
     relative_paths: Vec<String>,

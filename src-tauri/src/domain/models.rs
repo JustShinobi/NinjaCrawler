@@ -448,6 +448,25 @@ pub struct SourceMediaGallery {
     pub posts: Vec<MediaGalleryPost>,
 }
 
+/// Vídeo avulso capturado por URL (via Companion), fora da estrutura de perfis.
+/// Fica numa raiz "Single videos" plana; o catálogo guarda os metadados para o
+/// media view filtrar por provider/autor/data.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SingleVideo {
+    pub id: String,
+    pub provider: String,
+    pub source_url: String,
+    pub provider_video_id: Option<String>,
+    pub uploader: Option<String>,
+    pub title: Option<String>,
+    pub relative_path: String,
+    pub absolute_path: String,
+    pub media_type: String,
+    pub captured_at: Option<i64>,
+    pub downloaded_at: String,
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SourceSyncQueueProviderStatus {

@@ -32,7 +32,7 @@ use crate::domain::models::{
     RuntimeLogQuery, SchedulerGroup, SchedulerGroupUpsert, SchedulerPlanCriteria,
     SchedulerPlanNotifications, SchedulerSet, SchedulerSetUpsert, SetSyncPlanPauseInput,
     SkipSyncPlanInput, SourceAvailabilityCheckItem, SourceAvailabilityCheckResult,
-    SourceMediaGallery, SourceProfile,
+    SingleVideo, SourceMediaGallery, SourceProfile,
     SourceProfileDeleteMode, SourceProfileUpsert, SourceSyncOptions, SourceSyncRun, SyncPlan,
     SyncPlanRun, SyncPlanTargetPreview, SyncPlanTargetPreviewInput, SyncPlanTargetPreviewSource,
     SyncPlanUpsert, TikTokSourceSyncOptions, TwitterSourceSyncOptions, WorkspaceSnapshot,
@@ -3742,6 +3742,250 @@ fn resolve_effective_storage_layout(
 
     fs::create_dir_all(&effective_layout.media_root).map_err(|error| error.to_string())?;
     Ok(effective_layout)
+}
+
+const SINGLE_VIDEOS_ROOT_SETTING_KEY: &str = "storage.single_videos_root";
+
+fn single_video_url_host(url: &str) -> String {
+    let after_scheme = url.split_once("://").map(|(_, rest)| rest).unwrap_or(url);
+    let host = after_scheme.split(['/', '?', '#']).next().unwrap_or("");
+    host.trim().trim_start_matches("www.").to_ascii_lowercase()
+}
+
+/// Provider suportado na captura de vídeo por URL (detectado pelo host).
+fn detect_single_video_provider(url: &str) -> Option<&'static str> {
+    let host = single_video_url_host(url);
+    if host == "tiktok.com" || host.ends_with(".tiktok.com") {
+        Some("tiktok")
+    } else if host == "instagram.com" || host.ends_with(".instagram.com") {
+        Some("instagram")
+    } else if host == "x.com"
+        || host.ends_with(".x.com")
+        || host == "twitter.com"
+        || host.ends_with(".twitter.com")
+    {
+        Some("twitter")
+    } else if host == "youtube.com" || host.ends_with(".youtube.com") || host == "youtu.be" {
+        Some("youtube")
+    } else {
+        None
+    }
+}
+
+/// Raiz "Single videos" (setting `storage.single_videos_root`; default
+/// `<media_root>/Single videos`). Garante a pasta criada.
+fn single_videos_root(connection: &Connection, layout: &StorageLayout) -> Result<PathBuf, String> {
+    if let Some(setting) = load_app_setting_value(connection, SINGLE_VIDEOS_ROOT_SETTING_KEY)? {
+        let trimmed = setting.trim();
+        if !trimmed.is_empty() {
+            let root = PathBuf::from(trimmed);
+            fs::create_dir_all(&root).map_err(|error| error.to_string())?;
+            return Ok(root);
+        }
+    }
+    let effective = resolve_effective_storage_layout(connection, layout)?;
+    let root = effective.media_root.join("Single videos");
+    fs::create_dir_all(&root).map_err(|error| error.to_string())?;
+    Ok(root)
+}
+
+fn single_video_meta_field(fields: &mut std::str::Split<'_, char>) -> Option<String> {
+    fields
+        .next()
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && *value != "NA")
+        .map(str::to_string)
+}
+
+/// Baixa um vídeo avulso por URL (yt-dlp; `--impersonate` para TikTok), salva na
+/// raiz plana "Single videos" e cataloga em `single_videos` (dedup por provider+id).
+pub fn download_single_video(url: String) -> Result<SingleVideo, String> {
+    with_workspace(|connection, layout| {
+        let url = url.trim().to_string();
+        if url.is_empty() {
+            return Err("A video URL is required.".to_string());
+        }
+        let provider = detect_single_video_provider(&url).ok_or_else(|| {
+            "Unsupported URL — only TikTok, Instagram, Twitter/X and YouTube video links are supported."
+                .to_string()
+        })?;
+        let root = single_videos_root(connection, layout)?;
+        let yt_dlp = connector_runtime::resolve_connector_executable(connection, layout, "yt-dlp")?;
+
+        let output_template = format!(
+            "{}/%(uploader,uploader_id,id)s_%(id)s.%(ext)s",
+            root.to_string_lossy().replace('\\', "/")
+        );
+        let mut command = Command::new(&yt_dlp);
+        configure_background_command(&mut command);
+        // Garante stdout em UTF-8 para os `--print` (títulos com acento/emoji).
+        command.env("PYTHONUTF8", "1").env("PYTHONIOENCODING", "utf-8");
+        command
+            .arg("--no-playlist")
+            .arg("--no-simulate")
+            .arg("--no-warnings")
+            .arg("--ignore-errors")
+            .arg("--no-cookies-from-browser")
+            .arg("--no-mtime")
+            .arg("--socket-timeout")
+            .arg("30")
+            .arg("--retries")
+            .arg("5")
+            .arg("--extractor-retries")
+            .arg("3");
+        // TikTok exige impersonation de TLS (curl_cffi); os demais não precisam.
+        if provider == "tiktok" {
+            command.arg("--impersonate").arg("chrome");
+        }
+        command
+            .arg("-o")
+            .arg(&output_template)
+            .arg("--print")
+            .arg("SVMETA\t%(id)s\t%(uploader,uploader_id)s\t%(title)s\t%(timestamp)s")
+            .arg("--print")
+            .arg("after_move:SVPATH\t%(filepath)s")
+            .arg(&url);
+
+        let output = command
+            .output()
+            .map_err(|error| format!("Failed to run yt-dlp: {error}"))?;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
+        let mut meta_line: Option<String> = None;
+        let mut file_path: Option<String> = None;
+        for line in stdout.lines() {
+            if let Some(rest) = line.strip_prefix("SVMETA\t") {
+                meta_line = Some(rest.to_string());
+            } else if let Some(rest) = line.strip_prefix("SVPATH\t") {
+                file_path = Some(rest.trim().to_string());
+            }
+        }
+
+        let file_path = file_path.filter(|value| !value.is_empty()).ok_or_else(|| {
+            let detail = stderr.trim();
+            if detail.is_empty() {
+                "yt-dlp did not download the video.".to_string()
+            } else {
+                format!("yt-dlp could not download the video: {detail}")
+            }
+        })?;
+        let absolute = PathBuf::from(&file_path);
+        if !absolute.exists() {
+            return Err(format!("Downloaded file was not found on disk: {file_path}"));
+        }
+
+        let mut fields = meta_line.as_deref().unwrap_or("").split('\t');
+        let provider_video_id = single_video_meta_field(&mut fields);
+        let uploader = single_video_meta_field(&mut fields);
+        let title = single_video_meta_field(&mut fields);
+        let captured_at = fields
+            .next()
+            .and_then(|value| value.trim().parse::<i64>().ok());
+
+        let relative_path = absolute
+            .strip_prefix(&root)
+            .unwrap_or(&absolute)
+            .to_string_lossy()
+            .replace('\\', "/");
+        let now = now_timestamp();
+        let id = new_id();
+
+        connection
+            .execute(
+                "INSERT INTO single_videos (
+                    id, provider, source_url, provider_video_id, uploader, title,
+                    relative_path, media_type, captured_at, downloaded_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                 ON CONFLICT(provider, provider_video_id) DO UPDATE SET
+                    source_url = excluded.source_url,
+                    uploader = COALESCE(excluded.uploader, uploader),
+                    title = COALESCE(excluded.title, title),
+                    relative_path = excluded.relative_path,
+                    media_type = excluded.media_type,
+                    captured_at = COALESCE(excluded.captured_at, captured_at),
+                    downloaded_at = excluded.downloaded_at",
+                params![
+                    id,
+                    provider,
+                    &url,
+                    provider_video_id,
+                    uploader,
+                    title,
+                    relative_path,
+                    "video",
+                    captured_at,
+                    now
+                ],
+            )
+            .map_err(|error| error.to_string())?;
+
+        // Em conflito o `id` persistido é o antigo; recupera o canônico.
+        let canonical_id = match provider_video_id.as_deref() {
+            Some(video_id) => connection
+                .query_row(
+                    "SELECT id FROM single_videos WHERE provider = ?1 AND provider_video_id = ?2",
+                    params![provider, video_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()
+                .map_err(|error| error.to_string())?
+                .unwrap_or_else(|| id.clone()),
+            None => id.clone(),
+        };
+
+        Ok(SingleVideo {
+            id: canonical_id,
+            provider: provider.to_string(),
+            source_url: url,
+            provider_video_id,
+            uploader,
+            title,
+            absolute_path: absolute.to_string_lossy().to_string(),
+            relative_path,
+            media_type: "video".to_string(),
+            captured_at,
+            downloaded_at: now,
+        })
+    })
+}
+
+/// Lista os vídeos avulsos catalogados (mais recentes primeiro).
+pub fn list_single_videos() -> Result<Vec<SingleVideo>, String> {
+    with_workspace(|connection, layout| {
+        let root = single_videos_root(connection, layout)?;
+        let mut statement = connection
+            .prepare(
+                "SELECT id, provider, source_url, provider_video_id, uploader, title,
+                        relative_path, media_type, captured_at, downloaded_at
+                 FROM single_videos
+                 ORDER BY downloaded_at DESC",
+            )
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map([], |row| {
+                let relative_path: String = row.get(6)?;
+                Ok(SingleVideo {
+                    id: row.get(0)?,
+                    provider: row.get(1)?,
+                    source_url: row.get(2)?,
+                    provider_video_id: row.get(3)?,
+                    uploader: row.get(4)?,
+                    title: row.get(5)?,
+                    absolute_path: root.join(&relative_path).to_string_lossy().to_string(),
+                    relative_path,
+                    media_type: row.get(7)?,
+                    captured_at: row.get(8)?,
+                    downloaded_at: row.get(9)?,
+                })
+            })
+            .map_err(|error| error.to_string())?;
+        let mut videos = Vec::new();
+        for row in rows {
+            videos.push(row.map_err(|error| error.to_string())?);
+        }
+        Ok(videos)
+    })
 }
 
 pub fn run_instagram_media_naming_ledger_backfill<F>(
