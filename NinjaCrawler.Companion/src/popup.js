@@ -4,6 +4,8 @@ import {
   detectProviderFromUrl,
   detectTargetFromUrl,
   detectProfileFromUrl,
+  detectVideoFromUrl,
+  downloadSingleVideo,
   downloadTarget,
   importAccount,
   loadContext,
@@ -20,6 +22,7 @@ const elements = {
   existingBanner: document.querySelector('#existingBanner'),
   existingMeta: document.querySelector('#existingMeta'),
   targetButton: document.querySelector('#targetButton'),
+  singleVideoButton: document.querySelector('#singleVideoButton'),
   syncButton: document.querySelector('#syncButton'),
   addButton: document.querySelector('#addButton'),
   importAccountButton: document.querySelector('#importAccountButton'),
@@ -40,6 +43,7 @@ const state = {
   detected: null,
   provider: null,
   target: null,
+  video: null,
   context: null,
   accountCapture: null,
   accountPreview: null,
@@ -54,6 +58,7 @@ async function boot() {
   state.detected = detectProfileFromUrl(tab?.url)
   state.provider = state.detected?.provider ?? detectProviderFromUrl(tab?.url)
   state.target = detectTargetFromUrl(tab?.url)
+  state.video = detectVideoFromUrl(tab?.url)
 
   if (!state.provider || (!state.detected && state.provider === 'reddit')) {
     showUnsupported()
@@ -82,6 +87,7 @@ function bindEvents() {
   elements.addButton?.addEventListener('click', () => submitAdd())
   elements.syncButton?.addEventListener('click', () => submitSync())
   elements.targetButton?.addEventListener('click', () => submitTargetDownload())
+  elements.singleVideoButton?.addEventListener('click', () => submitSingleVideoDownload())
   elements.importAccountButton?.addEventListener('click', () => startAccountImport())
   elements.confirmAccountImport?.addEventListener('click', () => submitAccountImport())
   elements.cancelAccountImport?.addEventListener('click', () => closeAccountImport())
@@ -120,6 +126,10 @@ function renderContext() {
     elements.syncButton.classList.add('hidden')
     elements.addButton.classList.remove('hidden')
   }
+
+  // "Save as single video" aparece sempre que a aba é uma URL de vídeo baixável,
+  // independente de haver perfil rastreado (baixa avulso na estrutura própria).
+  elements.singleVideoButton?.classList.toggle('hidden', !state.video)
 
   elements.importAccountButton?.classList.toggle('hidden', state.provider === 'reddit')
   setMessage('')
@@ -284,6 +294,23 @@ async function submitTargetDownload() {
   }
 }
 
+async function submitSingleVideoDownload() {
+  const video = state.video
+  if (!video?.url) return
+
+  setBusy(true)
+  setMessage('Downloading video…')
+
+  try {
+    await downloadSingleVideo(video.url)
+    setMessage('Saved to Single videos.', 'ok')
+  } catch (error) {
+    setMessage(error.message, 'error')
+  } finally {
+    setBusy(false)
+  }
+}
+
 function showUnsupported() {
   elements.profileSummary.textContent = 'No supported profile detected'
   setStatus('neutral', 'Idle')
@@ -317,6 +344,7 @@ function setBusy(isBusy) {
     elements.addButton,
     elements.syncButton,
     elements.targetButton,
+    elements.singleVideoButton,
     elements.importAccountButton,
     elements.confirmAccountImport,
     elements.cancelAccountImport,

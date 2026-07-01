@@ -68,6 +68,12 @@ struct DownloadTargetRequest {
     target: DetectedTarget,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DownloadSingleVideoRequest {
+    url: String,
+}
+
 struct HttpRequest {
     method: String,
     path: String,
@@ -252,6 +258,14 @@ fn route_request(app: AppHandle, request: HttpRequest) -> Vec<u8> {
         ("POST", path) if path == format!("{API_PREFIX}/target") => {
             match parse_json::<DownloadTargetRequest>(&request.body)
                 .and_then(|input| download_target(app, input))
+            {
+                Ok(payload) => json_response(200, &payload),
+                Err(error) => error_response(400, &error),
+            }
+        }
+        ("POST", path) if path == format!("{API_PREFIX}/single-video") => {
+            match parse_json::<DownloadSingleVideoRequest>(&request.body)
+                .and_then(|input| workspace_repository::download_single_video(input.url))
             {
                 Ok(payload) => json_response(200, &payload),
                 Err(error) => error_response(400, &error),
