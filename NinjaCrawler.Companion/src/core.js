@@ -66,6 +66,28 @@ export function detectTargetFromUrl(rawUrl) {
     }
   }
 
+  // TikTok story: a `/@handle/video/<id>` (ou `/photo/<id>`) aberta a partir de um
+  // story. Vira um "story" do perfil (baixa na pasta Stories/ do source rastreado).
+  if (host === 'tiktok.com' || host.endsWith('.tiktok.com')) {
+    const index = segments.findIndex((segment) => segment === 'video' || segment === 'photo')
+    if (
+      index >= 0
+      && segments[index + 1]
+      && /^\d+$/.test(segments[index + 1])
+      && segments[0]?.startsWith('@')
+    ) {
+      const handle = normalizeHandle(segments[0])
+      return {
+        kind: 'tiktokStory',
+        provider: 'tiktok',
+        handle,
+        displayName: handle.replace(/^@/, ''),
+        storyId: segments[index + 1],
+        url: url.href,
+      }
+    }
+  }
+
   return null
 }
 

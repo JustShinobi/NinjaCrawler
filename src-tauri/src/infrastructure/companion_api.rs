@@ -406,6 +406,36 @@ fn download_target(
         return Err("Source id is required.".to_string());
     }
 
+    // TikTok story: a `/video/<id>` URL captured from a story. Download the single
+    // video straight into the profile's Stories/ folder (no queued sync).
+    if input.target.provider == "tiktok" {
+        let handle = normalize_handle(&input.target.handle);
+        let url = input.target.url.trim();
+        if url.is_empty() {
+            return Err("Selected TikTok video URL is missing.".to_string());
+        }
+        let snapshot = workspace_repository::bootstrap_workspace()?;
+        let source = snapshot
+            .sources
+            .iter()
+            .find(|source| source.id == source_id)
+            .ok_or_else(|| format!("Source '{source_id}' does not exist."))?;
+        if source.provider != "tiktok" {
+            return Err("Selected story download requires a TikTok source.".to_string());
+        }
+        if !handle.is_empty()
+            && canonical_profile_key("tiktok", &source.handle)
+                != canonical_profile_key("tiktok", &handle)
+        {
+            return Err("Selected story does not match the requested source.".to_string());
+        }
+        workspace_repository::download_tiktok_story_to_source(source.clone(), url.to_string())?;
+        return Ok(json!({
+            "downloaded": true,
+            "target": input.target
+        }));
+    }
+
     if input.target.kind != "instagramStory" || input.target.provider != "instagram" {
         return Err("Only selected Instagram stories are supported.".to_string());
     }

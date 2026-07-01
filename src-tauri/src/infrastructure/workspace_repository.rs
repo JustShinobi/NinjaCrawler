@@ -3797,6 +3797,122 @@ fn single_video_meta_field(fields: &mut std::str::Split<'_, char>) -> Option<Str
         .map(str::to_string)
 }
 
+struct SingleVideoDownloadResult {
+    absolute_path: PathBuf,
+    provider_video_id: Option<String>,
+    uploader: Option<String>,
+    title: Option<String>,
+    captured_at: Option<i64>,
+}
+
+/// Baixa UM vídeo por URL via yt-dlp (`--impersonate` para TikTok) para `dest_dir`
+/// e devolve o caminho final + metadados. Usado pelos vídeos avulsos e pelo
+/// download direcionado de story num perfil.
+fn run_yt_dlp_video_download(
+    connection: &Connection,
+    layout: &StorageLayout,
+    url: &str,
+    provider: &str,
+    dest_dir: &Path,
+) -> Result<SingleVideoDownloadResult, String> {
+    fs::create_dir_all(dest_dir).map_err(|error| error.to_string())?;
+    let yt_dlp = connector_runtime::resolve_connector_executable(connection, layout, "yt-dlp")?;
+
+    let output_template = format!(
+        "{}/%(uploader,uploader_id,id)s_%(id)s.%(ext)s",
+        dest_dir.to_string_lossy().replace('\\', "/")
+    );
+    let mut command = Command::new(&yt_dlp);
+    configure_background_command(&mut command);
+    command.env("PYTHONUTF8", "1").env("PYTHONIOENCODING", "utf-8");
+    command
+        .arg("--no-playlist")
+        .arg("--no-simulate")
+        .arg("--no-warnings")
+        .arg("--ignore-errors")
+        .arg("--no-cookies-from-browser")
+        .arg("--no-mtime")
+        .arg("--socket-timeout")
+        .arg("30")
+        .arg("--retries")
+        .arg("5")
+        .arg("--extractor-retries")
+        .arg("3");
+    // TikTok exige impersonation de TLS (curl_cffi); os demais não precisam.
+    if provider == "tiktok" {
+        command.arg("--impersonate").arg("chrome");
+    }
+    command
+        .arg("-o")
+        .arg(&output_template)
+        .arg("--print")
+        .arg("SVMETA\t%(id)s\t%(uploader,uploader_id)s\t%(title)s\t%(timestamp)s")
+        .arg("--print")
+        .arg("after_move:SVPATH\t%(filepath)s")
+        .arg(url);
+
+    let output = command
+        .output()
+        .map_err(|error| format!("Failed to run yt-dlp: {error}"))?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    let mut meta_line: Option<String> = None;
+    let mut file_path: Option<String> = None;
+    for line in stdout.lines() {
+        if let Some(rest) = line.strip_prefix("SVMETA\t") {
+            meta_line = Some(rest.to_string());
+        } else if let Some(rest) = line.strip_prefix("SVPATH\t") {
+            file_path = Some(rest.trim().to_string());
+        }
+    }
+
+    let file_path = file_path.filter(|value| !value.is_empty()).ok_or_else(|| {
+        let detail = stderr.trim();
+        if detail.is_empty() {
+            "yt-dlp did not download the video.".to_string()
+        } else {
+            format!("yt-dlp could not download the video: {detail}")
+        }
+    })?;
+    let absolute_path = PathBuf::from(&file_path);
+    if !absolute_path.exists() {
+        return Err(format!("Downloaded file was not found on disk: {file_path}"));
+    }
+
+    let mut fields = meta_line.as_deref().unwrap_or("").split('\t');
+    let provider_video_id = single_video_meta_field(&mut fields);
+    let uploader = single_video_meta_field(&mut fields);
+    let title = single_video_meta_field(&mut fields);
+    let captured_at = fields
+        .next()
+        .and_then(|value| value.trim().parse::<i64>().ok());
+
+    Ok(SingleVideoDownloadResult {
+        absolute_path,
+        provider_video_id,
+        uploader,
+        title,
+        captured_at,
+    })
+}
+
+/// Baixa um story do TikTok (URL `/video/<id>`) direto na pasta `Stories/` do
+/// perfil rastreado — o mesmo destino usado pelo sync de stories. A galeria do
+/// ProfileView já exibe pelo subfolder.
+pub fn download_tiktok_story_to_source(source: SourceProfile, video_url: String) -> Result<(), String> {
+    with_workspace(|connection, layout| {
+        if !source.provider.eq_ignore_ascii_case("tiktok") {
+            return Err("Story download requires a TikTok source.".to_string());
+        }
+        let profile_root =
+            resolved_source_media_output_root_with_connection(connection, layout, &source)?;
+        let stories_dir = profile_root.join("Stories");
+        run_yt_dlp_video_download(connection, layout, video_url.trim(), "tiktok", &stories_dir)?;
+        Ok(())
+    })
+}
+
 /// Baixa um vídeo avulso por URL (yt-dlp; `--impersonate` para TikTok), salva na
 /// raiz plana "Single videos" e cataloga em `single_videos` (dedup por provider+id).
 pub fn download_single_video(url: String) -> Result<SingleVideo, String> {
@@ -3810,78 +3926,13 @@ pub fn download_single_video(url: String) -> Result<SingleVideo, String> {
                 .to_string()
         })?;
         let root = single_videos_root(connection, layout)?;
-        let yt_dlp = connector_runtime::resolve_connector_executable(connection, layout, "yt-dlp")?;
 
-        let output_template = format!(
-            "{}/%(uploader,uploader_id,id)s_%(id)s.%(ext)s",
-            root.to_string_lossy().replace('\\', "/")
-        );
-        let mut command = Command::new(&yt_dlp);
-        configure_background_command(&mut command);
-        // Garante stdout em UTF-8 para os `--print` (títulos com acento/emoji).
-        command.env("PYTHONUTF8", "1").env("PYTHONIOENCODING", "utf-8");
-        command
-            .arg("--no-playlist")
-            .arg("--no-simulate")
-            .arg("--no-warnings")
-            .arg("--ignore-errors")
-            .arg("--no-cookies-from-browser")
-            .arg("--no-mtime")
-            .arg("--socket-timeout")
-            .arg("30")
-            .arg("--retries")
-            .arg("5")
-            .arg("--extractor-retries")
-            .arg("3");
-        // TikTok exige impersonation de TLS (curl_cffi); os demais não precisam.
-        if provider == "tiktok" {
-            command.arg("--impersonate").arg("chrome");
-        }
-        command
-            .arg("-o")
-            .arg(&output_template)
-            .arg("--print")
-            .arg("SVMETA\t%(id)s\t%(uploader,uploader_id)s\t%(title)s\t%(timestamp)s")
-            .arg("--print")
-            .arg("after_move:SVPATH\t%(filepath)s")
-            .arg(&url);
-
-        let output = command
-            .output()
-            .map_err(|error| format!("Failed to run yt-dlp: {error}"))?;
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
-
-        let mut meta_line: Option<String> = None;
-        let mut file_path: Option<String> = None;
-        for line in stdout.lines() {
-            if let Some(rest) = line.strip_prefix("SVMETA\t") {
-                meta_line = Some(rest.to_string());
-            } else if let Some(rest) = line.strip_prefix("SVPATH\t") {
-                file_path = Some(rest.trim().to_string());
-            }
-        }
-
-        let file_path = file_path.filter(|value| !value.is_empty()).ok_or_else(|| {
-            let detail = stderr.trim();
-            if detail.is_empty() {
-                "yt-dlp did not download the video.".to_string()
-            } else {
-                format!("yt-dlp could not download the video: {detail}")
-            }
-        })?;
-        let absolute = PathBuf::from(&file_path);
-        if !absolute.exists() {
-            return Err(format!("Downloaded file was not found on disk: {file_path}"));
-        }
-
-        let mut fields = meta_line.as_deref().unwrap_or("").split('\t');
-        let provider_video_id = single_video_meta_field(&mut fields);
-        let uploader = single_video_meta_field(&mut fields);
-        let title = single_video_meta_field(&mut fields);
-        let captured_at = fields
-            .next()
-            .and_then(|value| value.trim().parse::<i64>().ok());
+        let result = run_yt_dlp_video_download(connection, layout, &url, provider, &root)?;
+        let absolute = result.absolute_path;
+        let provider_video_id = result.provider_video_id;
+        let uploader = result.uploader;
+        let title = result.title;
+        let captured_at = result.captured_at;
 
         let relative_path = absolute
             .strip_prefix(&root)

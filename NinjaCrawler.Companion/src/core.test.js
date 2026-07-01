@@ -1,5 +1,26 @@
 import { describe, expect, it } from 'vitest'
-import { detectVideoFromUrl } from './core.js'
+import { detectTargetFromUrl, detectVideoFromUrl } from './core.js'
+
+describe('detectTargetFromUrl', () => {
+  it('detects a TikTok story from a /video/ link', () => {
+    const target = detectTargetFromUrl('https://www.tiktok.com/@sgaby.tls/video/7657248568637394194')
+    expect(target).toMatchObject({
+      kind: 'tiktokStory',
+      provider: 'tiktok',
+      handle: '@sgaby.tls',
+      storyId: '7657248568637394194',
+    })
+  })
+
+  it('still detects Instagram stories', () => {
+    const target = detectTargetFromUrl('https://www.instagram.com/stories/someone/1234567890/')
+    expect(target).toMatchObject({ kind: 'instagramStory', provider: 'instagram', storyId: '1234567890' })
+  })
+
+  it('ignores a plain TikTok profile', () => {
+    expect(detectTargetFromUrl('https://www.tiktok.com/@sgaby.tls')).toBeNull()
+  })
+})
 
 describe('detectVideoFromUrl', () => {
   it('detects TikTok /video/ and /photo/ links', () => {
