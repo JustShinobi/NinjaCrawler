@@ -6108,6 +6108,16 @@ fn upsert_source_profile_with_connection(
     preserve_persisted_instagram_metadata(connection, &id, &mut input);
     preserve_persisted_twitter_metadata(connection, &id, &mut input);
     preserve_persisted_tiktok_metadata(connection, &id, &mut input);
+    // Handle anterior (se o perfil já existe) para registrar uma troca MANUAL
+    // no histórico, espelhando o que o auto-update (via user id) já registra.
+    let existing_source_state = connection
+        .query_row(
+            "SELECT handle, account_id FROM source_profiles WHERE id = ?1 AND deleted_at IS NULL",
+            params![id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?;
     let labels = to_json_array(&input.labels)?;
     let sync_options = serialize_source_sync_options(&input.provider, &input.sync_options)?;
     let account_id = validate_explicit_source_account_binding(
@@ -6176,6 +6186,33 @@ fn upsert_source_profile_with_connection(
             ],
         )
         .map_err(|error| error.to_string())?;
+
+    // Se um perfil existente teve o handle alterado (edição manual), registra no
+    // histórico para ficar rastreável, como o auto-update faz.
+    if let Some((old_handle, existing_account_id)) = existing_source_state {
+        let old_norm = sanitize_source_handle(&input.provider, &old_handle);
+        let new_norm = sanitize_source_handle(&input.provider, &input.handle);
+        if !old_norm.trim().is_empty()
+            && !new_norm.trim().is_empty()
+            && !old_norm.eq_ignore_ascii_case(&new_norm)
+        {
+            if let Some(run_account_id) = existing_account_id
+                .or_else(|| input.account_id.clone())
+                .filter(|value| !value.trim().is_empty())
+            {
+                record_manual_handle_change_run(
+                    connection,
+                    &id,
+                    &run_account_id,
+                    &input.provider,
+                    old_norm.trim_start_matches('@'),
+                    new_norm.trim_start_matches('@'),
+                    &now,
+                )?;
+            }
+        }
+    }
+
     load_snapshot(connection, layout)
 }
 
@@ -12234,6 +12271,45 @@ fn connector_degraded_capabilities(
         .collect()
 }
 
+/// Registra no histórico (`source_sync_runs`) uma troca MANUAL de handle, para
+/// aparecer na aba History do editor — espelhando o rastro que o auto-update
+/// (resolução via user id) deixa no summary do sync.
+fn record_manual_handle_change_run(
+    connection: &Connection,
+    source_id: &str,
+    account_id: &str,
+    provider: &str,
+    old_handle: &str,
+    new_handle: &str,
+    timestamp: &str,
+) -> Result<(), String> {
+    connection
+        .execute(
+            "INSERT INTO source_sync_runs (
+                id, source_id, account_id, provider, tool, trigger, status,
+                summary, command_preview, manifest_summary_json,
+                degraded_capabilities_json, started_at, finished_at, created_at
+             )
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?12, ?12)",
+            params![
+                new_id(),
+                source_id,
+                account_id,
+                provider,
+                "manual",
+                "manual_handle_edit",
+                "succeeded",
+                format!("Handle changed manually: @{old_handle} → @{new_handle}."),
+                format!("manual handle edit: @{old_handle} -> @{new_handle}"),
+                Option::<String>::None,
+                "[]",
+                timestamp,
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
 fn persist_source_sync_run(
     connection: &Connection,
     context: &SourceSyncContext,
@@ -16136,6 +16212,43 @@ mod tests {
             Some(INSTAGRAM_SCRAWLER_IMPORTER_ID)
         );
         assert_eq!(source.imported_at.as_deref(), Some("2026-03-22T15:30:00Z"));
+    }
+
+    #[test]
+    fn manual_handle_change_records_a_history_run() {
+        let (_temp_dir, layout) = create_test_layout();
+        let connection = database::open_connection(&layout.db_path).expect("connection");
+
+        upsert_provider_account_with_connection(&connection, &layout, sample_account("account-1", "tiktok"))
+            .expect("account should upsert");
+        upsert_source_profile_with_connection(&connection, &layout, sample_source("source-1", "tiktok", Some("account-1")))
+            .expect("source should upsert");
+
+        let runs = |conn: &Connection| -> i64 {
+            conn.query_row(
+                "SELECT COUNT(*) FROM source_sync_runs WHERE source_id = ?1 AND trigger = 'manual_handle_edit'",
+                params!["source-1"],
+                |row| row.get(0),
+            )
+            .expect("count")
+        };
+
+        // Creating the source records no handle-change run.
+        assert_eq!(runs(&connection), 0);
+
+        // Changing the handle records exactly one history run.
+        let mut renamed = sample_source("source-1", "tiktok", Some("account-1"));
+        renamed.handle = "@renamed".to_string();
+        upsert_source_profile_with_connection(&connection, &layout, renamed)
+            .expect("handle change should upsert");
+        assert_eq!(runs(&connection), 1);
+
+        // Re-saving without changing the handle does not add another run.
+        let mut unchanged = sample_source("source-1", "tiktok", Some("account-1"));
+        unchanged.handle = "@renamed".to_string();
+        upsert_source_profile_with_connection(&connection, &layout, unchanged)
+            .expect("no-op resave should upsert");
+        assert_eq!(runs(&connection), 1);
     }
 
     fn sample_instagram_cookies() -> Vec<ProviderAccountCookie> {

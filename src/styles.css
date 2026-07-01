@@ -6866,6 +6866,27 @@ p {
   cursor: text;
 }
 
+/* Locked handle row: the value on the left, an Edit button to unlock on the right. */
+.source-editor-handle-locked {
+  justify-content: space-between;
+  gap: 0.5rem;
+  cursor: default;
+}
+
+.source-editor-handle-locked-value {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.source-editor-handle-edit-button {
+  flex-shrink: 0;
+  padding: 0.15rem 0.7rem;
+  font-size: 0.78rem;
+  font-weight: 600;
+}
+
 .source-editor-field-spacer {
   visibility: hidden;
 }
