@@ -60,6 +60,10 @@ export function SourceEditorDialog({
   const [activeTab, setActiveTab] = useState<SourceEditorTabKey>('profile')
   const [accountDefaultsHint, setAccountDefaultsHint] = useState<string>()
   const [submitError, setSubmitError] = useState<string>()
+  // Handle é bloqueado por padrão em perfis existentes; a maioria dos providers
+  // atualiza sozinha via user id, mas TikTok não consegue — este destravamento
+  // manual permite corrigir o handle de um perfil renomeado.
+  const [handleUnlocked, setHandleUnlocked] = useState(false)
   const appliedDefaultsAccountId = useRef<string | undefined>(undefined)
   const isEditMode = Boolean(source)
 
@@ -506,17 +510,38 @@ export function SourceEditorDialog({
             <div className="form-grid source-editor-form-grid source-editor-form-grid-profile source-editor-profile-grid">
               <label className="field source-editor-profile-handle-field">
                 <span>User URL</span>
-                {isEditMode ? (
-                  <div className="source-editor-static-field source-editor-profile-readonly-field">{draft.handle}</div>
+                {isEditMode && !handleUnlocked ? (
+                  <div className="source-editor-static-field source-editor-profile-readonly-field source-editor-handle-locked">
+                    <span className="source-editor-handle-locked-value">{draft.handle}</span>
+                    <button
+                      type="button"
+                      className="ghost-button source-editor-handle-edit-button"
+                      onClick={() => setHandleUnlocked(true)}
+                      title="Unlock the handle to fix a renamed profile"
+                      aria-label="Edit handle"
+                    >
+                      Edit
+                    </button>
+                  </div>
                 ) : (
                   <input
                     onChange={(event) => setDraft((current) => ({ ...current, handle: event.target.value }))}
                     placeholder="Enter user profile URL here..."
                     required
                     value={draft.handle}
+                    autoFocus={handleUnlocked}
                   />
                 )}
-                {isEditMode ? <small>User URL is locked for existing profiles.</small> : null}
+                {isEditMode ? (
+                  handleUnlocked ? (
+                    <small>
+                      Manual override — use only to fix a renamed profile. New media is saved under the new handle;
+                      already-downloaded files stay in the old folder.
+                    </small>
+                  ) : (
+                    <small>User URL is locked for existing profiles. Use Edit to fix a renamed profile.</small>
+                  )
+                ) : null}
               </label>
 
               <label className="field source-editor-profile-name-field">

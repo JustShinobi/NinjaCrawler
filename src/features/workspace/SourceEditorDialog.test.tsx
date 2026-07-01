@@ -177,8 +177,29 @@ describe('SourceEditorDialog', () => {
 
     expect(screen.queryByRole('textbox', { name: /user url/i })).toBeNull()
     expect(screen.getByText('@alpha')).toBeTruthy()
-    expect(screen.getByText('User URL is locked for existing profiles.')).toBeTruthy()
+    expect(screen.getByText(/User URL is locked for existing profiles/)).toBeTruthy()
     expect(screen.queryByLabelText(/accent color/i)).toBeNull()
+  })
+
+  it('unlocks the user url for manual editing via the Edit button', () => {
+    renderDialog(
+      {},
+      {
+        source: buildSource(),
+      },
+    )
+
+    // Locked by default: value shown, no input.
+    expect(screen.queryByRole('textbox', { name: /user url/i })).toBeNull()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Edit handle' }))
+
+    // Now editable: an input with the current handle that accepts a new value.
+    const input = screen.getByRole('textbox', { name: /user url/i })
+    expect((input as HTMLInputElement).value).toBe('@alpha')
+    fireEvent.change(input, { target: { value: '@renamed' } })
+    expect((input as HTMLInputElement).value).toBe('@renamed')
+    expect(screen.getByText(/Manual override/)).toBeTruthy()
   })
 
   it('uses dedicated layout panels for profile, sync, and history tabs', () => {
