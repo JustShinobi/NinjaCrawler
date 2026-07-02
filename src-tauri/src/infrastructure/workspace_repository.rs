@@ -374,6 +374,61 @@ fn source_tiktok_sync_options(source: &SourceProfile) -> TikTokSourceSyncOptions
         .unwrap_or_else(|| normalize_tiktok_source_sync_options(None))
 }
 
+/// Grava a identidade estável do Instagram diretamente no perfil. O histórico
+/// de sync continua sendo uma fonte de recuperação para instalações antigas,
+/// mas não deve ser a única âncora porque o schema dos resumos evolui.
+fn persist_instagram_user_id_hint(
+    connection: &Connection,
+    source_id: &str,
+    user_id: &str,
+    timestamp: &str,
+) -> Result<(), String> {
+    let user_id = user_id.trim();
+    if user_id.is_empty() {
+        return Ok(());
+    }
+    let Some(json) = connection
+        .query_row(
+            "SELECT sync_options_json FROM source_profiles WHERE id = ?1 AND deleted_at IS NULL",
+            params![source_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?
+    else {
+        return Ok(());
+    };
+    let mut options = deserialize_source_sync_options("instagram", &json);
+    let instagram = options
+        .instagram
+        .get_or_insert_with(default_instagram_source_sync_options);
+    if let Some(existing_user_id) = instagram
+        .user_id_hint
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        if existing_user_id != user_id {
+            return Err(format!(
+                "Instagram identity mismatch for source '{source_id}': stored user id \
+                 '{existing_user_id}', resolved user id '{user_id}'."
+            ));
+        }
+        return Ok(());
+    }
+
+    instagram.user_id_hint = Some(user_id.to_string());
+    let serialized = serialize_source_sync_options("instagram", &options)?;
+    connection
+        .execute(
+            "UPDATE source_profiles SET sync_options_json = ?2, updated_at = ?3
+             WHERE id = ?1 AND deleted_at IS NULL",
+            params![source_id, serialized, timestamp],
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
 /// Grava o `userIdHint` do Twitter no perfil após o primeiro sync bem-sucedido,
 /// quando ainda não havia um. Permite detectar renames e duplicatas futuras.
 fn persist_twitter_user_id_hint(
@@ -3010,9 +3065,11 @@ pub fn check_source_availability(
                 .and_then(|instagram| instagram.user_id_hint.clone())
                 .map(|value| value.trim().to_string())
                 .filter(|value| !value.is_empty());
-            let user_id_hint = load_latest_instagram_profile_user_id_hint(connection, &id)
-                .ok()
-                .or(source_user_id_hint);
+            let user_id_hint = source_user_id_hint.or_else(|| {
+                load_latest_instagram_profile_user_id_hint(connection, &id)
+                    .ok()
+                    .flatten()
+            });
 
             let selected_account_id = normalized_account_id_override
                 .as_deref()
@@ -3124,20 +3181,40 @@ pub fn check_source_availability(
                 .as_ref()
                 .err()
                 .map(|error| classify_instagram_identity_error(error));
+            let normalized_user_id_hint = user_id_hint
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty());
+            let primary_identity_mismatch = match (&primary, normalized_user_id_hint) {
+                (Ok(identity), Some(expected_user_id)) => {
+                    identity.user_id.trim() != expected_user_id
+                }
+                _ => false,
+            };
             let fallback = match (
                 primary_classification,
-                user_id_hint
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|value| !value.is_empty()),
+                normalized_user_id_hint,
+                primary_identity_mismatch,
             ) {
-                (Some(InstagramIdentityErrorClassification::PrivateOrRestricted), Some(hint)) => {
+                (_, Some(hint), true) => Some(instagram_connector::resolve_profile_identity(
+                    &request,
+                    Some(hint),
+                )),
+                (
+                    Some(InstagramIdentityErrorClassification::PrivateOrRestricted),
+                    Some(hint),
+                    false,
+                ) => {
                     Some(instagram_connector::resolve_profile_identity(
                         &request,
                         Some(hint),
                     ))
                 }
-                (Some(InstagramIdentityErrorClassification::UsernameUnresolvable), Some(hint)) => {
+                (
+                    Some(InstagramIdentityErrorClassification::UsernameUnresolvable),
+                    Some(hint),
+                    false,
+                ) => {
                     Some(instagram_connector::resolve_profile_identity(
                         &request,
                         Some(hint),
@@ -6118,6 +6195,31 @@ fn upsert_source_profile_with_connection(
         )
         .optional()
         .map_err(|error| error.to_string())?;
+
+    // A troca manual é suportada por todos os providers. Para Instagram,
+    // preserve também o nome anterior usado pela busca e pela auditoria de
+    // identidade, igual ao caminho de rename automático.
+    if input.provider.eq_ignore_ascii_case("instagram") {
+        if let Some((old_handle, _)) = existing_source_state.as_ref() {
+            let old_normalized = sanitize_source_handle("instagram", old_handle);
+            let new_normalized = sanitize_source_handle("instagram", &input.handle);
+            if !old_normalized.is_empty()
+                && !new_normalized.is_empty()
+                && !old_normalized.eq_ignore_ascii_case(&new_normalized)
+            {
+                let instagram = input
+                    .sync_options
+                    .instagram
+                    .get_or_insert_with(default_instagram_source_sync_options);
+                instagram.previous_handles = push_previous_instagram_handle(
+                    instagram.previous_handles.take(),
+                    old_handle,
+                    &new_normalized,
+                );
+            }
+        }
+    }
+
     let labels = to_json_array(&input.labels)?;
     let sync_options = serialize_source_sync_options(&input.provider, &input.sync_options)?;
     let account_id = validate_explicit_source_account_binding(
@@ -8054,9 +8156,13 @@ fn resolve_instagram_source_identity_preflight(
     request: &mut instagram_connector::InstagramConnectorRequest,
     timestamp: &str,
 ) -> Result<Option<String>, SourceSyncOutcome> {
-    let user_id_hint = load_latest_instagram_profile_user_id_hint(connection, &context.source.id)
-        .ok()
-        .or_else(|| instagram_user_id_hint(source_options).map(str::to_string));
+    let user_id_hint = instagram_user_id_hint(source_options)
+        .map(str::to_string)
+        .or_else(|| {
+            load_latest_instagram_profile_user_id_hint(connection, &context.source.id)
+                .ok()
+                .flatten()
+        });
     let identity = match instagram_connector::resolve_profile_identity(
         request,
         user_id_hint.as_deref(),
@@ -8175,6 +8281,22 @@ fn resolve_instagram_source_identity_preflight(
     // um duplicado (handle novo de um usuário já cadastrado) — remove e cancela.
     let resolved_user_id = identity.user_id.trim();
     if !resolved_user_id.is_empty() {
+        if let Err(error) = persist_instagram_user_id_hint(
+            connection,
+            &context.source.id,
+            resolved_user_id,
+            timestamp,
+        ) {
+            let summary = format!(
+                "Instagram sync failed while persisting the stable profile identity: {error}"
+            );
+            return Err(blocked_instagram_source_sync_outcome(
+                request,
+                "failed",
+                summary.clone(),
+                Some(summary),
+            ));
+        }
         if let Some(outcome) = detect_duplicate_user_id_on_first_sync(
             connection,
             layout,
@@ -8439,6 +8561,16 @@ fn decide_instagram_availability_action(
 ) -> InstagramAvailabilityAction {
     match primary {
         Ok(identity) => {
+            let identity = match fallback {
+                Some(Ok(identity)) => identity,
+                Some(Err(error)) => {
+                    return InstagramAvailabilityAction::Failed(format!(
+                        "The current username resolved to a different Instagram account, and the \
+                         stored identity could not be resolved: {error}"
+                    ));
+                }
+                None => identity,
+            };
             let resolved_handle = sanitize_source_handle("instagram", &identity.username);
             let handle_changed = !resolved_handle.eq_ignore_ascii_case(previous_handle);
             InstagramAvailabilityAction::Resolved {
@@ -8806,7 +8938,7 @@ fn extract_http_status_code_from_message(error: &str) -> Option<u16> {
 fn load_latest_instagram_profile_user_id_hint(
     connection: &Connection,
     source_id: &str,
-) -> Result<String, String> {
+) -> Result<Option<String>, String> {
     let mut statement = connection
         .prepare(
             "SELECT manifest_summary_json
@@ -8826,23 +8958,21 @@ fn load_latest_instagram_profile_user_id_hint(
         let Some(raw_json) = row.map_err(|error| error.to_string())? else {
             continue;
         };
-        let Ok(summary) =
-            serde_json::from_str::<instagram_connector::InstagramManifestSummary>(&raw_json)
-        else {
+        let Ok(summary) = serde_json::from_str::<serde_json::Value>(&raw_json) else {
             continue;
         };
         let Some(user_id) = summary
-            .profile_user_id
-            .as_deref()
+            .get("profileUserId")
+            .and_then(serde_json::Value::as_str)
             .map(str::trim)
             .filter(|value| !value.is_empty())
         else {
             continue;
         };
-        return Ok(user_id.to_string());
+        return Ok(Some(user_id.to_string()));
     }
 
-    Err("No persisted Instagram profile user id hint found.".to_string())
+    Ok(None)
 }
 
 struct AccountSyncOutcome {
@@ -16215,40 +16345,221 @@ mod tests {
     }
 
     #[test]
-    fn manual_handle_change_records_a_history_run() {
+    fn manual_handle_change_is_supported_for_every_provider() {
         let (_temp_dir, layout) = create_test_layout();
         let connection = database::open_connection(&layout.db_path).expect("connection");
 
-        upsert_provider_account_with_connection(&connection, &layout, sample_account("account-1", "tiktok"))
-            .expect("account should upsert");
-        upsert_source_profile_with_connection(&connection, &layout, sample_source("source-1", "tiktok", Some("account-1")))
-            .expect("source should upsert");
-
-        let runs = |conn: &Connection| -> i64 {
+        let runs = |conn: &Connection, source_id: &str| -> i64 {
             conn.query_row(
                 "SELECT COUNT(*) FROM source_sync_runs WHERE source_id = ?1 AND trigger = 'manual_handle_edit'",
-                params!["source-1"],
+                params![source_id],
                 |row| row.get(0),
             )
             .expect("count")
         };
 
-        // Creating the source records no handle-change run.
-        assert_eq!(runs(&connection), 0);
+        for provider in ["instagram", "tiktok", "twitter", "reddit"] {
+            let account_id = format!("account-{provider}");
+            let source_id = format!("source-{provider}");
+            upsert_provider_account_with_connection(
+                &connection,
+                &layout,
+                sample_account(&account_id, provider),
+            )
+            .expect("account should upsert");
+            upsert_source_profile_with_connection(
+                &connection,
+                &layout,
+                sample_source(&source_id, provider, Some(&account_id)),
+            )
+            .expect("source should upsert");
 
-        // Changing the handle records exactly one history run.
-        let mut renamed = sample_source("source-1", "tiktok", Some("account-1"));
-        renamed.handle = "@renamed".to_string();
-        upsert_source_profile_with_connection(&connection, &layout, renamed)
-            .expect("handle change should upsert");
-        assert_eq!(runs(&connection), 1);
+            assert_eq!(runs(&connection, &source_id), 0, "{provider}");
 
-        // Re-saving without changing the handle does not add another run.
-        let mut unchanged = sample_source("source-1", "tiktok", Some("account-1"));
-        unchanged.handle = "@renamed".to_string();
-        upsert_source_profile_with_connection(&connection, &layout, unchanged)
-            .expect("no-op resave should upsert");
-        assert_eq!(runs(&connection), 1);
+            let mut renamed = sample_source(&source_id, provider, Some(&account_id));
+            renamed.handle = format!("@renamed-{provider}");
+            upsert_source_profile_with_connection(&connection, &layout, renamed.clone())
+                .expect("handle change should upsert");
+            assert_eq!(runs(&connection, &source_id), 1, "{provider}");
+
+            upsert_source_profile_with_connection(&connection, &layout, renamed)
+                .expect("no-op resave should upsert");
+            assert_eq!(runs(&connection, &source_id), 1, "{provider}");
+        }
+
+        let instagram_source =
+            load_source_profile_by_id(&connection, "source-instagram").expect("Instagram source");
+        let previous_handles = instagram_source
+            .sync_options
+            .instagram
+            .and_then(|options| options.previous_handles)
+            .unwrap_or_default();
+        assert!(
+            previous_handles
+                .iter()
+                .any(|handle| handle == "source-instagram"),
+            "manual Instagram rename should preserve the previous handle"
+        );
+    }
+
+    #[test]
+    fn legacy_instagram_manifest_keeps_identity_hint_recoverable() {
+        let (_temp_dir, layout) = create_test_layout();
+        let connection = database::open_connection(&layout.db_path).expect("connection");
+        upsert_provider_account_with_connection(
+            &connection,
+            &layout,
+            sample_account("account-1", "instagram"),
+        )
+        .expect("account should upsert");
+        upsert_source_profile_with_connection(
+            &connection,
+            &layout,
+            sample_source("source-1", "instagram", Some("account-1")),
+        )
+        .expect("source should upsert");
+
+        let legacy_summary = json!({
+            "profileUserId": "80735443629",
+            "sectionCount": 1,
+            "discoveredItemCount": 1,
+            "normalizedPostCount": 1,
+            "discoveredAssetCount": 1,
+            "queuedAssetCount": 1,
+            "skippedExistingPostCount": 0,
+            "skippedDuplicatePostCount": 0,
+            "skippedUnavailablePostCount": 0,
+            "skippedExistingAssetCount": 0,
+            "skippedDuplicateAssetCount": 0,
+            "downloadedAssetCount": 1,
+            "sections": [{
+                "section": "timeline",
+                "label": "Timeline",
+                "itemCount": 1,
+                "normalizedPostCount": 1,
+                "discoveredAssetCount": 1,
+                "queuedAssetCount": 1,
+                "skippedExistingPostCount": 0,
+                "skippedDuplicatePostCount": 0,
+                "skippedUnavailablePostCount": 0,
+                "skippedExistingAssetCount": 0,
+                "skippedDuplicateAssetCount": 0
+            }]
+        })
+        .to_string();
+        connection
+            .execute(
+                "INSERT INTO source_sync_runs (
+                    id, source_id, account_id, provider, tool, trigger, status,
+                    summary, command_preview, manifest_summary_json,
+                    degraded_capabilities_json, started_at, finished_at, created_at
+                 ) VALUES (
+                    'run-legacy', 'source-1', 'account-1', 'instagram',
+                    'internal.instagram', 'manual', 'succeeded', 'ok', 'test',
+                    ?1, '[]', '2026-06-21T13:40:44Z',
+                    '2026-06-21T13:41:01Z', '2026-06-21T13:41:01Z'
+                 )",
+                params![legacy_summary],
+            )
+            .expect("legacy run should insert");
+        set_source_sync_problem(
+            &connection,
+            "source-1",
+            "instagram_username_unresolvable",
+            "legacy resolver could not recover the renamed profile",
+            "2026-07-01T17:52:10Z",
+            true,
+        )
+        .expect("legacy problem marker");
+
+        let parsed = serde_json::from_str::<instagram_connector::InstagramManifestSummary>(
+            &legacy_summary,
+        )
+        .expect("new summary fields must default when reading legacy history");
+        assert_eq!(parsed.sections[0].skipped_out_of_range_item_count, 0);
+        assert_eq!(
+            load_latest_instagram_profile_user_id_hint(&connection, "source-1")
+                .expect("history lookup"),
+            Some("80735443629".to_string())
+        );
+
+        connection
+            .execute_batch(include_str!(
+                "../../migrations/0031_instagram_identity_hint_backfill.sql"
+            ))
+            .expect("identity backfill migration should be idempotent");
+        let recovered_source = connection
+            .query_row(
+                "SELECT
+                    json_extract(sync_options_json, '$.instagram.userIdHint'),
+                    ready_for_download,
+                    sync_problem_code
+                 FROM source_profiles WHERE id = 'source-1'",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                },
+            )
+            .expect("recovered source");
+        assert_eq!(recovered_source.0.as_deref(), Some("80735443629"));
+        assert_eq!(recovered_source.1, 1);
+        assert_eq!(recovered_source.2, None);
+    }
+
+    #[test]
+    fn instagram_identity_hint_is_persisted_once_and_cannot_drift() {
+        let (_temp_dir, layout) = create_test_layout();
+        let connection = database::open_connection(&layout.db_path).expect("connection");
+        upsert_provider_account_with_connection(
+            &connection,
+            &layout,
+            sample_account("account-1", "instagram"),
+        )
+        .expect("account should upsert");
+        upsert_source_profile_with_connection(
+            &connection,
+            &layout,
+            sample_source("source-1", "instagram", Some("account-1")),
+        )
+        .expect("source should upsert");
+
+        persist_instagram_user_id_hint(
+            &connection,
+            "source-1",
+            "80735443629",
+            "2026-07-02T00:00:00Z",
+        )
+        .expect("identity should persist");
+        persist_instagram_user_id_hint(
+            &connection,
+            "source-1",
+            "80735443629",
+            "2026-07-02T00:01:00Z",
+        )
+        .expect("same identity should be idempotent");
+
+        let mismatch = persist_instagram_user_id_hint(
+            &connection,
+            "source-1",
+            "999999",
+            "2026-07-02T00:02:00Z",
+        )
+        .expect_err("identity drift must be rejected");
+        assert!(mismatch.contains("identity mismatch"));
+
+        let source = load_source_profile_by_id(&connection, "source-1").expect("source");
+        assert_eq!(
+            source
+                .sync_options
+                .instagram
+                .and_then(|options| options.user_id_hint)
+                .as_deref(),
+            Some("80735443629")
+        );
     }
 
     fn sample_instagram_cookies() -> Vec<ProviderAccountCookie> {
@@ -18776,6 +19087,41 @@ mod tests {
                 handle_changed: true
             }
         );
+    }
+
+    #[test]
+    fn decide_instagram_availability_action_prefers_anchored_identity_after_handle_reuse() {
+        let primary = Ok(instagram_connector::InstagramProfileIdentity {
+            username: "old_name".to_string(),
+            user_id: "new-owner-id".to_string(),
+        });
+        let fallback = Ok(instagram_connector::InstagramProfileIdentity {
+            username: "renamed_original".to_string(),
+            user_id: "stable-owner-id".to_string(),
+        });
+
+        assert_eq!(
+            decide_instagram_availability_action("old_name", &primary, Some(&fallback)),
+            InstagramAvailabilityAction::Resolved {
+                resolved_handle: "renamed_original".to_string(),
+                handle_changed: true
+            }
+        );
+    }
+
+    #[test]
+    fn decide_instagram_availability_action_rejects_reused_handle_when_anchor_lookup_fails() {
+        let primary = Ok(instagram_connector::InstagramProfileIdentity {
+            username: "old_name".to_string(),
+            user_id: "new-owner-id".to_string(),
+        });
+        let fallback = Err("stable identity lookup failed".to_string());
+
+        assert!(matches!(
+            decide_instagram_availability_action("old_name", &primary, Some(&fallback)),
+            InstagramAvailabilityAction::Failed(message)
+                if message.contains("different Instagram account")
+        ));
     }
 
     #[test]

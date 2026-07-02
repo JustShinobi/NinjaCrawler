@@ -60,9 +60,9 @@ export function SourceEditorDialog({
   const [activeTab, setActiveTab] = useState<SourceEditorTabKey>('profile')
   const [accountDefaultsHint, setAccountDefaultsHint] = useState<string>()
   const [submitError, setSubmitError] = useState<string>()
-  // Handle é bloqueado por padrão em perfis existentes; a maioria dos providers
-  // atualiza sozinha via user id, mas TikTok não consegue — este destravamento
-  // manual permite corrigir o handle de um perfil renomeado.
+  // O handle fica bloqueado por padrão para evitar trocas acidentais de
+  // identidade. Todos os providers permitem um override manual explícito para
+  // recuperar perfis renomeados quando a resolução automática não for possível.
   const [handleUnlocked, setHandleUnlocked] = useState(false)
   const appliedDefaultsAccountId = useRef<string | undefined>(undefined)
   const isEditMode = Boolean(source)

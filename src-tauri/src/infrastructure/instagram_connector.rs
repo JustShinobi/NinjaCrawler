@@ -261,6 +261,7 @@ pub struct InstagramManifestSectionSummary {
     pub normalized_post_count: u32,
     pub discovered_asset_count: u32,
     pub queued_asset_count: u32,
+    #[serde(default)]
     pub skipped_out_of_range_item_count: u32,
     pub skipped_existing_post_count: u32,
     pub skipped_duplicate_post_count: u32,
@@ -1373,20 +1374,51 @@ pub fn resolve_profile_identity(
         request.request_delay_ms,
     )?;
     let username = request.username.trim();
-    let primary_error;
-
-    match load_profile_identity_by_username(&mut client, username) {
-        Ok(identity) => return Ok(identity),
-        Err(error) => primary_error = error,
-    }
-
-    let Some(user_id) = user_id_hint
+    let normalized_user_id_hint = user_id_hint
         .map(str::trim)
-        .filter(|value| !value.is_empty())
-    else {
+        .filter(|value| !value.is_empty());
+
+    let primary_error = match load_profile_identity_by_username(&mut client, username) {
+        Ok(identity) => {
+            let Some(expected_user_id) = normalized_user_id_hint else {
+                return Ok(identity);
+            };
+            if identity.user_id.trim() == expected_user_id {
+                return Ok(identity);
+            }
+
+            // A username can be claimed by another account after a rename. The
+            // persisted numeric id is the identity anchor, so never accept the
+            // newly resolved account merely because it owns the old handle.
+            format!(
+                "Instagram username '{username}' resolved to user id '{}', but this source is \
+                 anchored to user id '{expected_user_id}'.",
+                identity.user_id.trim()
+            )
+        }
+        Err(error) => error,
+    };
+
+    let Some(user_id) = normalized_user_id_hint else {
         return Err(primary_error);
     };
 
+    resolve_profile_identity_by_user_id_fallback(
+        request,
+        &mut client,
+        username,
+        user_id,
+        &primary_error,
+    )
+}
+
+fn resolve_profile_identity_by_user_id_fallback(
+    request: &InstagramConnectorRequest,
+    authenticated_client: &mut InstagramClient,
+    username: &str,
+    user_id: &str,
+    primary_error: &str,
+) -> Result<InstagramProfileIdentity, String> {
     // Resolver `user_id -> username` é uma consulta pública. Sessões importadas
     // degradadas (cookies expirados) fazem o endpoint retornar 400, então
     // tentamos primeiro com um cliente anônimo (sem cookies) e só recorremos à
@@ -1400,7 +1432,11 @@ pub fn resolve_profile_identity(
     )?;
     match load_profile_identity_by_user_id(&mut public_client, username, user_id) {
         Ok(identity) => Ok(identity),
-        Err(public_error) => load_profile_identity_by_user_id(&mut client, username, user_id)
+        Err(public_error) => load_profile_identity_by_user_id(
+            authenticated_client,
+            username,
+            user_id,
+        )
             .map_err(|auth_error| {
                 format!(
                     "{primary_error} | fallback by user id '{user_id}' failed \
