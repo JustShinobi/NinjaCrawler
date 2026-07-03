@@ -1,6 +1,6 @@
 use crate::domain::models::{
     AccountsWindowIntent, AppSettingUpsert, BatchSourceProfilePatch, CheckSourceAvailabilityInput,
-    CloneSyncPlanInput, DesktopRuntimeState, ImportMethodDescriptor, ImportPreview,
+    CloneSyncPlanInput, ConnectorDebugEntry, ConnectorDebugQuery, DesktopRuntimeState, ImportMethodDescriptor, ImportPreview,
     ImportPreviewOptions, ImportProviderDescriptor, ImportQueueStatus, ImportRootDescriptor,
     ImportRunRequest, ImportRunResult, MoveSyncPlanInput, PlanEditorWindowIntent,
     ProviderAccountCookie, ProviderAccountCookieImport, ProviderAccountEditor,
@@ -12,7 +12,7 @@ use crate::domain::models::{
     SyncPlanTargetPreviewInput, SyncPlanUpsert, WorkspaceSnapshot,
 };
 use crate::infrastructure::{
-    connector_runtime, desktop_runtime, import_runtime, source_delete_runtime, source_sync_runtime,
+    connector_debug, connector_runtime, desktop_runtime, import_runtime, source_delete_runtime, source_sync_runtime,
     workspace_repository,
 };
 
@@ -124,6 +124,16 @@ pub fn query_runtime_logs(input: RuntimeLogQuery) -> Result<Vec<RuntimeLogEntry>
 #[tauri::command]
 pub fn load_runtime_log_context() -> Result<RuntimeLogContext, String> {
     workspace_repository::load_runtime_log_context()
+}
+
+#[tauri::command]
+pub fn query_connector_debug(input: ConnectorDebugQuery) -> Vec<ConnectorDebugEntry> {
+    connector_debug::query(input)
+}
+
+#[tauri::command]
+pub fn clear_connector_debug() {
+    connector_debug::clear();
 }
 
 #[tauri::command]
@@ -642,6 +652,11 @@ pub fn set_silent_mode(app: tauri::AppHandle, enabled: bool) -> Result<Workspace
 #[tauri::command]
 pub fn open_runtime_log_window(app: tauri::AppHandle) -> Result<(), String> {
     desktop_runtime::open_runtime_log_window(&app)
+}
+
+#[tauri::command]
+pub fn open_connector_debug_window(app: tauri::AppHandle) -> Result<(), String> {
+    desktop_runtime::open_connector_debug_window(&app)
 }
 
 #[tauri::command]

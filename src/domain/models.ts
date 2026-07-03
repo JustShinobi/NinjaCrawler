@@ -487,6 +487,33 @@ export interface RuntimeLogEntry {
   detail?: string
 }
 
+export type ConnectorDebugEventType =
+  | 'call'
+  | 'stdout'
+  | 'stderr'
+  | 'response'
+  | 'error'
+  | 'system'
+
+export interface ConnectorDebugEntry {
+  id: string
+  timestamp: string
+  sourceId?: string
+  provider?: ProviderKey
+  sourceHandle?: string
+  connector: string
+  eventType: ConnectorDebugEventType
+  operation: string
+  raw: string
+}
+
+export interface ConnectorDebugQuery {
+  limit?: number
+  provider?: ProviderKey
+  sourceId?: string
+  eventType?: ConnectorDebugEventType
+}
+
 export interface RuntimeLogContext {
   providerCatalog: ProviderDescriptor[]
   accounts: ProviderAccount[]

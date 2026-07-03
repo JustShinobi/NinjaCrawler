@@ -18,6 +18,9 @@ import type {
   AuthMode,
   AuthState,
   ConnectorRuntimeStatus,
+  ConnectorDebugEntry,
+  ConnectorDebugEventType,
+  ConnectorDebugQuery,
   DesktopRuntimeState,
   ImportMethodDescriptor,
   ImportPreview,
@@ -136,6 +139,7 @@ const DESKTOP_PROFILE_EDITOR_WINDOW_INTENT_EVENT_NAME = 'runtime://profile-edito
 const DESKTOP_PLANS_WINDOW_INTENT_EVENT_NAME = 'runtime://plans-window-intent'
 const DESKTOP_BATCH_EDITOR_WINDOW_INTENT_EVENT_NAME = 'runtime://batch-editor-window-intent'
 const DESKTOP_RUNTIME_LOG_APPENDED_EVENT_NAME = 'runtime://runtime-log-appended'
+const DESKTOP_CONNECTOR_DEBUG_APPENDED_EVENT_NAME = 'runtime://connector-debug-appended'
 const DESKTOP_FOCUS_SOURCE_EVENT_NAME = 'runtime://focus-source'
 const RUNTIME_LOG_TIMEOUT_MS = 5000
 
@@ -934,6 +938,32 @@ function normalizeRuntimeLogEntry(value: unknown): RuntimeLogEntry | null {
     sourceHandle: optionalStringValue(value, ['sourceHandle', 'source_handle']),
     message: stringValue(value, ['message'], ''),
     detail: optionalStringValue(value, ['detail']),
+  }
+}
+
+function normalizeConnectorDebugEntry(value: unknown): ConnectorDebugEntry | null {
+  if (!isRecord(value)) {
+    return null
+  }
+  const validTypes: ConnectorDebugEventType[] = [
+    'call',
+    'stdout',
+    'stderr',
+    'response',
+    'error',
+    'system',
+  ]
+  const rawType = stringValue(value, ['eventType', 'event_type'], 'system') as ConnectorDebugEventType
+  return {
+    id: stringValue(value, ['id'], createId('connector-debug')),
+    timestamp: stringValue(value, ['timestamp'], new Date().toISOString()),
+    sourceId: optionalStringValue(value, ['sourceId', 'source_id']),
+    provider: optionalStringValue(value, ['provider']) as ProviderKey | undefined,
+    sourceHandle: optionalStringValue(value, ['sourceHandle', 'source_handle']),
+    connector: stringValue(value, ['connector'], 'backend'),
+    eventType: validTypes.includes(rawType) ? rawType : 'system',
+    operation: stringValue(value, ['operation'], ''),
+    raw: stringValue(value, ['raw'], ''),
   }
 }
 
@@ -2258,6 +2288,33 @@ export async function queryRuntimeLogs(input: RuntimeLogQuery): Promise<RuntimeL
     .filter((entry): entry is RuntimeLogEntry => entry !== null)
 }
 
+export async function queryConnectorDebug(
+  input: ConnectorDebugQuery = {},
+): Promise<ConnectorDebugEntry[]> {
+  const result = await invoke<unknown>('query_connector_debug', buildInvokeArgs(input))
+  if (!Array.isArray(result)) {
+    throw new Error('Invalid connector debug payload.')
+  }
+  return result
+    .map(normalizeConnectorDebugEntry)
+    .filter((entry): entry is ConnectorDebugEntry => entry !== null)
+}
+
+export async function clearConnectorDebug(): Promise<void> {
+  await invoke<void>('clear_connector_debug')
+}
+
+export async function subscribeToConnectorDebug(
+  handler: (entry: ConnectorDebugEntry) => void,
+): Promise<() => void> {
+  return listen(DESKTOP_CONNECTOR_DEBUG_APPENDED_EVENT_NAME, (event) => {
+    const entry = normalizeConnectorDebugEntry(event.payload)
+    if (entry) {
+      handler(entry)
+    }
+  })
+}
+
 export async function loadRuntimeLogContext(): Promise<RuntimeLogContext> {
   const result = await withTimeout(
     invoke<unknown>('load_runtime_log_context'),
@@ -2424,6 +2481,10 @@ export async function loadSourceDeleteQueueStatus(): Promise<SourceDeleteQueueSt
 
 export async function openRuntimeLogWindow(): Promise<void> {
   await invoke<void>('open_runtime_log_window')
+}
+
+export async function openConnectorDebugWindow(): Promise<void> {
+  await invoke<void>('open_connector_debug_window')
 }
 
 export async function openSchedulerWindow(): Promise<void> {

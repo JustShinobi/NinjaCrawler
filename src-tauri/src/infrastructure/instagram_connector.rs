@@ -11,6 +11,8 @@ use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use crate::infrastructure::connector_debug;
+
 /// App id público da web do Instagram, usado em consultas anônimas de identidade.
 const INSTAGRAM_PUBLIC_APP_ID: &str = "936619743392459";
 const INSTAGRAM_PUBLIC_ASBD_ID: &str = "129477";
@@ -364,18 +366,36 @@ impl InstagramClient {
         }
 
         self.wait_for_pacing();
+        connector_debug::append_current(
+            "instagram-http",
+            "call",
+            "GET media",
+            format!("GET {url}\nReferer: {}", referer.unwrap_or("-")),
+        );
         let mut request = self.client.get(url);
         request = self.apply_headers(request, referer, self.header_mode);
 
-        let response = request
-            .send()
-            .map_err(|error| format!("Instagram media download failed for '{url}': {error}"))?;
+        let response = request.send().map_err(|error| {
+            connector_debug::append_current(
+                "instagram-http",
+                "error",
+                "GET media",
+                error.to_string(),
+            );
+            format!("Instagram media download failed for '{url}': {error}")
+        })?;
         self.absorb_response_headers(response.headers());
         let status = response.status();
         let bytes = response
             .bytes()
             .map_err(|error| format!("Instagram media payload read failed for '{url}': {error}"))?;
         self.last_request_at = Some(Instant::now());
+        connector_debug::append_current(
+            "instagram-http",
+            "response",
+            "GET media",
+            format!("HTTP {status}\nContent-Length: {}", bytes.len()),
+        );
 
         if !status.is_success() {
             return Err(format!("Instagram media request '{url}' returned {status}"));
@@ -487,6 +507,20 @@ impl InstagramClient {
         extra_headers: &[(&str, String)],
     ) -> Result<(reqwest::StatusCode, String), String> {
         self.wait_for_pacing();
+        connector_debug::append_current(
+            "instagram-http",
+            "call",
+            "GET json",
+            format!(
+                "GET {url}\nReferer: {}\nHeader-Mode: {}",
+                referer.unwrap_or("-"),
+                if header_mode == InstagramHeaderMode::BrowserLike {
+                    "browser-like"
+                } else {
+                    "relaxed"
+                }
+            ),
+        );
 
         let mut request = self.client.get(url);
         request = self.apply_headers(request, referer, header_mode);
@@ -494,15 +528,27 @@ impl InstagramClient {
             request = request.header(*name, value);
         }
 
-        let response = request
-            .send()
-            .map_err(|error| format!("Instagram request failed for '{url}': {error}"))?;
+        let response = request.send().map_err(|error| {
+            connector_debug::append_current(
+                "instagram-http",
+                "error",
+                "GET json",
+                error.to_string(),
+            );
+            format!("Instagram request failed for '{url}': {error}")
+        })?;
         self.absorb_response_headers(response.headers());
         let status = response.status();
         let body = response
             .text()
             .map_err(|error| format!("Instagram response read failed for '{url}': {error}"))?;
         self.last_request_at = Some(Instant::now());
+        connector_debug::append_current(
+            "instagram-http",
+            "response",
+            "GET json",
+            format!("HTTP {status}\n\n{body}"),
+        );
         Ok((status, body))
     }
 
