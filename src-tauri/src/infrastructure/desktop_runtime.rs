@@ -16,7 +16,7 @@ use crate::domain::models::{
 pub struct BatchEditorIntent {
     pub source_ids: Vec<String>,
 }
-use crate::infrastructure::{runtime_log, workspace_repository};
+use crate::infrastructure::{connector_debug, runtime_log, workspace_repository};
 #[cfg(windows)]
 use winreg::enums::HKEY_CURRENT_USER;
 #[cfg(windows)]
@@ -39,14 +39,17 @@ const ACCOUNTS_WINDOW_LABEL: &str = "accounts";
 const PROFILE_EDITOR_WINDOW_LABEL: &str = "profile-editor";
 const PLANS_WINDOW_LABEL: &str = "plans";
 const RUNTIME_LOG_WINDOW_LABEL: &str = "runtime-log";
+const CONNECTOR_DEBUG_WINDOW_LABEL: &str = "connector-debug";
 const SCHEDULER_WINDOW_LABEL: &str = "scheduler-plans";
 const SOURCE_SYNC_QUEUE_WINDOW_LABEL: &str = "source-sync-queue";
 const CONNECTOR_RUNTIMES_WINDOW_LABEL: &str = "connector-runtimes";
+const SINGLE_VIDEOS_WINDOW_LABEL: &str = "single-videos";
 const IMPORT_WINDOW_LABEL: &str = "import";
 const BATCH_EDITOR_WINDOW_LABEL: &str = "batch-editor";
 const PROFILE_VIEW_WINDOW_LABEL: &str = "profile-view";
 const MANAGED_STANDALONE_WINDOW_LABELS: &[&str] = &[
     RUNTIME_LOG_WINDOW_LABEL,
+    CONNECTOR_DEBUG_WINDOW_LABEL,
     SCHEDULER_WINDOW_LABEL,
     SOURCE_SYNC_QUEUE_WINDOW_LABEL,
     CONNECTOR_RUNTIMES_WINDOW_LABEL,
@@ -115,6 +118,7 @@ struct RuntimeLogWindowFailedEvent {
 
 pub fn setup(app: &tauri::AppHandle) -> Result<(), String> {
     runtime_log::register_app_handle(app);
+    connector_debug::register_app_handle(app);
     let snapshot = workspace_repository::bootstrap_workspace()?;
     apply_asset_scope(app)?;
     let controller = DesktopRuntimeController::new(app, &snapshot)?;
@@ -252,6 +256,23 @@ pub fn open_runtime_log_window(app: &tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+pub fn open_connector_debug_window(app: &tauri::AppHandle) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window(CONNECTOR_DEBUG_WINDOW_LABEL) {
+        window.show().map_err(|error| error.to_string())?;
+        window.unminimize().map_err(|error| error.to_string())?;
+        window.set_focus().map_err(|error| error.to_string())?;
+        return Ok(());
+    }
+
+    let app_handle = app.clone();
+    std::thread::spawn(move || {
+        if let Err(error) = create_connector_debug_window(&app_handle) {
+            eprintln!("[connector-debug] failed to create window: {error}");
+        }
+    });
+    Ok(())
+}
+
 pub fn open_scheduler_window(app: &tauri::AppHandle) -> Result<(), String> {
     if let Some(window) = app.get_webview_window(SCHEDULER_WINDOW_LABEL) {
         window.show().map_err(|error| error.to_string())?;
@@ -335,6 +356,24 @@ pub fn open_profile_view_window(
     std::thread::spawn(move || {
         if let Err(error) = create_profile_view_window(&app_handle, &source_id) {
             eprintln!("[profile-view] failed to create window: {error}");
+        }
+    });
+
+    Ok(())
+}
+
+pub fn open_single_videos_window(app: &tauri::AppHandle) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window(SINGLE_VIDEOS_WINDOW_LABEL) {
+        window.show().map_err(|error| error.to_string())?;
+        window.unminimize().map_err(|error| error.to_string())?;
+        window.set_focus().map_err(|error| error.to_string())?;
+        return Ok(());
+    }
+
+    let app_handle = app.clone();
+    std::thread::spawn(move || {
+        if let Err(error) = create_single_videos_window(&app_handle) {
+            eprintln!("[single-videos] failed to create window: {error}");
         }
     });
 
@@ -538,6 +577,31 @@ fn create_runtime_log_window(app: &tauri::AppHandle) -> Result<(), String> {
     )
 }
 
+fn create_connector_debug_window(app: &tauri::AppHandle) -> Result<(), String> {
+    let window = tauri::WebviewWindowBuilder::new(
+        app,
+        CONNECTOR_DEBUG_WINDOW_LABEL,
+        tauri::WebviewUrl::App("connector-debug.html".into()),
+    )
+    .title("Realtime Connector Debugger")
+    .inner_size(1280.0, 820.0)
+    .min_inner_size(780.0, 520.0)
+    .closable(true)
+    .visible(false)
+    .build()
+    .map_err(|error| error.to_string())?;
+
+    show_new_standalone_window(
+        app,
+        &window,
+        WindowSizeSpec {
+            width: 1280,
+            height: 820,
+        },
+        |_| Ok(()),
+    )
+}
+
 fn create_scheduler_window(app: &tauri::AppHandle) -> Result<(), String> {
     let window = tauri::WebviewWindowBuilder::new(
         app,
@@ -636,6 +700,32 @@ fn create_plans_window(
             height: 900,
         },
         apply_plans_window_constraints,
+    )
+}
+
+fn create_single_videos_window(app: &tauri::AppHandle) -> Result<(), String> {
+    let window = tauri::WebviewWindowBuilder::new(
+        app,
+        SINGLE_VIDEOS_WINDOW_LABEL,
+        tauri::WebviewUrl::App(single_videos_entrypoint().into()),
+    )
+    .title("Single Videos")
+    .inner_size(1280.0, 860.0)
+    .min_inner_size(940.0, 600.0)
+    .resizable(true)
+    .closable(true)
+    .visible(false)
+    .build()
+    .map_err(|error| error.to_string())?;
+
+    show_new_standalone_window(
+        app,
+        &window,
+        WindowSizeSpec {
+            width: 1280,
+            height: 860,
+        },
+        |_| Ok(()),
     )
 }
 
@@ -1107,6 +1197,10 @@ fn profile_view_entrypoint(source_id: &str) -> String {
 
 fn connector_runtimes_entrypoint() -> String {
     "connector-runtimes.html".to_string()
+}
+
+fn single_videos_entrypoint() -> String {
+    "single-videos.html".to_string()
 }
 
 fn profile_editor_entrypoint(intent: Option<&SourceEditorWindowIntent>) -> String {

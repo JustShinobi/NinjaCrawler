@@ -8,6 +8,7 @@ import {
   loadSourceSyncQueueStatus,
   openAccountsWindow,
   openConnectorRuntimesWindow,
+  openSingleVideosWindow,
   openExternalTarget,
   openSourceEditorWindow,
   openBatchEditorWindow,
@@ -681,6 +682,7 @@ function App() {
     { label: 'Queue status', onSelect: () => void handleOpenQueueStatus() },
     { label: 'Runtime log', onSelect: () => void handleOpenRuntimeLog() },
     { label: 'Connectors', onSelect: () => void handleOpenConnectorRuntimes() },
+    { label: 'Single videos', onSelect: () => void handleOpenSingleVideos() },
     { label: 'Settings', onSelect: () => openSectionDialog('settings') },
   ]
   const helpMenuItems: MenuItem[] = [
@@ -883,6 +885,19 @@ function App() {
       const message = openError instanceof Error ? openError.message : String(openError)
       if (typeof window !== 'undefined' && typeof window.alert === 'function') {
         window.alert(`Failed to open Connector Runtimes.\n${message}`)
+      }
+    }
+  }
+
+  async function handleOpenSingleVideos() {
+    setOpenMenu(null)
+    setProfileContextMenu(undefined)
+    try {
+      await openSingleVideosWindow()
+    } catch (openError) {
+      const message = openError instanceof Error ? openError.message : String(openError)
+      if (typeof window !== 'undefined' && typeof window.alert === 'function') {
+        window.alert(`Failed to open Single Videos.\n${message}`)
       }
     }
   }
@@ -1471,6 +1486,9 @@ function App() {
           <strong>{queueProgressText}</strong>
         </div>
         <div className="status-cell status-cell-actions">
+          <button className="status-open-queue-button" onClick={() => void handleOpenSingleVideos()} type="button">
+            Single Videos
+          </button>
           <button className="status-open-queue-button" onClick={() => void handleOpenQueueStatus()} type="button">
             Queue Status
           </button>

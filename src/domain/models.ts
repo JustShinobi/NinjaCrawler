@@ -487,6 +487,33 @@ export interface RuntimeLogEntry {
   detail?: string
 }
 
+export type ConnectorDebugEventType =
+  | 'call'
+  | 'stdout'
+  | 'stderr'
+  | 'response'
+  | 'error'
+  | 'system'
+
+export interface ConnectorDebugEntry {
+  id: string
+  timestamp: string
+  sourceId?: string
+  provider?: ProviderKey
+  sourceHandle?: string
+  connector: string
+  eventType: ConnectorDebugEventType
+  operation: string
+  raw: string
+}
+
+export interface ConnectorDebugQuery {
+  limit?: number
+  provider?: ProviderKey
+  sourceId?: string
+  eventType?: ConnectorDebugEventType
+}
+
 export interface RuntimeLogContext {
   providerCatalog: ProviderDescriptor[]
   accounts: ProviderAccount[]
@@ -519,6 +546,52 @@ export interface SourceMediaGallery {
   handle: string
   profileUrl: string
   posts: MediaGalleryPost[]
+}
+
+export interface SingleVideo {
+  id: string
+  provider: string
+  sourceUrl: string
+  providerVideoId?: string
+  uploader?: string
+  title?: string
+  relativePath: string
+  absolutePath: string
+  mediaType: string
+  capturedAt?: number
+  downloadedAt: string
+}
+
+export interface SingleVideoQueueItem {
+  id: string
+  url: string
+  provider?: string
+  state: 'queued' | 'running'
+  queuedAt: string
+  startedAt?: string
+  progressLabel?: string
+  progressIndeterminate?: boolean
+}
+
+export interface SingleVideoQueueRecentResult {
+  url: string
+  provider?: string
+  uploader?: string
+  title?: string
+  status: 'succeeded' | 'failed'
+  summary: string
+  finishedAt: string
+}
+
+export interface SingleVideoQueueStatus {
+  queuedCount: number
+  runningCount: number
+  completedCount: number
+  failedCount: number
+  active?: SingleVideoQueueItem
+  queuedItems: SingleVideoQueueItem[]
+  recentResults: SingleVideoQueueRecentResult[]
+  updatedAt: string
 }
 
 export interface SourceSyncQueueProviderStatus {

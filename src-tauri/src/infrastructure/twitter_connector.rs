@@ -16,6 +16,8 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::Duration;
 
+use crate::infrastructure::connector_debug;
+
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 
@@ -635,6 +637,20 @@ struct ParserRunOutput {
     rate_limited: bool,
 }
 
+fn stream_debug_file(path: &Path, offset: &mut usize, event_type: &str) {
+    let Ok(bytes) = fs::read(path) else {
+        return;
+    };
+    if bytes.len() <= *offset {
+        return;
+    }
+    let chunk = String::from_utf8_lossy(&bytes[*offset..]).to_string();
+    *offset = bytes.len();
+    if !chunk.trim().is_empty() {
+        connector_debug::append_current("gallery-dl", event_type, "parser.output", chunk);
+    }
+}
+
 fn run_gallery_dl_parser<C>(
     request: &TwitterConnectorRequest,
     config_path: &Path,
@@ -672,11 +688,31 @@ where
     #[cfg(windows)]
     command.creation_flags(CREATE_NO_WINDOW);
 
+    let command_line = std::iter::once(command.get_program().to_string_lossy().to_string())
+        .chain(command.get_args().map(|arg| arg.to_string_lossy().to_string()))
+        .collect::<Vec<_>>()
+        .join(" ");
+    connector_debug::append_current(
+        "gallery-dl",
+        "call",
+        "parser.spawn",
+        command_line,
+    );
     let mut child = command
         .spawn()
-        .map_err(|error| format!("Failed to start gallery-dl: {}", error))?;
+        .map_err(|error| {
+            connector_debug::append_current(
+                "gallery-dl",
+                "error",
+                "parser.spawn",
+                error.to_string(),
+            );
+            format!("Failed to start gallery-dl: {}", error)
+        })?;
 
     let started = std::time::Instant::now();
+    let mut stdout_offset = 0usize;
+    let mut stderr_offset = 0usize;
     let status = loop {
         if is_cancelled() {
             let _ = child.kill();
@@ -684,8 +720,14 @@ where
             return Err("source sync cancelled by user".to_string());
         }
         match child.try_wait().map_err(|error| error.to_string())? {
-            Some(status) => break status,
+            Some(status) => {
+                stream_debug_file(&stdout_log, &mut stdout_offset, "stdout");
+                stream_debug_file(&stderr_log, &mut stderr_offset, "stderr");
+                break status;
+            }
             None => {
+                stream_debug_file(&stdout_log, &mut stdout_offset, "stdout");
+                stream_debug_file(&stderr_log, &mut stderr_offset, "stderr");
                 if started.elapsed() > Duration::from_secs(GALLERY_DL_TIMEOUT_SECS) {
                     let _ = child.kill();
                     let _ = child.wait();
@@ -698,6 +740,17 @@ where
 
     let stderr = fs::read_to_string(&stderr_log).unwrap_or_default();
     let stdout = fs::read_to_string(&stdout_log).unwrap_or_default();
+    connector_debug::append_current(
+        "gallery-dl",
+        "response",
+        "parser.exit",
+        format!(
+            "exit_code={}",
+            status
+                .code()
+                .map_or_else(|| "terminated".to_string(), |code| code.to_string())
+        ),
+    );
     let _ = fs::remove_file(&stdout_log);
     let _ = fs::remove_file(&stderr_log);
     let combined = format!("{stdout}\n{stderr}").to_ascii_lowercase();
@@ -957,10 +1010,27 @@ fn download_asset(
         return Err("destination file already exists".to_string());
     }
 
-    let response = client
-        .get(&entry.asset.file_url)
-        .send()
-        .map_err(|error| error.to_string())?;
+    connector_debug::append_current(
+        "twitter-http",
+        "call",
+        "GET media",
+        format!("GET {}", entry.asset.file_url),
+    );
+    let response = client.get(&entry.asset.file_url).send().map_err(|error| {
+        connector_debug::append_current(
+            "twitter-http",
+            "error",
+            "GET media",
+            error.to_string(),
+        );
+        error.to_string()
+    })?;
+    connector_debug::append_current(
+        "twitter-http",
+        "response",
+        "GET media",
+        format!("HTTP {}", response.status()),
+    );
     if !response.status().is_success() {
         return Err(format!("HTTP {}", response.status()));
     }

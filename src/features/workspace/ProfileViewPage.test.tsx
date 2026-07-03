@@ -13,6 +13,7 @@ const bridgeMocks = vi.hoisted(() => ({
   openMediaFile: vi.fn(),
   revealMediaInFolder: vi.fn(),
   subscribeToProfileViewSource: vi.fn(),
+  subscribeToSourceSyncQueue: vi.fn(),
 }))
 
 vi.mock('../../bridge/desktop', () => bridgeMocks)
@@ -89,6 +90,7 @@ describe('ProfileViewPage', () => {
     bridgeMocks.loadSourceMediaGallery.mockResolvedValue(galleryFixture())
     bridgeMocks.loadWorkspaceSnapshot.mockResolvedValue({ sources: [] })
     bridgeMocks.subscribeToProfileViewSource.mockResolvedValue(() => undefined)
+    bridgeMocks.subscribeToSourceSyncQueue.mockResolvedValue(() => undefined)
     bridgeMocks.openExternalTarget.mockResolvedValue(undefined)
   })
 

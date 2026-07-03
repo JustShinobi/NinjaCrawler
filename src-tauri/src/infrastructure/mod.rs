@@ -1,5 +1,6 @@
 pub mod connector_runtime;
 pub mod companion_api;
+pub mod connector_debug;
 pub mod database;
 pub mod desktop_runtime;
 pub mod import_runtime;
@@ -7,6 +8,7 @@ pub mod instagram_connector;
 pub mod runtime_log;
 pub mod scheduler_runtime;
 pub mod session_secret_store;
+pub mod single_video_runtime;
 pub mod source_delete_runtime;
 pub mod source_sync_runtime;
 pub mod storage;

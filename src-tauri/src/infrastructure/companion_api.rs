@@ -1,9 +1,11 @@
 use crate::domain::models::{
     CompanionAccountCapture, CompanionAccountImportInput, InstagramSourceSyncOptions,
     RunSourceSyncInput, SourceEditorSeedIntent, SourceEditorWindowIntent, SourceProfile,
-    SourceSyncOptions,
+    SourceSyncOptions, TikTokSourceSyncOptions,
 };
-use crate::infrastructure::{desktop_runtime, source_sync_runtime, workspace_repository};
+use crate::infrastructure::{
+    desktop_runtime, single_video_runtime, source_sync_runtime, workspace_repository,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashMap;
@@ -66,6 +68,12 @@ struct SyncSourceRequest {
 struct DownloadTargetRequest {
     source_id: String,
     target: DetectedTarget,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DownloadSingleVideoRequest {
+    url: String,
 }
 
 struct HttpRequest {
@@ -257,6 +265,14 @@ fn route_request(app: AppHandle, request: HttpRequest) -> Vec<u8> {
                 Err(error) => error_response(400, &error),
             }
         }
+        ("POST", path) if path == format!("{API_PREFIX}/single-video") => {
+            match parse_json::<DownloadSingleVideoRequest>(&request.body)
+                .and_then(|input| single_video_runtime::enqueue_single_video(&app, input.url))
+            {
+                Ok(payload) => json_response(200, &payload),
+                Err(error) => error_response(400, &error),
+            }
+        }
         ("POST", path) if path == format!("{API_PREFIX}/account/preview") => {
             match ensure_sensitive_companion_request(&request)
                 .and_then(|_| parse_json::<CompanionAccountCapture>(&request.body))
@@ -390,6 +406,58 @@ fn download_target(
     let source_id = input.source_id.trim();
     if source_id.is_empty() {
         return Err("Source id is required.".to_string());
+    }
+
+    // TikTok story: a `/video/<id>` URL captured from a story. Download the single
+    // video straight into the profile's Stories/ folder (no queued sync).
+    if input.target.provider == "tiktok" {
+        let handle = normalize_handle(&input.target.handle);
+        let url = input.target.url.trim();
+        if url.is_empty() {
+            return Err("Selected TikTok video URL is missing.".to_string());
+        }
+        let snapshot = workspace_repository::bootstrap_workspace()?;
+        let source = snapshot
+            .sources
+            .iter()
+            .find(|source| source.id == source_id)
+            .ok_or_else(|| format!("Source '{source_id}' does not exist."))?;
+        if source.provider != "tiktok" {
+            return Err("Selected story download requires a TikTok source.".to_string());
+        }
+        if !handle.is_empty()
+            && canonical_profile_key("tiktok", &source.handle)
+                != canonical_profile_key("tiktok", &handle)
+        {
+            return Err("Selected story does not match the requested source.".to_string());
+        }
+
+        // Enfileira um sync direcionado: baixa só este vídeo na pasta Stories/ do
+        // perfil (usando os cookies da conta), rastreável no Queue Status.
+        let override_options = SourceSyncOptions {
+            tiktok: Some(TikTokSourceSyncOptions {
+                get_timeline: Some(false),
+                get_stories_user: Some(false),
+                get_reposts: Some(false),
+                target_video_url: Some(url.to_string()),
+                ..TikTokSourceSyncOptions::default()
+            }),
+            ..SourceSyncOptions::default()
+        };
+        let snapshot = source_sync_runtime::enqueue_source_sync(
+            &app,
+            RunSourceSyncInput {
+                id: source_id.to_string(),
+                trigger: Some("chrome_extension_story".to_string()),
+                run_mode: None,
+                sync_options_override: Some(override_options),
+            },
+        )?;
+        return Ok(json!({
+            "snapshot": snapshot,
+            "queued": true,
+            "target": input.target
+        }));
     }
 
     if input.target.kind != "instagramStory" || input.target.provider != "instagram" {

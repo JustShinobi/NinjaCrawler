@@ -6,11 +6,14 @@ import {
   loadSourceDeleteQueueStatus,
   loadSourceSyncQueueStatus,
   loadWorkspaceSnapshot,
+  openConnectorDebugWindow,
   pauseSourceSyncProvider,
   reorderSourceSyncProviderQueue,
   resumeSourceSyncProvider,
   runSourceSync,
+  loadSingleVideoQueueStatus,
   subscribeToDesktopRuntimeEvents,
+  subscribeToSingleVideoQueue,
 } from '../../bridge/desktop'
 import { DEFAULT_PROVIDER_CATALOG } from '../../domain/defaults'
 import type {
@@ -22,9 +25,11 @@ import type {
   SourceSyncQueueProviderStatus,
   SourceSyncQueueRecentResult,
   SourceSyncQueueStatus,
+  SingleVideoQueueRecentResult,
+  SingleVideoQueueStatus,
 } from '../../domain/models'
 
-type QueueOperation = 'Sync' | 'Delete'
+type QueueOperation = 'Sync' | 'Delete' | 'Single'
 
 const QUEUED_COLLAPSE_LIMIT = 6
 
@@ -243,6 +248,25 @@ function createDeleteResultTask(result: SourceDeleteQueueRecentResult): QueueRes
   }
 }
 
+function createSingleVideoResultTask(result: SingleVideoQueueRecentResult): QueueResultTask {
+  const provider = (result.provider ?? 'tiktok') as ProviderKey
+  const handle = result.uploader
+    ? `@${result.uploader}`
+    : result.title?.trim() || result.url
+  return {
+    key: `single-result-${result.url}-${result.finishedAt}`,
+    sourceId: '',
+    provider,
+    providerLabel: result.provider ? providerDisplayName(provider) : 'Single video',
+    handle,
+    operation: 'Single',
+    status: result.status,
+    summary: result.status === 'failed' ? result.summary : result.url,
+    finishedAt: result.finishedAt,
+    error: result.status === 'failed' ? result.summary : undefined,
+  }
+}
+
 function avatarInitial(handle: string): string {
   const cleaned = handle.replace(/^@/, '').trim()
   return cleaned ? cleaned[0]!.toUpperCase() : '?'
@@ -278,6 +302,8 @@ export function SourceSyncQueueWindowPage() {
   const [queueOrderOverride, setQueueOrderOverride] = useState<Record<string, string[]>>({})
   const [now, setNow] = useState(() => Date.now())
   const [error, setError] = useState<string>()
+  const [singleVideoStatus, setSingleVideoStatus] = useState<SingleVideoQueueStatus | undefined>()
+  const [openingDebugger, setOpeningDebugger] = useState(false)
 
   const refreshQueueStatus = useCallback(async (silent = false) => {
     try {
@@ -321,9 +347,29 @@ export function SourceSyncQueueWindowPage() {
     const timer = window.setTimeout(() => {
       void refreshQueueStatus()
       void refreshAvatars()
+      void loadSingleVideoQueueStatus()
+        .then(setSingleVideoStatus)
+        .catch(() => undefined)
     }, 0)
     return () => window.clearTimeout(timer)
   }, [refreshQueueStatus, refreshAvatars])
+
+  useEffect(() => {
+    let disposed = false
+    let unsubscribe: (() => void) | undefined
+    void subscribeToSingleVideoQueue((next) => {
+      if (!disposed) setSingleVideoStatus(next)
+    })
+      .then((teardown) => {
+        if (disposed) teardown()
+        else unsubscribe = teardown
+      })
+      .catch(() => undefined)
+    return () => {
+      disposed = true
+      unsubscribe?.()
+    }
+  }, [])
 
   useEffect(() => {
     let disposed = false
@@ -419,6 +465,20 @@ export function SourceSyncQueueWindowPage() {
     }
   }, [])
 
+  const handleOpenDebugger = useCallback(async () => {
+    setOpeningDebugger(true)
+    try {
+      await openConnectorDebugWindow()
+      setError(undefined)
+    } catch (openError) {
+      setError(
+        openError instanceof Error ? openError.message : 'Failed to open the realtime debugger.',
+      )
+    } finally {
+      setOpeningDebugger(false)
+    }
+  }, [])
+
   const toggleExpanded = useCallback((provider: ProviderKey) => {
     setExpandedProviders((prev) => {
       const next = new Set(prev)
@@ -452,8 +512,9 @@ export function SourceSyncQueueWindowPage() {
       [
         ...syncStatus.recentResults.map(createSyncResultTask),
         ...deleteStatus.recentResults.map(createDeleteResultTask),
+        ...(singleVideoStatus?.recentResults ?? []).map(createSingleVideoResultTask),
       ].sort((left, right) => Date.parse(right.finishedAt) - Date.parse(left.finishedAt)),
-    [deleteStatus.recentResults, syncStatus.recentResults],
+    [deleteStatus.recentResults, syncStatus.recentResults, singleVideoStatus?.recentResults],
   )
 
   const providerStatusByKey = useMemo(() => {
@@ -683,6 +744,21 @@ export function SourceSyncQueueWindowPage() {
 
   return (
     <div className="queue-status-window-shell">
+      <section className="queue-status-debug-toolbar panel">
+        <div>
+          <span className="eyebrow">Backend diagnostics</span>
+          <p>Follow queue events, sync stages, connector activity, warnings, and errors live.</p>
+        </div>
+        <button
+          className="primary-button"
+          disabled={openingDebugger}
+          onClick={() => void handleOpenDebugger()}
+          type="button"
+        >
+          {openingDebugger ? 'Opening debugger…' : 'Open realtime debugger'}
+        </button>
+      </section>
+
       <section className="queue-status-summary-strip" role="list" aria-label="Queue totals">
         <article className="queue-status-summary-card" role="listitem">
           <span>Running</span>
@@ -782,6 +858,63 @@ export function SourceSyncQueueWindowPage() {
             })
           )}
 
+          {singleVideoStatus &&
+          (singleVideoStatus.active ||
+            singleVideoStatus.queuedItems.length > 0 ||
+            singleVideoStatus.recentResults.length > 0) ? (
+            <article className="queue-lane" role="listitem">
+              <header className="queue-lane-header">
+                <div className="queue-lane-identity">
+                  <span className="queue-provider-pill">Single videos</span>
+                </div>
+                <div className="queue-lane-counts">
+                  <span title="Running"><b>{singleVideoStatus.runningCount}</b> running</span>
+                  <span title="Queued"><b>{singleVideoStatus.queuedCount}</b> queued</span>
+                  <span title="Completed this session"><b>{singleVideoStatus.completedCount}</b> done</span>
+                  {singleVideoStatus.failedCount > 0 ? (
+                    <span className="queue-count-failed" title="Failed"><b>{singleVideoStatus.failedCount}</b> failed</span>
+                  ) : null}
+                </div>
+              </header>
+              {singleVideoStatus.active || singleVideoStatus.queuedItems.length > 0 ? (
+                <div className="queue-lane-body">
+                  <div className="queue-task-list" role="list" aria-label="Single video downloads">
+                    {singleVideoStatus.active ? (
+                      <article className="queue-task-row queue-task-row-running" role="listitem">
+                        <div className="queue-task-main">
+                          <div className="queue-task-headline">
+                            <strong title={singleVideoStatus.active.url}>
+                              {singleVideoStatus.active.provider ?? 'Single video'}
+                            </strong>
+                          </div>
+                          <div className="queue-status-progress-track indeterminate">
+                            <div className="queue-status-progress-fill" />
+                          </div>
+                          <small className="queue-task-meta queue-task-url" title={singleVideoStatus.active.url}>
+                            Downloading · {singleVideoStatus.active.url}
+                          </small>
+                        </div>
+                      </article>
+                    ) : null}
+                    {singleVideoStatus.queuedItems.map((item, index) => (
+                      <article className="queue-task-row" key={item.id} role="listitem">
+                        <div className="queue-task-main">
+                          <div className="queue-task-headline">
+                            <strong title={item.url}>{item.provider ?? 'Single video'}</strong>
+                            <span className="queue-tag queue-tag-position">{index === 0 ? 'Next' : `#${index + 1}`}</span>
+                          </div>
+                          <small className="queue-task-meta queue-task-url" title={item.url}>{item.url}</small>
+                        </div>
+                      </article>
+                    ))}
+                  </div>
+                </div>
+              ) : (
+                <p className="queue-lane-idle">Idle — no single video downloads running.</p>
+              )}
+            </article>
+          ) : null}
+
           {idleProviders.length > 0 ? (
             <div className="queue-idle-providers">
               <span className="eyebrow">Idle</span>
@@ -811,6 +944,7 @@ export function SourceSyncQueueWindowPage() {
                       <strong title={task.handle}>{task.handle}</strong>
                       <span className={`queue-provider-pill provider-${task.provider} is-mini`}>{task.providerLabel}</span>
                       {task.operation === 'Delete' ? <span className="queue-tag queue-tag-delete">Delete</span> : null}
+                      {task.operation === 'Single' ? <span className="queue-tag">Single</span> : null}
                       <span className={resultStatusClassName(task.status)}>{task.status}</span>
                     </div>
                     <small className="queue-task-meta" title={absoluteTimestamp(task.finishedAt)}>

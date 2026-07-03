@@ -424,9 +424,32 @@ fn spawn_worker(app: AppHandle, provider: String) {
             &job.provider,
         );
         if delay_secs > 0 && provider_has_pending_jobs(&provider) {
+            log_source_sync_event(
+                "sync.queue",
+                "debug",
+                &job.source_id,
+                &job.provider,
+                &job.handle,
+                job.account_id.as_deref(),
+                "Provider cooldown is delaying the next queued sync.",
+                Some(format!(
+                    "Waiting {delay_secs} seconds before starting the next {} job.",
+                    job.provider
+                )),
+            );
             for _ in 0..delay_secs {
                 thread::sleep(Duration::from_secs(1));
             }
+            log_source_sync_event(
+                "sync.queue",
+                "debug",
+                &job.source_id,
+                &job.provider,
+                &job.handle,
+                job.account_id.as_deref(),
+                "Provider cooldown finished.",
+                Some(format!("The next {} job can now start.", job.provider)),
+            );
         }
 
         match sync_result {
@@ -615,7 +638,7 @@ pub fn report_source_sync_progress(
     progress_indeterminate: bool,
     downloaded_items: Option<u32>,
 ) {
-    if let Ok(mut state) = queue_state().lock() {
+    let log_context = if let Ok(mut state) = queue_state().lock() {
         let Some(active_job) = state.active_job_for_source_mut(source_id) else {
             return;
         };
@@ -632,10 +655,45 @@ pub fn report_source_sync_progress(
         }
 
         active_job.progress_percent = normalized_percent;
-        active_job.progress_label = progress_label;
-        active_job.progress_detail = progress_detail;
+        active_job.progress_label = progress_label.clone();
+        active_job.progress_detail = progress_detail.clone();
         active_job.progress_indeterminate = progress_indeterminate;
         active_job.downloaded_items = downloaded_items;
+
+        Some((
+            active_job.source_id.clone(),
+            active_job.provider.clone(),
+            active_job.handle.clone(),
+            active_job.account_id.clone(),
+        ))
+    } else {
+        None
+    };
+
+    if let Some((source_id, provider, handle, account_id)) = log_context {
+        let mut detail_parts = Vec::new();
+        if let Some(detail) = progress_detail {
+            detail_parts.push(detail);
+        }
+        if let Some(percent) = progress_percent {
+            detail_parts.push(format!("Progress: {}%.", percent.min(100)));
+        } else if progress_indeterminate {
+            detail_parts.push("Progress: indeterminate.".to_string());
+        }
+        if let Some(downloaded) = downloaded_items {
+            detail_parts.push(format!("Downloaded items: {downloaded}."));
+        }
+
+        log_source_sync_event(
+            "sync.progress",
+            "debug",
+            &source_id,
+            &provider,
+            &handle,
+            account_id.as_deref(),
+            progress_label.unwrap_or_else(|| "Source sync progress updated.".to_string()),
+            (!detail_parts.is_empty()).then(|| detail_parts.join(" ")),
+        );
     }
 
     publish_queue_status_event_from_registered_app();
