@@ -159,6 +159,28 @@ export function ProfileWorkspace({
     return map
   }, [sortedGroups])
 
+  const selectedGroupKeys = useMemo(
+    () => new Set(
+      selectedSourceIds
+        .map((sourceId) => sourceGroupMap.get(sourceId))
+        .filter((groupKey): groupKey is string => Boolean(groupKey)),
+    ),
+    [selectedSourceIds, sourceGroupMap],
+  )
+
+  useEffect(() => {
+    const selectedSourceId = selectedSourceIds[selectedSourceIds.length - 1]
+    if (!selectedSourceId) {
+      return
+    }
+
+    const element = Array.from(document.querySelectorAll<HTMLElement>('[data-source-id]'))
+      .find((candidate) => candidate.dataset.sourceId === selectedSourceId)
+    if (element && typeof element.scrollIntoView === 'function') {
+      element.scrollIntoView({ block: 'nearest' })
+    }
+  }, [collapsedGroups, selectedSourceIds, sortedGroups])
+
   function changeGroupMode(next: GroupMode) {
     localStorage.setItem(GROUP_MODE_KEY, next)
     setGroupModeState(next)
@@ -352,7 +374,7 @@ export function ProfileWorkspace({
       <section className="profile-grid-shell" onKeyDown={handleLetterJump} onMouseDown={handleGridShellMouseDown}>
         {hasAnyProfiles ? (
           sortedGroups.map((group, groupIndex) => {
-            const collapsed = collapsedGroups.has(group.key)
+            const collapsed = collapsedGroups.has(group.key) && !selectedGroupKeys.has(group.key)
             const canReorder = groupMode === 'group' && onReorderGroup && group.key !== 'group:__ungrouped__'
             const groupClassName = [
               'profile-group',

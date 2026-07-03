@@ -592,7 +592,7 @@ function App() {
 
   // Mantém a referência atual de handleSourceSaved para o listener de foco abaixo,
   // evitando re-assinar o evento a cada render.
-  const focusSourceHandlerRef = useRef<(sourceId: string) => void>(() => {})
+  const focusSourceHandlerRef = useRef<(sourceId: string, clearSearch: boolean) => void>(() => {})
   useEffect(() => {
     focusSourceHandlerRef.current = handleSourceSaved
   })
@@ -603,8 +603,8 @@ function App() {
 
     let disposed = false
     let unsubscribe: (() => void) | undefined
-    void subscribeToFocusSourceRequest((sourceId) => {
-      focusSourceHandlerRef.current(sourceId)
+    void subscribeToFocusSourceRequest((sourceId, options) => {
+      focusSourceHandlerRef.current(sourceId, options.clearSearch === true)
     })
       .then((teardown) => {
         if (disposed) {
@@ -1098,19 +1098,28 @@ function App() {
     })
   }
 
-  function handleSourceSaved(sourceId: string) {
-    const source = workspaceSnapshot.sources.find((entry) => entry.id === sourceId)
+  async function handleSourceSaved(sourceId: string, clearSearch = false) {
     setProfileContextMenu(undefined)
+    let source = useAppStore.getState().snapshot?.sources.find((entry) => entry.id === sourceId)
     if (!source) {
-      setSelectedSourceIds([sourceId])
-      setSelectionAnchorId(sourceId)
-      setSearchText('')
+      try {
+        const refreshedSnapshot = await refreshSnapshot()
+        source = refreshedSnapshot.sources.find((entry) => entry.id === sourceId)
+      } catch {
+        return
+      }
+    }
+
+    if (!source) {
       return
     }
 
     setSelectedSourceIds([source.id])
     setSelectionAnchorId(source.id)
-    setSearchText('')
+    if (clearSearch) {
+      setSearchText('')
+      setSavePathFilter('')
+    }
     setServiceTab(source.provider)
   }
 
@@ -1150,7 +1159,7 @@ function App() {
     })
     const updatedSource = savedSnapshot.sources.find((entry) => entry.id === source.id)
     if (updatedSource) {
-      handleSourceSaved(updatedSource.id)
+      void handleSourceSaved(updatedSource.id)
     }
   }
 

@@ -137,7 +137,10 @@ export function SourceEditorWindowPage({
         onEditAccount={(accountId) =>
           void openAccountsWindow({ initialAccountId: accountId, initialMode: 'edit' })}
         onDirtyChange={setIsDirty}
-        onSaved={(savedSource) => void emitFocusSourceRequest(savedSource.id)}
+        onSaved={(savedSource) =>
+          void emitFocusSourceRequest(savedSource.id, {
+            clearSearch: !activeIntent.sourceId,
+          })}
         seed={activeIntent.seed}
         snapshot={snapshot}
         source={source}

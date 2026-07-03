@@ -459,6 +459,36 @@ describe('SourceEditorDialog', () => {
     })
   })
 
+  it('saves and starts a manual sync for a new profile', async () => {
+    const savedSource = buildSource({
+      id: 'source-new',
+      handle: '@new-profile',
+      displayName: 'new-profile',
+    })
+    const { onClose, onSaved, store } = renderDialog()
+    store.upsertSourceProfile.mockResolvedValue(
+      buildSnapshot({
+        sources: [savedSource],
+      }),
+    )
+    store.runSourceSync.mockResolvedValue(
+      buildSnapshot({
+        sources: [savedSource],
+      }),
+    )
+
+    fireEvent.change(screen.getByRole('textbox', { name: /user url/i }), {
+      target: { value: '@new-profile' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: /save and sync/i }))
+
+    await waitFor(() => {
+      expect(store.runSourceSync).toHaveBeenCalledWith('source-new', { trigger: 'manual' })
+      expect(onSaved).toHaveBeenCalledWith(savedSource)
+      expect(onClose).toHaveBeenCalledTimes(1)
+    })
+  })
+
   it('closes without submitting when cancel is clicked', () => {
     const { onClose, store } = renderDialog(
       {},

@@ -2586,13 +2586,23 @@ export async function subscribeToAccountsWindowIntent(
  * Usado quando o editor bloqueia a criação de um perfil duplicado e quer
  * trazer o original para o foco do usuário. Também ativa a janela principal.
  */
-export async function emitFocusSourceRequest(sourceId: string): Promise<void> {
+export interface FocusSourceRequestOptions {
+  clearSearch?: boolean
+}
+
+export async function emitFocusSourceRequest(
+  sourceId: string,
+  options: FocusSourceRequestOptions = {},
+): Promise<void> {
   const trimmed = sanitizeText(sourceId)
   if (trimmed.length === 0) {
     return
   }
 
-  await emit(DESKTOP_FOCUS_SOURCE_EVENT_NAME, { sourceId: trimmed })
+  await emit(DESKTOP_FOCUS_SOURCE_EVENT_NAME, {
+    sourceId: trimmed,
+    clearSearch: options.clearSearch,
+  })
   try {
     await invoke<void>('activate_main_window')
   } catch {
@@ -2601,14 +2611,16 @@ export async function emitFocusSourceRequest(sourceId: string): Promise<void> {
 }
 
 export async function subscribeToFocusSourceRequest(
-  handler: (sourceId: string) => void,
+  handler: (sourceId: string, options: FocusSourceRequestOptions) => void,
 ): Promise<() => void> {
   return listen(DESKTOP_FOCUS_SOURCE_EVENT_NAME, (event) => {
-    const payload = event.payload as { sourceId?: unknown } | null
+    const payload = event.payload as { sourceId?: unknown; clearSearch?: unknown } | null
     const sourceId =
       payload && typeof payload.sourceId === 'string' ? payload.sourceId.trim() : ''
     if (sourceId.length > 0) {
-      handler(sourceId)
+      handler(sourceId, {
+        clearSearch: payload?.clearSearch === true,
+      })
     }
   })
 }

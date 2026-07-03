@@ -195,6 +195,8 @@ export function SourceEditorDialog({
     if (!draft.accountId) {
       return
     }
+    const submitter = (event.nativeEvent as SubmitEvent).submitter as HTMLButtonElement | null
+    const syncAfterSave = !draft.id && submitter?.value === 'save-and-sync'
 
     const finalLabels = mergeLabels(selectedLabels, parseLabelCandidates(labelDraft))
     const payload: SourceProfileUpsert = {
@@ -213,7 +215,7 @@ export function SourceEditorDialog({
     if (existing) {
       const existingLabel = existing.handle.trim() || existing.displayName
       setSubmitError(`O perfil "${existingLabel}" já existe nesta lista. Abrimos o perfil existente para você.`)
-      void emitFocusSourceRequest(existing.id)
+      void emitFocusSourceRequest(existing.id, { clearSearch: true })
       return
     }
 
@@ -223,6 +225,9 @@ export function SourceEditorDialog({
       const savedSnapshot = await upsertSourceProfile(payload)
       const savedSource = resolveSavedSource(savedSnapshot.sources, payload)
       if (savedSource) {
+        if (syncAfterSave) {
+          await runSourceSync(savedSource.id, { trigger: 'manual' })
+        }
         setSubmitError(undefined)
         onSaved(savedSource)
         onClose()
@@ -714,6 +719,16 @@ export function SourceEditorDialog({
             <button className="primary-button" disabled={Boolean(pendingCommand) || !canSubmit} type="submit">
               {draft.id ? 'Save changes' : 'Create profile'}
             </button>
+            {!draft.id ? (
+              <button
+                className="primary-button"
+                disabled={Boolean(pendingCommand) || !canSubmit}
+                type="submit"
+                value="save-and-sync"
+              >
+                Save and Sync
+              </button>
+            ) : null}
           </div>
         </footer>
       </form>
