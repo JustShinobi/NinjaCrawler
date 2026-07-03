@@ -7,6 +7,7 @@ src-tauri/target/
 src-tauri/gen/
 Temp/
 .claude/settings.local.json
+.codex/environments/
 .codex/skills/*/.git/
 connectors/bootstrap/**/*.exe
 connectors/bootstrap/**/*.zip

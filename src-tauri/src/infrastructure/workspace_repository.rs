@@ -409,12 +409,17 @@ fn persist_instagram_user_id_hint(
         .filter(|value| !value.is_empty())
     {
         if existing_user_id != user_id {
-            return Err(format!(
-                "Instagram identity mismatch for source '{source_id}': stored user id \
-                 '{existing_user_id}', resolved user id '{user_id}'."
-            ));
+            let history_user_id =
+                load_latest_instagram_profile_user_id_hint(connection, source_id)?;
+            if history_user_id.as_deref() != Some(user_id) {
+                return Err(format!(
+                    "Instagram identity mismatch for source '{source_id}': stored user id \
+                     '{existing_user_id}', resolved user id '{user_id}'."
+                ));
+            }
+        } else {
+            return Ok(());
         }
-        return Ok(());
     }
 
     instagram.user_id_hint = Some(user_id.to_string());
@@ -827,6 +832,26 @@ fn instagram_user_id_hint(options: &InstagramSourceSyncOptions) -> Option<&str> 
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
+}
+
+fn preferred_instagram_user_id_hint(
+    persisted_hint: Option<&str>,
+    latest_successful_hint: Option<&str>,
+) -> Option<String> {
+    // Um sync concluído prova qual conta produziu a mídia deste source. O hint
+    // persistido normalmente é igual, mas imports legados podem trazer UserID
+    // obsoleto ou incorreto; nesse conflito, o histórico confirmado é a âncora
+    // mais forte. Sem histórico, preservamos o hint persistido para recuperar
+    // contas renomeadas antes do primeiro sync no NinjaCrawler.
+    latest_successful_hint
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            persisted_hint
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+        })
+        .map(str::to_string)
 }
 
 fn instagram_special_path(options: &InstagramSourceSyncOptions) -> Option<&str> {
@@ -3065,11 +3090,14 @@ pub fn check_source_availability(
                 .and_then(|instagram| instagram.user_id_hint.clone())
                 .map(|value| value.trim().to_string())
                 .filter(|value| !value.is_empty());
-            let user_id_hint = source_user_id_hint.or_else(|| {
+            let history_user_id_hint =
                 load_latest_instagram_profile_user_id_hint(connection, &id)
                     .ok()
-                    .flatten()
-            });
+                    .flatten();
+            let user_id_hint = preferred_instagram_user_id_hint(
+                source_user_id_hint.as_deref(),
+                history_user_id_hint.as_deref(),
+            );
 
             let selected_account_id = normalized_account_id_override
                 .as_deref()
@@ -8485,13 +8513,14 @@ fn resolve_instagram_source_identity_preflight(
     request: &mut instagram_connector::InstagramConnectorRequest,
     timestamp: &str,
 ) -> Result<Option<String>, SourceSyncOutcome> {
-    let user_id_hint = instagram_user_id_hint(source_options)
-        .map(str::to_string)
-        .or_else(|| {
-            load_latest_instagram_profile_user_id_hint(connection, &context.source.id)
-                .ok()
-                .flatten()
-        });
+    let history_user_id_hint =
+        load_latest_instagram_profile_user_id_hint(connection, &context.source.id)
+            .ok()
+            .flatten();
+    let user_id_hint = preferred_instagram_user_id_hint(
+        instagram_user_id_hint(source_options),
+        history_user_id_hint.as_deref(),
+    );
     let identity = match instagram_connector::resolve_profile_identity(
         request,
         user_id_hint.as_deref(),
@@ -16950,6 +16979,48 @@ mod tests {
         assert_eq!(recovered_source.0.as_deref(), Some("80735443629"));
         assert_eq!(recovered_source.1, 1);
         assert_eq!(recovered_source.2, None);
+
+        connection
+            .execute(
+                "UPDATE source_profiles
+                 SET sync_options_json = json_set(
+                        sync_options_json,
+                        '$.instagram.userIdHint',
+                        '59617797093'
+                     ),
+                     ready_for_download = 0,
+                     sync_problem_code = 'instagram_username_unresolvable',
+                     sync_problem_message = 'blocked by stale imported hint',
+                     sync_problem_at = '2026-07-03T07:50:13Z'
+                 WHERE id = 'source-1'",
+                [],
+            )
+            .expect("stale imported identity should be simulated");
+        connection
+            .execute_batch(include_str!(
+                "../../migrations/0033_instagram_identity_hint_reconcile.sql"
+            ))
+            .expect("identity reconciliation migration should run");
+        let reconciled_source = connection
+            .query_row(
+                "SELECT
+                    json_extract(sync_options_json, '$.instagram.userIdHint'),
+                    ready_for_download,
+                    sync_problem_code
+                 FROM source_profiles WHERE id = 'source-1'",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                },
+            )
+            .expect("reconciled source");
+        assert_eq!(reconciled_source.0.as_deref(), Some("80735443629"));
+        assert_eq!(reconciled_source.1, 1);
+        assert_eq!(reconciled_source.2, None);
     }
 
     #[test]
@@ -17002,6 +17073,70 @@ mod tests {
                 .as_deref(),
             Some("80735443629")
         );
+    }
+
+    #[test]
+    fn instagram_identity_hint_prefers_confirmed_history_over_imported_hint() {
+        assert_eq!(
+            preferred_instagram_user_id_hint(Some("59617797093"), Some("74818949106"))
+                .as_deref(),
+            Some("74818949106")
+        );
+        assert_eq!(
+            preferred_instagram_user_id_hint(Some("59617797093"), None).as_deref(),
+            Some("59617797093")
+        );
+    }
+
+    #[test]
+    fn instagram_identity_hint_can_repair_imported_mismatch_confirmed_by_history() {
+        let (_temp_dir, layout) = create_test_layout();
+        let connection = database::open_connection(&layout.db_path).expect("connection");
+        upsert_provider_account_with_connection(
+            &connection,
+            &layout,
+            sample_account("account-1", "instagram"),
+        )
+        .expect("account should upsert");
+        let mut source = sample_source("source-1", "instagram", Some("account-1"));
+        source
+            .sync_options
+            .instagram
+            .get_or_insert_with(default_instagram_source_sync_options)
+            .user_id_hint = Some("59617797093".to_string());
+        upsert_source_profile_with_connection(&connection, &layout, source)
+            .expect("source should upsert");
+        connection
+            .execute(
+                "INSERT INTO source_sync_runs (
+                    id, source_id, account_id, provider, tool, trigger, status,
+                    summary, command_preview, manifest_summary_json,
+                    degraded_capabilities_json, started_at, finished_at, created_at
+                 ) VALUES (
+                    'run-confirmed', 'source-1', 'account-1', 'instagram',
+                    'internal.instagram', 'manual', 'succeeded', 'ok', 'test',
+                    '{\"profileUserId\":\"74818949106\"}', '[]',
+                    '2026-06-30T04:04:26Z', '2026-06-30T04:04:39Z',
+                    '2026-06-30T04:04:39Z'
+                 )",
+                [],
+            )
+            .expect("confirmed history should insert");
+
+        persist_instagram_user_id_hint(
+            &connection,
+            "source-1",
+            "74818949106",
+            "2026-07-03T08:00:00Z",
+        )
+        .expect("confirmed history should repair the imported hint");
+
+        let repaired = load_source_profile_by_id(&connection, "source-1")
+            .expect("source")
+            .sync_options
+            .instagram
+            .and_then(|options| options.user_id_hint);
+        assert_eq!(repaired.as_deref(), Some("74818949106"));
     }
 
     fn sample_instagram_cookies() -> Vec<ProviderAccountCookie> {
