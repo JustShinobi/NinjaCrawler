@@ -83,10 +83,9 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             src-tauri/target
-          key: release-windows-cargo-${{ hashFiles('src-tauri/Cargo.lock') }}
-          restore-keys: |
-            release-windows-cargo-
-            windows-cargo-
+          # Shared key with the CI workflow so the release reuses its warm cache.
+          key: cargo-windows-${{ hashFiles('src-tauri/Cargo.lock') }}
+          restore-keys: cargo-windows-
 
       - name: Install dependencies
         run: npm ci
