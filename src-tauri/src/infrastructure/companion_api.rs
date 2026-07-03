@@ -581,11 +581,6 @@ fn detect_profile_from_url(url: &str) -> Option<DetectedProfile> {
             return None;
         }
         ("tiktok", first)
-    } else if host == "reddit.com" || host.ends_with(".reddit.com") {
-        if segments.len() < 2 || !(segments[0] == "user" || segments[0] == "u") {
-            return None;
-        }
-        ("reddit", segments[1])
     } else {
         return None;
     };
@@ -671,7 +666,7 @@ fn parse_url(url: &str) -> Option<ParsedUrl> {
 fn normalize_provider(provider: &str) -> Result<String, String> {
     let normalized = provider.trim().to_ascii_lowercase();
     match normalized.as_str() {
-        "instagram" | "tiktok" | "reddit" | "twitter" => Ok(normalized),
+        "instagram" | "tiktok" | "twitter" => Ok(normalized),
         _ => Err(format!("Unsupported provider '{provider}'.")),
     }
 }
@@ -801,8 +796,6 @@ mod tests {
                 "tiktok",
                 "@example",
             ),
-            ("https://www.reddit.com/user/example/", "reddit", "@example"),
-            ("https://www.reddit.com/u/example/", "reddit", "@example"),
         ];
 
         for (url, provider, handle) in cases {
@@ -818,7 +811,6 @@ mod tests {
             "https://www.instagram.com/reel/123/",
             "https://x.com/home",
             "https://www.tiktok.com/tag/rust",
-            "https://www.reddit.com/r/rust/",
         ];
 
         for url in cases {

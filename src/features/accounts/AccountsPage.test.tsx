@@ -232,15 +232,15 @@ describe('AccountsPage', () => {
   it('opens provider-scoped create mode when settings are launched for a provider with no accounts', () => {
     const { store } = renderPage(
       {},
-      { initialProvider: 'reddit', initialMode: 'create' },
+      { initialProvider: 'twitter', initialMode: 'create' },
     )
 
     expect(screen.getByText(/new account draft/i)).toBeTruthy()
-    expect(screen.getAllByText(/^reddit$/i).length).toBeGreaterThan(0)
+    expect(screen.getAllByText(/^X \/ Twitter$/i).length).toBeGreaterThan(0)
     expect(screen.getByText(/add cookies now or save the account first/i)).toBeTruthy()
     expect(screen.getByRole('button', { name: /^edit cookies$/i })).toBeTruthy()
     fireEvent.click(screen.getByRole('tab', { name: /^provider$/i }))
-    expect(screen.getByText(/provider editor not modeled yet/i)).toBeTruthy()
+    expect(screen.getByText('Use UserAgent')).toBeTruthy()
     expect(store.loadProviderAccountEditor).not.toHaveBeenCalled()
   })
 

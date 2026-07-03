@@ -18,7 +18,6 @@ const RESERVED_TWITTER = new Set([
 export const PROVIDER_LABELS = {
   instagram: 'Instagram',
   tiktok: 'TikTok',
-  reddit: 'Reddit',
   twitter: 'X / Twitter',
 }
 
@@ -29,7 +28,6 @@ export function detectProviderFromUrl(rawUrl) {
     if (host === 'instagram.com' || host.endsWith('.instagram.com')) return 'instagram'
     if (host === 'x.com' || host.endsWith('.x.com') || host === 'twitter.com' || host.endsWith('.twitter.com')) return 'twitter'
     if (host === 'tiktok.com' || host.endsWith('.tiktok.com')) return 'tiktok'
-    if (host === 'reddit.com' || host.endsWith('.reddit.com')) return 'reddit'
   } catch {
     return null
   }
@@ -193,10 +191,6 @@ export function detectProfileFromUrl(rawUrl) {
     if (!first?.startsWith('@')) return null
     provider = 'tiktok'
     handle = first
-  } else if (host === 'reddit.com' || host.endsWith('.reddit.com')) {
-    if (segments.length < 2 || !['user', 'u'].includes(segments[0])) return null
-    provider = 'reddit'
-    handle = segments[1]
   } else {
     return null
   }

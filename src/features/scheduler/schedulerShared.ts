@@ -12,7 +12,7 @@ import type {
   SyncPlanUpsert,
 } from '../../domain/models'
 
-export const PROVIDERS: ProviderKey[] = ['instagram', 'tiktok', 'reddit', 'twitter']
+export const PROVIDERS: ProviderKey[] = ['instagram', 'tiktok', 'twitter']
 export const PAUSE_PRESETS: SchedulerPauseMode[] = ['disabled', 'unlimited', '1h', '2h', '4h', '6h', '12h', 'until']
 
 export function createNotifications(): SchedulerPlanNotifications {

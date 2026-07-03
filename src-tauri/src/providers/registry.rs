@@ -97,22 +97,6 @@ static TIKTOK_RUNTIME: StaticProviderRuntime = StaticProviderRuntime {
     }),
 };
 
-static REDDIT_RUNTIME: StaticProviderRuntime = StaticProviderRuntime {
-    key: "reddit",
-    display_name: "Reddit",
-    auth_modes: &["imported_session"],
-    supports_multi_account: false,
-    source_kinds: &["profile"],
-    default_capabilities: &["posts", "saved_posts"],
-    notes: "Saved posts remain best effort in V1.",
-    source_sync: Some(SourceSyncRuntime {
-        tool_setting_key: "tool.gallery-dl.path",
-        default_executable: "gallery-dl",
-        argument_mode: SourceSyncArgumentMode::GalleryDlDirectory,
-        degraded_capabilities: &["saved_posts"],
-    }),
-};
-
 static TWITTER_RUNTIME: StaticProviderRuntime = StaticProviderRuntime {
     key: "twitter",
     display_name: "X / Twitter",
@@ -129,10 +113,9 @@ static TWITTER_RUNTIME: StaticProviderRuntime = StaticProviderRuntime {
     }),
 };
 
-static PROVIDER_REGISTRY: [&dyn ProviderRuntime; 4] = [
+static PROVIDER_REGISTRY: [&dyn ProviderRuntime; 3] = [
     &INSTAGRAM_RUNTIME,
     &TIKTOK_RUNTIME,
-    &REDDIT_RUNTIME,
     &TWITTER_RUNTIME,
 ];
 
@@ -161,10 +144,9 @@ mod tests {
     #[test]
     fn provider_catalog_contains_supported_v1_runtimes() {
         let catalog = provider_catalog();
-        assert_eq!(catalog.len(), 4);
+        assert_eq!(catalog.len(), 3);
         assert!(catalog.iter().any(|provider| provider.key == "instagram"));
         assert!(catalog.iter().any(|provider| provider.key == "tiktok"));
-        assert!(catalog.iter().any(|provider| provider.key == "reddit"));
         assert!(catalog.iter().any(|provider| provider.key == "twitter"));
     }
 

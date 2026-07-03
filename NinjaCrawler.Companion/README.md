@@ -24,9 +24,6 @@ http://127.0.0.1:47219/ninjacrawler-companion/v1
 - Instagram: `https://www.instagram.com/<handle>/`
 - X / Twitter: `https://x.com/<handle>` or `https://twitter.com/<handle>`
 - TikTok: `https://www.tiktok.com/@<handle>`
-- Reddit: `https://www.reddit.com/user/<handle>` or `/u/<handle>`
-
-Reddit account import is not supported yet; its add and sync actions remain available.
 
 The extension badge shows:
 

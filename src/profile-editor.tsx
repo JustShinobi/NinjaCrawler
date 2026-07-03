@@ -5,7 +5,7 @@ import { applyTheme, watchTheme } from './theme'
 import { closeDesktopWindow } from './utils/closeDesktopWindow'
 import './styles.css'
 
-const PROVIDERS: ProviderKey[] = ['instagram', 'tiktok', 'reddit', 'twitter']
+const PROVIDERS: ProviderKey[] = ['instagram', 'tiktok', 'twitter']
 
 applyTheme()
 watchTheme()

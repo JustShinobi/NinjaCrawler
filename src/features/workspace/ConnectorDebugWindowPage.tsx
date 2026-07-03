@@ -140,7 +140,6 @@ export function ConnectorDebugWindowPage() {
             <option value="instagram">Instagram</option>
             <option value="tiktok">TikTok</option>
             <option value="twitter">Twitter</option>
-            <option value="reddit">Reddit</option>
           </select>
           <select aria-label="Event type" value={eventType} onChange={(event) => setEventType(event.target.value as ConnectorDebugEventType | 'all')}>
             {EVENT_TYPES.map((type) => <option key={type} value={type}>{type === 'all' ? 'All events' : type.toUpperCase()}</option>)}

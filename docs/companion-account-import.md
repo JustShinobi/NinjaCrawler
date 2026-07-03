@@ -8,7 +8,6 @@
 - Updating an account replaces only its session and authorization metadata. Paths, source defaults, capabilities, and other account settings remain unchanged.
 - The backend retains one previous imported session per account and exposes **Revert last import**.
 - A failed validation leaves the imported session in a degraded state and allows manual reversion.
-- Reddit profile add/sync behavior remains unchanged and Reddit account import is out of scope for this version.
 
 ## Assumptions and non-functional requirements
 
@@ -54,7 +53,6 @@ Account paths, defaults, capabilities, source assignments, and unrelated setting
 - Instagram: cookies, stable identity, User-Agent/client hints, CSRF token, app id, ASBD id, WWW claim, and optional LSD/DTSG values when available.
 - X/Twitter: cookies, stable identity, and User-Agent.
 - TikTok: cookies, stable identity, and User-Agent.
-- Reddit: excluded from account import in this version.
 
 ### Error handling
 
@@ -73,4 +71,4 @@ Tests cover provider adapters, cookie conversion, metadata redaction, destinatio
 5. **One rotating backup.** Full history was rejected as unnecessary for the first version.
 6. **Manual rollback after failed validation.** Temporary provider failures should not erase a newly imported session automatically.
 7. **Protected consolidated payload.** Newly captured secrets are kept in the DPAPI-backed store rather than introduced as plaintext settings.
-8. **Provider adapters.** Instagram, Twitter, and TikTok evolve independently; Reddit import is deferred.
+8. **Provider adapters.** Instagram, Twitter, and TikTok evolve independently.

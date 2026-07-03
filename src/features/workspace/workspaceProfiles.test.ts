@@ -125,7 +125,6 @@ describe('workspaceProfiles', () => {
     expect(buildSourceProfileUrl({ provider: 'instagram', handle: '@visual_lab' })).toBe('https://www.instagram.com/visual_lab/')
     expect(buildSourceProfileUrl({ provider: 'tiktok', handle: '@visual_lab' })).toBe('https://www.tiktok.com/@visual_lab/')
     expect(buildSourceProfileUrl({ provider: 'twitter', handle: 'visual_lab' })).toBe('https://x.com/visual_lab')
-    expect(buildSourceProfileUrl({ provider: 'reddit', handle: 'u/visual_lab' })).toBe('https://www.reddit.com/user/visual_lab/')
   })
 
   it('sorts name ascending by the visible handle instead of displayName metadata', () => {

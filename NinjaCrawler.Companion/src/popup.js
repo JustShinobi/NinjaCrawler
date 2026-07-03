@@ -60,7 +60,7 @@ async function boot() {
   state.target = detectTargetFromUrl(tab?.url)
   state.video = detectVideoFromUrl(tab?.url)
 
-  if (!state.provider || (!state.detected && state.provider === 'reddit')) {
+  if (!state.provider) {
     showUnsupported()
     return
   }
@@ -131,12 +131,12 @@ function renderContext() {
   // independente de haver perfil rastreado (baixa avulso na estrutura própria).
   elements.singleVideoButton?.classList.toggle('hidden', !state.video)
 
-  elements.importAccountButton?.classList.toggle('hidden', state.provider === 'reddit')
+  elements.importAccountButton?.classList.remove('hidden')
   setMessage('')
 }
 
 async function startAccountImport() {
-  if (!state.tab?.id || !state.provider || state.provider === 'reddit') return
+  if (!state.tab?.id || !state.provider) return
   setBusy(true)
   setMessage('Capturing the signed-in browser account…')
   try {

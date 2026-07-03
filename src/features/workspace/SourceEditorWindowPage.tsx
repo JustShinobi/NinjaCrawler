@@ -12,7 +12,7 @@ import type {
 import { useAppStore } from '../../state/appStore'
 import { SourceEditorDialog } from './SourceEditorDialog'
 
-const PROVIDERS: ProviderKey[] = ['instagram', 'tiktok', 'reddit', 'twitter']
+const PROVIDERS: ProviderKey[] = ['instagram', 'tiktok', 'twitter']
 
 function normalizeIntent(
   intent: SourceEditorWindowIntent | undefined,

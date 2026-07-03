@@ -6,7 +6,7 @@ import type { AccountsWindowIntent, ProviderKey } from '../../domain/models'
 import { useAppStore } from '../../state/appStore'
 import { AccountsPage } from './AccountsPage'
 
-const PROVIDERS: ProviderKey[] = ['instagram', 'tiktok', 'reddit', 'twitter']
+const PROVIDERS: ProviderKey[] = ['instagram', 'tiktok', 'twitter']
 
 function normalizeIntent(intent: AccountsWindowIntent | undefined): AccountsWindowIntent {
   const provider = intent?.initialProvider && PROVIDERS.includes(intent.initialProvider)
