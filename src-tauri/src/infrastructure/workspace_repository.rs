@@ -5,11 +5,11 @@ use sha2::{Digest, Sha256};
 use std::collections::{hash_map::DefaultHasher, BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::hash::{Hash, Hasher};
-use std::io::Read;
+use std::io::{BufRead, BufReader, Read};
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration as StdDuration;
@@ -42,7 +42,7 @@ use crate::domain::models::{
 };
 use crate::infrastructure::storage::StorageLayout;
 use crate::infrastructure::{
-    connector_runtime, database, instagram_connector, runtime_log, session_secret_store,
+    connector_debug, connector_runtime, database, instagram_connector, runtime_log, session_secret_store,
     source_sync_runtime, storage, tiktok_connector, twitter_connector,
 };
 use crate::providers;
@@ -6312,6 +6312,23 @@ fn execute_source_sync_with_connection(
     executor: &dyn ToolExecutor,
 ) -> Result<SourceSyncOutcome, String> {
     let context = load_source_sync_context(connection, layout, &source_id)?;
+    let _connector_debug_context = connector_debug::enter(
+        context.source.id.clone(),
+        context.source.provider.clone(),
+        context.source.handle.clone(),
+    );
+    connector_debug::append_current(
+        "backend",
+        "system",
+        "sync.begin",
+        format!(
+            "source_id={}\nprovider={}\nhandle={}\ntrigger={trigger}\nrun_mode={}",
+            context.source.id,
+            context.source.provider,
+            context.source.handle,
+            run_mode.unwrap_or("default")
+        ),
+    );
     validate_source_sync_override(&context.source, sync_options_override)?;
     if context.source.provider.eq_ignore_ascii_case("instagram") {
         let account_settings = load_provider_account_settings_map(connection, &context.account.id)?;
@@ -9995,7 +10012,10 @@ impl ToolExecutor for CommandToolExecutor {
         let _connector_usage = connector_runtime::claim_connector_usage(&invocation.connector_key);
         let mut command = Command::new(&invocation.executable);
         configure_background_command(&mut command);
-        command.args(&invocation.args);
+        command
+            .args(&invocation.args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
 
         if let Some(working_directory) = invocation.working_directory.as_ref() {
             command.current_dir(working_directory);
@@ -10014,15 +10034,85 @@ impl ToolExecutor for CommandToolExecutor {
             Some(0),
         );
 
-        let mut child = command
-            .spawn()
-            .map_err(|error| format!("Failed to launch '{}': {}", invocation.executable, error))?;
+        connector_debug::append_current(
+            &invocation.connector_key,
+            "call",
+            "process.spawn",
+            std::iter::once(invocation.executable.clone())
+                .chain(invocation.args.iter().cloned())
+                .collect::<Vec<_>>()
+                .join(" "),
+        );
+        let mut child = command.spawn().map_err(|error| {
+            connector_debug::append_current(
+                &invocation.connector_key,
+                "error",
+                "process.spawn",
+                error.to_string(),
+            );
+            format!("Failed to launch '{}': {}", invocation.executable, error)
+        })?;
+
+        source_sync_runtime::report_source_sync_progress(
+            &invocation.source_id,
+            None,
+            Some("Connector process started".to_string()),
+            Some(format!(
+                "{} is running with process id {}.",
+                invocation.connector_key,
+                child.id()
+            )),
+            true,
+            Some(0),
+        );
+
+        let debug_context = connector_debug::current_context();
+        let stdout_context = debug_context.clone();
+        let stdout_connector = invocation.connector_key.clone();
+        let stdout = child.stdout.take();
+        let stdout_reader = std::thread::spawn(move || {
+            let mut lines = Vec::new();
+            if let Some(handle) = stdout {
+                for line in BufReader::new(handle).lines().map_while(Result::ok) {
+                    connector_debug::append_with_context(
+                        stdout_context.clone(),
+                        &stdout_connector,
+                        "stdout",
+                        "process.output",
+                        line.clone(),
+                    );
+                    lines.push(line);
+                }
+            }
+            lines.join("\n")
+        });
+        let stderr_context = debug_context.clone();
+        let stderr_connector = invocation.connector_key.clone();
+        let stderr = child.stderr.take();
+        let stderr_reader = std::thread::spawn(move || {
+            let mut lines = Vec::new();
+            if let Some(handle) = stderr {
+                for line in BufReader::new(handle).lines().map_while(Result::ok) {
+                    connector_debug::append_with_context(
+                        stderr_context.clone(),
+                        &stderr_connector,
+                        "stderr",
+                        "process.output",
+                        line.clone(),
+                    );
+                    lines.push(line);
+                }
+            }
+            lines.join("\n")
+        });
 
         let mut last_reported_count = 0_u32;
-        loop {
+        let status = loop {
             if invocation.cancel_token.load(Ordering::SeqCst) {
                 let _ = child.kill();
                 let _ = child.wait();
+                let _ = stdout_reader.join();
+                let _ = stderr_reader.join();
                 source_sync_runtime::report_source_sync_progress(
                     &invocation.source_id,
                     None,
@@ -10031,11 +10121,17 @@ impl ToolExecutor for CommandToolExecutor {
                     false,
                     Some(100),
                 );
+                connector_debug::append_current(
+                    &invocation.connector_key,
+                    "system",
+                    "process.cancel",
+                    "Process killed after cancellation request.",
+                );
                 return Err("source sync cancelled by user".to_string());
             }
 
             match child.try_wait() {
-                Ok(Some(_)) => break,
+                Ok(Some(status)) => break status,
                 Ok(None) => {
                     let downloaded_count = count_downloaded_media_items(&invocation.output_root);
                     if downloaded_count != last_reported_count {
@@ -10063,23 +10159,34 @@ impl ToolExecutor for CommandToolExecutor {
                     std::thread::sleep(StdDuration::from_millis(SOURCE_SYNC_PROGRESS_POLL_MS));
                 }
                 Err(error) => {
+                    connector_debug::append_current(
+                        &invocation.connector_key,
+                        "error",
+                        "process.wait",
+                        error.to_string(),
+                    );
                     return Err(format!(
                         "Failed while waiting for '{}': {}",
                         invocation.executable, error
                     ));
                 }
             }
-        }
-
-        let output = child.wait_with_output().map_err(|error| {
+        };
+        let _stdout = stdout_reader.join().unwrap_or_default();
+        let stderr = stderr_reader.join().unwrap_or_default().trim().to_string();
+        connector_debug::append_current(
+            &invocation.connector_key,
+            "response",
+            "process.exit",
             format!(
-                "Failed to read '{}' output: {}",
-                invocation.executable, error
-            )
-        })?;
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+                "exit_code={}",
+                status
+                    .code()
+                    .map_or_else(|| "terminated".to_string(), |code| code.to_string())
+            ),
+        );
 
-        if output.status.success() {
+        if status.success() {
             let downloaded_count = count_downloaded_media_items(&invocation.output_root);
             source_sync_runtime::report_source_sync_progress(
                 &invocation.source_id,
@@ -10096,8 +10203,7 @@ impl ToolExecutor for CommandToolExecutor {
                 status: "succeeded".to_string(),
             })
         } else {
-            let exit_code = output
-                .status
+            let exit_code = status
                 .code()
                 .map(|value| value.to_string())
                 .unwrap_or_else(|| "terminated".to_string());
@@ -12318,6 +12424,30 @@ fn persist_source_sync_run(
     started_at: &str,
     finished_at: &str,
 ) -> Result<(), String> {
+    let event_type = if outcome.status == "failed" {
+        "error"
+    } else {
+        "response"
+    };
+    let mut raw = format!(
+        "status={}\nstarted_at={started_at}\nfinished_at={finished_at}\ncommand={}\nsummary={}",
+        outcome.status, outcome.command_preview, outcome.summary
+    );
+    if let Some(error) = outcome.validation_error.as_deref() {
+        raw.push_str("\nerror=");
+        raw.push_str(error);
+    }
+    if let Some(manifest) = outcome.manifest_summary_json.as_deref() {
+        raw.push_str("\nmanifest=");
+        raw.push_str(manifest);
+    }
+    connector_debug::append_current(
+        &outcome.tool,
+        event_type,
+        "sync.result",
+        raw,
+    );
+
     connection
         .execute(
             "INSERT INTO source_sync_runs (

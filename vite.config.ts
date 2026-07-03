@@ -17,6 +17,7 @@ export default defineConfig(({ command }) => ({
         import: resolve(__dirname, 'import.html'),
         connectorRuntimes: resolve(__dirname, 'connector-runtimes.html'),
         runtimeLog: resolve(__dirname, 'runtime-log.html'),
+        connectorDebug: resolve(__dirname, 'connector-debug.html'),
         queueStatus: resolve(__dirname, 'queue-status.html'),
         scheduler: resolve(__dirname, 'scheduler.html'),
         plans: resolve(__dirname, 'plans.html'),

@@ -15,6 +15,7 @@ const bridgeMocks = vi.hoisted(() => ({
   loadSourceDeleteQueueStatus: vi.fn(),
   loadSourceSyncQueueStatus: vi.fn(),
   loadWorkspaceSnapshot: vi.fn(),
+  openConnectorDebugWindow: vi.fn(),
   subscribeToDesktopRuntimeEvents: vi.fn(),
 }))
 
@@ -107,6 +108,7 @@ describe('SourceSyncQueueWindowPage', () => {
     bridgeMocks.loadSourceSyncQueueStatus.mockResolvedValue(statusFixture())
     bridgeMocks.loadSourceDeleteQueueStatus.mockResolvedValue(deleteStatusFixture())
     bridgeMocks.loadWorkspaceSnapshot.mockResolvedValue({ sources: [] })
+    bridgeMocks.openConnectorDebugWindow.mockResolvedValue(undefined)
     bridgeMocks.subscribeToDesktopRuntimeEvents.mockResolvedValue(() => undefined)
   })
 
@@ -132,6 +134,16 @@ describe('SourceSyncQueueWindowPage', () => {
     expect(await screen.findByText(/^@queued$/i)).toBeTruthy()
     // queue position tag for the next queued item
     expect(screen.getByText(/^Next$/i)).toBeTruthy()
+  })
+
+  it('opens the realtime backend debugger from the queue window', async () => {
+    render(<SourceSyncQueueWindowPage />)
+
+    fireEvent.click(await screen.findByRole('button', { name: /open realtime debugger/i }))
+
+    await waitFor(() => {
+      expect(bridgeMocks.openConnectorDebugWindow).toHaveBeenCalledTimes(1)
+    })
   })
 
   it('shows the empty state when there is no activity', async () => {

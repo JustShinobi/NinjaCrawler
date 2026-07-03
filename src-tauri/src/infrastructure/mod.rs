@@ -1,5 +1,6 @@
 pub mod connector_runtime;
 pub mod companion_api;
+pub mod connector_debug;
 pub mod database;
 pub mod desktop_runtime;
 pub mod import_runtime;

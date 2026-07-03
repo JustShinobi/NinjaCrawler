@@ -13,10 +13,14 @@ use reqwest::blocking::Client;
 use serde_json::Value;
 use std::collections::HashSet;
 use std::fs;
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::Duration;
+use std::time::Instant;
+
+use crate::infrastructure::connector_debug;
 
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
@@ -192,6 +196,17 @@ where
     });
 
     let listed = enumerate_posts(request, &profile_url, &is_cancelled)?;
+    connector_debug::append_current(
+        "internal.tiktok",
+        "system",
+        "listing.complete",
+        format!(
+            "posts_received={}\nuploader_id={}\nrate_limited={}",
+            listed.posts.len(),
+            listed.uploader_id.as_deref().unwrap_or("unknown"),
+            listed.rate_limited
+        ),
+    );
     rate_limited = rate_limited || listed.rate_limited;
     let resolved_user_id = listed.uploader_id.clone();
 
@@ -266,6 +281,17 @@ where
             selected.push(post);
         }
         summary.queued_asset_count = selected.len() as u32;
+        connector_debug::append_current(
+            "internal.tiktok",
+            "system",
+            "selection.complete",
+            format!(
+                "normalized_posts={}\nselected_posts={}\nskipped_existing_posts={}\ndownload_batch_size={DOWNLOAD_BATCH_SIZE}",
+                summary.normalized_post_count,
+                selected.len(),
+                summary.skipped_existing_post_count
+            ),
+        );
 
         let total = selected.len();
         let mut processed = 0_usize;
@@ -289,8 +315,36 @@ where
                 indeterminate: false,
             });
 
+            let batch_started = Instant::now();
+            connector_debug::append_current(
+                "internal.tiktok",
+                "call",
+                "batch.download",
+                format!(
+                    "batch_start={}\nbatch_end={done}\nbatch_size={}\ntotal_posts={total}\npost_ids={}",
+                    done.saturating_sub(batch.len()).saturating_add(1),
+                    batch.len(),
+                    batch
+                        .iter()
+                        .map(|post| post.post_id.as_str())
+                        .collect::<Vec<_>>()
+                        .join(",")
+                ),
+            );
             match download_batch(request, batch, &is_cancelled) {
                 Ok(outcome) => {
+                    connector_debug::append_current(
+                        "internal.tiktok",
+                        "response",
+                        "batch.download",
+                        format!(
+                            "elapsed_ms={}\nmedia_produced={}\nerrors={}\nrate_limited={}",
+                            batch_started.elapsed().as_millis(),
+                            outcome.media.len(),
+                            outcome.errors.len(),
+                            outcome.rate_limited
+                        ),
+                    );
                     if outcome.rate_limited {
                         rate_limited = true;
                     }
@@ -320,6 +374,15 @@ where
                     }
                 }
                 Err(error) => {
+                    connector_debug::append_current(
+                        "internal.tiktok",
+                        "error",
+                        "batch.download",
+                        format!(
+                            "elapsed_ms={}\nerror={error}",
+                            batch_started.elapsed().as_millis()
+                        ),
+                    );
                     let lowered = error.to_ascii_lowercase();
                     if lowered.contains("cancelled by user") {
                         return Err(error);
@@ -977,9 +1040,40 @@ where
         if destination.exists() || request.existing_relative_paths.contains(&final_file_name) {
             continue;
         }
+        connector_debug::append_current(
+            "tiktok-http",
+            "call",
+            "GET photo",
+            format!("GET {image_url}"),
+        );
         let response = match client.get(image_url).send() {
-            Ok(response) if response.status().is_success() => response,
-            _ => continue,
+            Ok(response) if response.status().is_success() => {
+                connector_debug::append_current(
+                    "tiktok-http",
+                    "response",
+                    "GET photo",
+                    format!("HTTP {}", response.status()),
+                );
+                response
+            }
+            Ok(response) => {
+                connector_debug::append_current(
+                    "tiktok-http",
+                    "error",
+                    "GET photo",
+                    format!("HTTP {}", response.status()),
+                );
+                continue;
+            }
+            Err(error) => {
+                connector_debug::append_current(
+                    "tiktok-http",
+                    "error",
+                    "GET photo",
+                    error.to_string(),
+                );
+                continue;
+            }
         };
         let Ok(bytes) = response.bytes() else { continue };
         if bytes.is_empty() {
@@ -1158,7 +1252,14 @@ fn finalize_media_file(
     if !is_video && !is_image {
         // Áudio-only (mp3/m4a de slideshow sem imagens) ou formato inesperado:
         // descarta, o post não conta como baixado e será tentado de novo.
-        return Err(format!("unsupported media extension '{extension}'"));
+        let error = format!("unsupported media extension '{extension}'");
+        connector_debug::append_current(
+            "internal.tiktok",
+            "error",
+            "media.finalize",
+            format!("source={}\npost_id={post_id}\nerror={error}", source_path.display()),
+        );
+        return Err(error);
     }
     let media_type = if is_video { "video" } else { "image" };
 
@@ -1183,12 +1284,44 @@ fn finalize_media_file(
     fs::create_dir_all(&target_dir).map_err(|error| error.to_string())?;
     let destination = target_dir.join(&final_file_name);
     if destination.exists() {
+        connector_debug::append_current(
+            "internal.tiktok",
+            "system",
+            "media.skip",
+            format!(
+                "post_id={post_id}\nreason=destination already exists\ndestination={}",
+                destination.display()
+            ),
+        );
         return Err("destination already exists".to_string());
     }
-    if fs::rename(source_path, &destination).is_err() {
+    connector_debug::append_current(
+        "internal.tiktok",
+        "call",
+        "media.finalize",
+        format!(
+            "post_id={post_id}\nmedia_type={media_type}\nsource={}\ndestination={}",
+            source_path.display(),
+            destination.display()
+        ),
+    );
+    let transfer_mode = if fs::rename(source_path, &destination).is_err() {
         fs::copy(source_path, &destination).map_err(|error| error.to_string())?;
         let _ = fs::remove_file(source_path);
-    }
+        "copy"
+    } else {
+        "rename"
+    };
+    let file_size = fs::metadata(&destination).map(|value| value.len()).unwrap_or(0);
+    connector_debug::append_current(
+        "internal.tiktok",
+        "response",
+        "media.finalize",
+        format!(
+            "post_id={post_id}\ntransfer={transfer_mode}\nbytes={file_size}\ndestination={}",
+            destination.display()
+        ),
+    );
 
     Ok(DownloadedTikTokMedia {
         file_path: destination,
@@ -1224,28 +1357,79 @@ fn run_capturing<C>(
 where
     C: Fn() -> bool,
 {
+    let context = connector_debug::current_context();
+    let command_line = std::iter::once(command.get_program().to_string_lossy().to_string())
+        .chain(command.get_args().map(|arg| arg.to_string_lossy().to_string()))
+        .collect::<Vec<_>>()
+        .join(" ");
+    connector_debug::append_with_context(
+        context.clone(),
+        label,
+        "call",
+        "process.spawn",
+        command_line,
+    );
     let mut child = command
         .spawn()
-        .map_err(|error| format!("Failed to start {label}: {error}"))?;
+        .map_err(|error| {
+            connector_debug::append_with_context(
+                context.clone(),
+                label,
+                "error",
+                "process.spawn",
+                error.to_string(),
+            );
+            format!("Failed to start {label}: {error}")
+        })?;
+    connector_debug::append_with_context(
+        context.clone(),
+        label,
+        "system",
+        "process.started",
+        format!("pid={}\ntimeout_seconds={timeout_secs}", child.id()),
+    );
 
     let stdout_handle = child.stdout.take();
     let stderr_handle = child.stderr.take();
+    let stdout_context = context.clone();
+    let stdout_label = label.to_string();
     let stdout_reader = thread::spawn(move || {
-        let mut buffer = String::new();
-        if let Some(mut handle) = stdout_handle {
-            let _ = std::io::Read::read_to_string(&mut handle, &mut buffer);
+        let mut lines = Vec::new();
+        if let Some(handle) = stdout_handle {
+            for line in BufReader::new(handle).lines().map_while(Result::ok) {
+                connector_debug::append_with_context(
+                    stdout_context.clone(),
+                    &stdout_label,
+                    "stdout",
+                    "process.output",
+                    line.clone(),
+                );
+                lines.push(line);
+            }
         }
-        buffer
+        lines.join("\n")
     });
+    let stderr_context = context.clone();
+    let stderr_label = label.to_string();
     let stderr_reader = thread::spawn(move || {
-        let mut buffer = String::new();
-        if let Some(mut handle) = stderr_handle {
-            let _ = std::io::Read::read_to_string(&mut handle, &mut buffer);
+        let mut lines = Vec::new();
+        if let Some(handle) = stderr_handle {
+            for line in BufReader::new(handle).lines().map_while(Result::ok) {
+                connector_debug::append_with_context(
+                    stderr_context.clone(),
+                    &stderr_label,
+                    "stderr",
+                    "process.output",
+                    line.clone(),
+                );
+                lines.push(line);
+            }
         }
-        buffer
+        lines.join("\n")
     });
 
     let started = std::time::Instant::now();
+    let mut last_heartbeat = std::time::Instant::now();
     let mut cancelled = false;
     let mut timed_out = false;
     loop {
@@ -1256,11 +1440,46 @@ where
             break;
         }
         match child.try_wait().map_err(|error| error.to_string())? {
-            Some(_) => break,
+            Some(status) => {
+                connector_debug::append_with_context(
+                    context.clone(),
+                    label,
+                    "response",
+                    "process.exit",
+                    format!(
+                        "exit_code={}",
+                        status
+                            .code()
+                            .map_or_else(|| "terminated".to_string(), |code| code.to_string())
+                    ),
+                );
+                break;
+            }
             None => {
+                if last_heartbeat.elapsed() >= Duration::from_secs(5) {
+                    connector_debug::append_with_context(
+                        context.clone(),
+                        label,
+                        "system",
+                        "process.heartbeat",
+                        format!(
+                            "pid={}\nelapsed_seconds={}\nstate=running",
+                            child.id(),
+                            started.elapsed().as_secs()
+                        ),
+                    );
+                    last_heartbeat = std::time::Instant::now();
+                }
                 if started.elapsed() > Duration::from_secs(timeout_secs) {
                     let _ = child.kill();
                     let _ = child.wait();
+                    connector_debug::append_with_context(
+                        context.clone(),
+                        label,
+                        "error",
+                        "process.timeout",
+                        format!("pid={}\ntimeout_seconds={timeout_secs}", child.id()),
+                    );
                     timed_out = true;
                     break;
                 }

@@ -360,6 +360,20 @@ pub struct RuntimeLogEntry {
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ConnectorDebugEntry {
+    pub id: String,
+    pub timestamp: String,
+    pub source_id: Option<String>,
+    pub provider: Option<String>,
+    pub source_handle: Option<String>,
+    pub connector: String,
+    pub event_type: String,
+    pub operation: String,
+    pub raw: String,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RuntimeLogContext {
     pub provider_catalog: Vec<ProviderDescriptor>,
     pub accounts: Vec<ProviderAccount>,
@@ -1175,6 +1189,15 @@ pub struct RuntimeLogQuery {
     pub scope: Option<String>,
     pub provider: Option<String>,
     pub account_id: Option<String>,
+}
+
+#[derive(Clone, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ConnectorDebugQuery {
+    pub limit: Option<u32>,
+    pub provider: Option<String>,
+    pub source_id: Option<String>,
+    pub event_type: Option<String>,
 }
 
 #[derive(Clone, Deserialize)]
