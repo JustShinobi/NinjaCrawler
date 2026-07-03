@@ -270,10 +270,6 @@ export function parseClipboardProfileSeed(rawText: string): ClipboardProfileSeed
     return createClipboardSeed('twitter', normalizeAtHandle(singleHandle))
   }
 
-  if (host === 'reddit.com' && segments.length >= 2 && (segments[0] === 'user' || segments[0] === 'u')) {
-    return createClipboardSeed('reddit', `u/${segments[1]}`)
-  }
-
   return undefined
 }
 
@@ -298,10 +294,6 @@ export function buildSourceProfileUrl(source: Pick<SourceProfile, 'provider' | '
       return `https://www.tiktok.com/${normalizeAtHandle(handle)}/`
     case 'twitter':
       return `https://x.com/${normalizeAtHandle(handle).slice(1)}`
-    case 'reddit': {
-      const normalized = normalizeRedditHandle(handle)
-      return normalized ? `https://www.reddit.com/user/${normalized}/` : undefined
-    }
     default:
       return undefined
   }
@@ -355,24 +347,3 @@ function normalizeAtHandle(value: string): string {
   return value.startsWith('@') ? value : `@${value}`
 }
 
-function normalizeRedditHandle(value: string): string | undefined {
-  const normalized = value
-    .replace(/^https?:\/\/(www\.)?reddit\.com\//i, '')
-    .replace(/^\/+/, '')
-    .replace(/\/+$/, '')
-
-  if (normalized.length === 0) {
-    return undefined
-  }
-
-  const segments = normalized.split('/').filter((segment) => segment.length > 0)
-  if (segments.length >= 2 && (segments[0].toLowerCase() === 'u' || segments[0].toLowerCase() === 'user')) {
-    return segments[1]
-  }
-
-  if (normalized.toLowerCase().startsWith('u/')) {
-    return normalized.slice(2)
-  }
-
-  return normalized
-}

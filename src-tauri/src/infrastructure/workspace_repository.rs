@@ -11603,7 +11603,6 @@ fn normalize_companion_provider(provider: &str) -> Result<String, String> {
     let provider = provider.trim().to_ascii_lowercase();
     match provider.as_str() {
         "instagram" | "twitter" | "tiktok" => Ok(provider),
-        "reddit" => Err("Reddit account import is not supported yet.".to_string()),
         _ => Err("This provider does not support Companion account import.".to_string()),
     }
 }
@@ -12005,7 +12004,7 @@ mod companion_account_import_tests {
     }
 
     #[test]
-    fn preview_is_redacted_and_reddit_is_rejected() {
+    fn preview_is_redacted() {
         let temp = tempfile::tempdir().expect("temp dir");
         let layout = storage::workspace_layout_from_roots(
             temp.path().join("localappdata"), temp.path().join("userprofile"),
@@ -12017,11 +12016,6 @@ mod companion_account_import_tests {
             assert_eq!(preview.cookie_count, 2);
             assert!(!serde_json::to_string(&preview).map_err(|error| error.to_string())?
                 .contains("super-secret"));
-            let mut reddit = capture("token");
-            reddit.provider = "reddit".to_string();
-            assert!(preview_companion_account_with_connection(
-                connection, test_layout, &reddit,
-            ).is_err());
             Ok(())
         }).expect("preview");
     }
@@ -13113,7 +13107,7 @@ fn sanitize_source_handle(provider: &str, handle: &str) -> String {
 }
 
 /// Chave canônica de deduplicação: handle sanitizado (sem `@`, sem `/`) em minúsculas.
-/// Handles de Instagram/TikTok/Reddit/Twitter são case-insensitive, então o
+/// Handles de Instagram/TikTok/Twitter são case-insensitive, então o
 /// lowercasing evita que `@Perfil` e `perfil` sejam tratados como distintos.
 fn source_dedupe_key(provider: &str, handle: &str) -> String {
     sanitize_source_handle(provider, handle).to_lowercase()
@@ -13161,7 +13155,6 @@ fn source_target_url(provider: &str, handle: &str) -> String {
         "instagram" => format!("https://www.instagram.com/{}/", handle),
         // O TikTok exige o `@` no path do perfil.
         "tiktok" => format!("https://www.tiktok.com/@{}", handle),
-        "reddit" => format!("https://www.reddit.com/user/{}/submitted/", handle),
         "twitter" => format!("https://x.com/{}", handle),
         _ => handle.to_string(),
     }
@@ -16829,7 +16822,7 @@ mod tests {
             .expect("count")
         };
 
-        for provider in ["instagram", "tiktok", "twitter", "reddit"] {
+        for provider in ["instagram", "tiktok", "twitter"] {
             let account_id = format!("account-{provider}");
             let source_id = format!("source-{provider}");
             upsert_provider_account_with_connection(

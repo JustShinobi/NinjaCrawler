@@ -1,4 +1,4 @@
-export type ProviderKey = 'instagram' | 'tiktok' | 'reddit' | 'twitter'
+export type ProviderKey = 'instagram' | 'tiktok' | 'twitter'
 export type AuthMode = 'imported_session'
 export type AuthState = 'ready' | 'degraded' | 'expired'
 export type SourceKind = 'profile'

@@ -174,6 +174,51 @@ describe('ProfileWorkspace', () => {
     expect(badge?.getAttribute('title')).toBe('Reconnect account')
   })
 
+  it('marks never-synced profiles with a stale-age badge in grid cards', () => {
+    const { container } = render(
+      <ProfileWorkspace
+        onClearSelection={vi.fn()}
+        onEditSource={vi.fn()}
+        onOpenSourceContextMenu={vi.fn()}
+        onSelectSource={vi.fn()}
+        onServiceTabChange={vi.fn()}
+        onSavePathFilterChange={vi.fn()}
+        savePathFilter=""
+        searchText=""
+        selectedSourceIds={[]}
+        serviceTab="all"
+        snapshot={buildSnapshot()}
+      />,
+    )
+
+    const badge = container.querySelector('.profile-sync-age-badge.profile-sync-age-never')
+    expect(badge?.textContent).toBe('Never')
+    expect(badge?.getAttribute('title')).toBe('Never synced')
+  })
+
+  it('shows the last-sync age in list row status column', () => {
+    const { container } = render(
+      <ProfileWorkspace
+        onClearSelection={vi.fn()}
+        onEditSource={vi.fn()}
+        onOpenSourceContextMenu={vi.fn()}
+        onSelectSource={vi.fn()}
+        onServiceTabChange={vi.fn()}
+        onSavePathFilterChange={vi.fn()}
+        savePathFilter=""
+        searchText=""
+        selectedSourceIds={[]}
+        serviceTab="all"
+        snapshot={buildSnapshot()}
+      />,
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'List view' }))
+
+    const inline = container.querySelector('.profile-sync-age-inline.profile-sync-age-never')
+    expect(inline?.textContent).toBe('Never')
+  })
+
   it('shows private profile badge label when code is private/restricted', () => {
     const snapshot = {
       ...createEmptyWorkspaceSnapshot(),

@@ -214,8 +214,11 @@ describe('ProfileViewPage', () => {
       { timeout: 5000 },
     )
 
+    // The sentinel's IntersectionObserver is wired up in an effect that can run a
+    // tick after the initial batch mounts, so wait for it instead of asserting
+    // synchronously (otherwise `observers` is intermittently still empty here).
+    await waitFor(() => expect(observers.length).toBeGreaterThan(0))
     // The sentinel becoming visible grows the window to cover the rest.
-    expect(observers.length).toBeGreaterThan(0)
     act(() => observers[observers.length - 1]([{ isIntersecting: true }]))
     await waitFor(
       () => expect(screen.getAllByRole('button', { name: /open preview/i }).length).toBe(140),

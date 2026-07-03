@@ -86,7 +86,7 @@ async function boot() {
 }
 
 async function loadActiveContext() {
-  if (!state.provider || (!state.detected && state.provider === 'reddit')) return
+  if (!state.provider) return
   try {
     state.context = await loadContext(state.tab.url)
     renderContext()
@@ -104,7 +104,7 @@ async function loadOpenProfiles(allTabsPromise) {
       selected: false,
     }))
     if (state.profiles.length === 0) {
-      if (!state.provider || (!state.detected && state.provider === 'reddit')) {
+      if (!state.provider) {
         showUnsupported()
       }
       return
@@ -122,7 +122,7 @@ async function loadOpenProfiles(allTabsPromise) {
     state.profilesAreLoading = false
     state.profilesError = ''
     renderProfiles()
-    if (!state.provider || (!state.detected && state.provider === 'reddit')) {
+    if (!state.provider) {
       elements.profileSummary.textContent = 'No supported profile in the active tab'
       setStatus('ready', 'Profiles')
     }
@@ -139,7 +139,7 @@ async function loadOpenProfiles(allTabsPromise) {
 }
 
 function renderActiveLoading() {
-  const activeSupported = state.provider && (state.detected || state.provider !== 'reddit')
+  const activeSupported = Boolean(state.provider)
   elements.unsupportedPanel.classList.add('hidden')
   elements.offlinePanel.classList.add('hidden')
   elements.profileForm.classList.toggle('hidden', !activeSupported)
@@ -165,7 +165,7 @@ function renderActiveLoading() {
   elements.syncButton.classList.toggle('hidden', !state.detected || Boolean(state.target))
   elements.syncButton.disabled = true
   elements.addButton.classList.add('hidden')
-  elements.importAccountButton?.classList.toggle('hidden', state.provider === 'reddit')
+  elements.importAccountButton?.classList.remove('hidden')
   setMessage('Loading active profile…')
 }
 
@@ -296,7 +296,7 @@ async function submitSelectedProfiles() {
       'ok',
     )
     renderProfiles()
-    if (state.provider && (state.detected || state.provider !== 'reddit')) {
+    if (state.provider) {
       renderContext()
     }
     void chrome.runtime.sendMessage({ type: 'refreshBadges' })
@@ -356,12 +356,12 @@ function renderContext() {
   // independente de haver perfil rastreado (baixa avulso na estrutura própria).
   elements.singleVideoButton?.classList.toggle('hidden', !state.video)
 
-  elements.importAccountButton?.classList.toggle('hidden', state.provider === 'reddit')
+  elements.importAccountButton?.classList.remove('hidden')
   setMessage('')
 }
 
 async function startAccountImport() {
-  if (!state.tab?.id || !state.provider || state.provider === 'reddit') return
+  if (!state.tab?.id || !state.provider) return
   setBusy(true)
   setMessage('Capturing the signed-in browser account…')
   try {

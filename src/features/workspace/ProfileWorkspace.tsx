@@ -15,6 +15,7 @@ import {
   type SortMode,
 } from './workspaceProfiles'
 import { syncProblemBadgeLabel } from './syncProblemBadges'
+import { computeSyncFreshness } from './syncFreshness'
 
 const VIEW_MODE_KEY = 'nc-view-mode'
 const GROUP_MODE_KEY = 'nc-group-mode'
@@ -94,6 +95,10 @@ export function ProfileWorkspace({
   const [groupMode, setGroupModeState] = useState<GroupMode>(getStoredGroupMode)
   const [sortMode, setSortModeState] = useState<SortMode>(getStoredSortMode)
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set())
+  // Reference time for last-sync freshness badges, captured once on mount.
+  // Freshness tiers are coarse (24h / 7d / 30d), so a fixed reference is fine;
+  // reopening the workspace recomputes it against the latest data.
+  const [now] = useState(() => Date.now())
 
   const serviceTabs = useMemo(
     () => buildServiceTabs(snapshot.sources, snapshot.providerCatalog),
@@ -434,6 +439,7 @@ export function ProfileWorkspace({
                           <GridCard
                             key={source.id}
                             deleting={deletingSourceSet.has(source.id)}
+                            now={now}
                             onCardContextMenu={handleCardContextMenu}
                             onCardKeyDown={handleCardKeyDown}
                             onEditSource={onEditSource}
@@ -457,6 +463,7 @@ export function ProfileWorkspace({
                           <ListRow
                             key={source.id}
                             deleting={deletingSourceSet.has(source.id)}
+                            now={now}
                             onCardContextMenu={handleCardContextMenu}
                             onCardKeyDown={handleCardKeyDown}
                             onEditSource={onEditSource}
@@ -491,6 +498,7 @@ interface CardProps {
   source: SourceProfile
   selected: boolean
   deleting: boolean
+  now: number
   providerLabel: string
   visibleSourceIds: string[]
   onSelectSource: (id: string, options?: SourceSelectionOptions) => void
@@ -505,6 +513,7 @@ function GridCard({
   source,
   selected,
   deleting,
+  now,
   providerLabel,
   visibleSourceIds,
   onSelectSource,
@@ -516,6 +525,7 @@ function GridCard({
   const displayHandle = formatSourceHandleLabel(source.handle)
   const syncIssueLabel = source.syncProblemMessage ?? source.syncProblemCode
   const syncIssueBadge = syncProblemBadgeLabel(source.syncProblemCode)
+  const freshness = computeSyncFreshness(source.lastSyncedAt, now)
 
   return (
     <button
@@ -548,10 +558,22 @@ function GridCard({
           </div>
         )}
         <span className={`profile-provider-badge provider-${source.provider}`}>{providerLabel}</span>
-        {syncIssueLabel ? (
-          <span className="profile-sync-issue-badge" title={syncIssueLabel}>
-            {syncIssueBadge}
-          </span>
+        {syncIssueLabel || freshness ? (
+          <div className="profile-badge-stack">
+            {syncIssueLabel ? (
+              <span className="profile-sync-issue-badge" title={syncIssueLabel}>
+                {syncIssueBadge}
+              </span>
+            ) : null}
+            {freshness ? (
+              <span
+                className={`profile-sync-age-badge profile-sync-age-${freshness.tier}`}
+                title={freshness.longLabel}
+              >
+                {freshness.shortLabel}
+              </span>
+            ) : null}
+          </div>
         ) : null}
         {selected ? <span aria-hidden className="profile-selection-indicator" /> : null}
       </div>
@@ -568,6 +590,7 @@ function ListRow({
   source,
   selected,
   deleting,
+  now,
   providerLabel,
   visibleSourceIds,
   onSelectSource,
@@ -579,6 +602,7 @@ function ListRow({
   const displayHandle = formatSourceHandleLabel(source.handle)
   const syncIssueLabel = source.syncProblemMessage ?? source.syncProblemCode
   const syncIssueBadge = syncProblemBadgeLabel(source.syncProblemCode)
+  const freshness = computeSyncFreshness(source.lastSyncedAt, now)
 
   return (
     <button
@@ -622,6 +646,14 @@ function ListRow({
         {syncIssueLabel ? (
           <span className="profile-sync-issue-pill" title={syncIssueLabel}>
             {syncIssueBadge}
+          </span>
+        ) : null}
+        {freshness ? (
+          <span
+            className={`profile-sync-age-inline profile-sync-age-${freshness.tier}`}
+            title={freshness.longLabel}
+          >
+            {freshness.shortLabel}
           </span>
         ) : null}
         {!deleting ? (

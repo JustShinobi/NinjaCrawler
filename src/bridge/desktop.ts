@@ -106,7 +106,7 @@ import type {
 } from '../domain/models'
 import { createEmptyWorkspaceSnapshot } from '../domain/workspaceSnapshot'
 
-const PROVIDER_KEYS: ProviderKey[] = ['instagram', 'tiktok', 'reddit', 'twitter']
+const PROVIDER_KEYS: ProviderKey[] = ['instagram', 'tiktok', 'twitter']
 const AUTH_MODES: AuthMode[] = ['imported_session']
 const AUTH_STATES: AuthState[] = ['ready', 'degraded', 'expired']
 const SOURCE_KINDS: SourceKind[] = ['profile']

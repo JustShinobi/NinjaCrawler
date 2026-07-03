@@ -79,10 +79,10 @@ describe('AccountsMenu', () => {
       />,
     )
 
-    fireEvent.mouseEnter(screen.getByRole('button', { name: /^reddit$/i }))
+    fireEvent.mouseEnter(screen.getByRole('button', { name: /^X \/ Twitter$/i }))
     expect(screen.queryByRole('button', { name: /^new account$/i })).toBeNull()
 
-    fireEvent.click(screen.getByRole('button', { name: /^reddit$/i }))
-    expect(onOpenSettings).toHaveBeenCalledWith('reddit')
+    fireEvent.click(screen.getByRole('button', { name: /^X \/ Twitter$/i }))
+    expect(onOpenSettings).toHaveBeenCalledWith('twitter')
   })
 })

@@ -181,7 +181,7 @@ describe('SourceEditorDialog', () => {
     expect(screen.queryByLabelText(/accent color/i)).toBeNull()
   })
 
-  it.each(['instagram', 'tiktok', 'twitter', 'reddit'] as const)(
+  it.each(['instagram', 'tiktok', 'twitter'] as const)(
     'unlocks the %s user url for manual editing via the Edit button',
     (provider) => {
       renderDialog(
@@ -595,22 +595,6 @@ describe('SourceEditorDialog', () => {
 
     fireEvent.click(screen.getByRole('button', { name: /pick date from/i }))
     expect(screen.getByRole('dialog', { name: /date from calendar/i })).toBeTruthy()
-  })
-
-  it('shows a provider placeholder when sync ui is not modeled yet', () => {
-    renderDialog(
-      {
-        accounts: [buildAccount({ id: 'account-2', provider: 'reddit', displayName: 'Reddit Main' })],
-      },
-      {
-        preferredAccountId: 'account-2',
-        preferredProvider: 'reddit',
-      },
-    )
-
-    fireEvent.click(screen.getByRole('tab', { name: /sync/i }))
-
-    expect(screen.getByText('Reddit sync editor not modeled yet')).toBeTruthy()
   })
 
   it('renders the TikTok sync editor with its download toggles', () => {

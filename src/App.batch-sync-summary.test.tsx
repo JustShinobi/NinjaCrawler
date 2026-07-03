@@ -228,7 +228,7 @@ describe('App batch sync summary', () => {
     ]
     currentSnapshot.sources = [
       createSource('ig-1', '@ig-1'),
-      createSource('reddit-1', '@reddit-1', { provider: 'reddit' }),
+      createSource('tw-1', '@tw-1', { provider: 'twitter' }),
     ]
     runSourceSyncMock.mockResolvedValue(undefined)
 
@@ -244,7 +244,7 @@ describe('App batch sync summary', () => {
     await waitFor(() => {
       expect(runSourceSyncMock).toHaveBeenCalledWith('ig-1', expect.objectContaining({ trigger: 'manual_preset_1' }))
     })
-    expect(runSourceSyncMock).not.toHaveBeenCalledWith('reddit-1', expect.anything())
+    expect(runSourceSyncMock).not.toHaveBeenCalledWith('tw-1', expect.anything())
     expect(screen.queryByRole('dialog', { name: /sync summary/i })).toBeNull()
     expect(window.alert).not.toHaveBeenCalled()
   })

@@ -25,15 +25,6 @@ export const DEFAULT_PROVIDER_CATALOG: ProviderDescriptor[] = [
     notes: 'Session-backed connector with explicit account binding for every source.',
   },
   {
-    key: 'reddit',
-    displayName: 'Reddit',
-    authModes: ['imported_session'],
-    sourceKinds: ['profile'],
-    supportsMultipleAccounts: false,
-    defaultCapabilities: ['posts', 'saved_posts'],
-    notes: 'Saved-post support is best effort and provider tooling may degrade.',
-  },
-  {
     key: 'twitter',
     displayName: 'X / Twitter',
     authModes: ['imported_session'],

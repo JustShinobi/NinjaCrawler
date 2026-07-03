@@ -27,7 +27,6 @@ It is built with Rust, Tauri 2, React, and TypeScript. Metadata and operational 
 | Instagram | Multiple accounts, posts, reels, stories, highlights, tagged media, saved posts, profile metadata, and targeted story downloads |
 | TikTok | Multiple accounts, videos, photo posts, stories, reposts, avatars, date ranges, and configurable file naming |
 | X / Twitter | Profile media timeline, avatars, duplicate prevention, and handle recovery through stable user IDs |
-| Reddit | In development; not currently supported for production use |
 
 Provider behavior depends on the platform, account authentication, rate limits, and the capabilities of the bundled connector tools.
 

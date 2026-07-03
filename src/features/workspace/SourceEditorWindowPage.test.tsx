@@ -23,9 +23,9 @@ const {
 
 let sourceEditorIntentHandler: ((intent: {
   sourceId?: string
-  preferredProvider?: 'instagram' | 'tiktok' | 'reddit' | 'twitter'
+  preferredProvider?: 'instagram' | 'tiktok' | 'twitter'
   preferredAccountId?: string
-  seed?: { provider: 'instagram' | 'tiktok' | 'reddit' | 'twitter'; handle: string; displayName: string }
+  seed?: { provider: 'instagram' | 'tiktok' | 'twitter'; handle: string; displayName: string }
 }) => void) | undefined
 
 vi.mock('../../bridge/desktop', () => ({
