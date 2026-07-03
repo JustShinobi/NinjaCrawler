@@ -462,6 +462,66 @@ pub struct SourceMediaGallery {
     pub posts: Vec<MediaGalleryPost>,
 }
 
+/// Vídeo avulso capturado por URL (via Companion), fora da estrutura de perfis.
+/// Fica numa raiz "Single videos" plana; o catálogo guarda os metadados para o
+/// media view filtrar por provider/autor/data.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SingleVideo {
+    pub id: String,
+    pub provider: String,
+    pub source_url: String,
+    pub provider_video_id: Option<String>,
+    pub uploader: Option<String>,
+    pub title: Option<String>,
+    pub relative_path: String,
+    pub absolute_path: String,
+    pub media_type: String,
+    pub captured_at: Option<i64>,
+    pub downloaded_at: String,
+}
+
+/// Item da fila leve de downloads de single video (um worker sequencial). Sem
+/// persistência: um download interrompido pelo fechamento do app é perdido (o
+/// usuário reenvia a URL).
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SingleVideoQueueItem {
+    pub id: String,
+    pub url: String,
+    pub provider: Option<String>,
+    pub state: String,
+    pub queued_at: String,
+    pub started_at: Option<String>,
+    pub progress_label: Option<String>,
+    pub progress_indeterminate: bool,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SingleVideoQueueRecentResult {
+    pub url: String,
+    pub provider: Option<String>,
+    pub uploader: Option<String>,
+    pub title: Option<String>,
+    pub status: String,
+    pub summary: String,
+    pub finished_at: String,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SingleVideoQueueStatus {
+    pub queued_count: u32,
+    pub running_count: u32,
+    pub completed_count: u32,
+    pub failed_count: u32,
+    pub active: Option<SingleVideoQueueItem>,
+    pub queued_items: Vec<SingleVideoQueueItem>,
+    pub recent_results: Vec<SingleVideoQueueRecentResult>,
+    pub updated_at: String,
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SourceSyncQueueProviderStatus {
@@ -853,6 +913,10 @@ pub struct TikTokSourceSyncOptions {
     pub get_stories_user: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub get_reposts: Option<bool>,
+    /// Story capturado pelo Companion: baixa só este vídeo na pasta Stories/ do
+    /// perfil, sem enumerar a timeline.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_video_url: Option<String>,
     /// Vídeos baixam via yt-dlp; fotos (posts de slideshow) via gallery-dl.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub download_videos: Option<bool>,
@@ -910,6 +974,7 @@ pub fn default_tiktok_source_sync_options() -> TikTokSourceSyncOptions {
         get_timeline: Some(true),
         get_stories_user: Some(false),
         get_reposts: Some(false),
+        target_video_url: None,
         download_videos: Some(true),
         download_photos: Some(true),
         use_native_title: Some(false),

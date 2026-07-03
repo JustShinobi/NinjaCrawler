@@ -13,7 +13,8 @@
     "accounts",
     "scheduler-plans",
     "plans",
-    "profile-view"
+    "profile-view",
+    "single-videos"
   ],
   "permissions": [
     "core:default",

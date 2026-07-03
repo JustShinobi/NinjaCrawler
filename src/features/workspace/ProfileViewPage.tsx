@@ -9,9 +9,12 @@ import {
   openMediaFile,
   revealMediaInFolder,
   subscribeToProfileViewSource,
+  subscribeToSourceSyncQueue,
 } from '../../bridge/desktop'
 import { DEFAULT_PROVIDER_CATALOG } from '../../domain/defaults'
 import type { MediaGalleryPost, ProviderKey, SourceMediaGallery } from '../../domain/models'
+import { MediaCard } from './MediaCard'
+import { MediaLightbox } from './MediaLightbox'
 
 interface ProfileViewPageProps {
   initialSourceId?: string
@@ -246,6 +249,47 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
       void load(sourceId)
     }
   }, [sourceId, load])
+
+  // Auto-refresh: quando um sync deste perfil termina (fila do backend), recarrega
+  // a galeria em silêncio (sem spinner, preservando a rolagem). O sourceId corrente
+  // fica num ref para o listener não reassinar a cada troca de perfil.
+  const sourceIdRef = useRef(sourceId)
+  sourceIdRef.current = sourceId
+  const lastSyncSignatureRef = useRef<string | undefined>(undefined)
+  const reloadGallerySilently = useCallback(async (id: string) => {
+    try {
+      setGallery(await loadSourceMediaGallery(id))
+    } catch {
+      /* refresh em segundo plano: ignora erros transitórios */
+    }
+  }, [])
+  useEffect(() => {
+    // Ao trocar de perfil, zera a assinatura para não herdar o resultado do anterior.
+    lastSyncSignatureRef.current = undefined
+  }, [sourceId])
+  useEffect(() => {
+    let unlisten: (() => void) | undefined
+    let active = true
+    void subscribeToSourceSyncQueue((status) => {
+      const id = sourceIdRef.current
+      if (!id) return
+      const latest = status.recentResults.find((result) => result.sourceId === id)
+      const signature = latest ? `${latest.finishedAt}:${latest.status}` : undefined
+      if (signature && signature !== lastSyncSignatureRef.current) {
+        lastSyncSignatureRef.current = signature
+        void reloadGallerySilently(id)
+      }
+    })
+      .then((dispose) => {
+        if (active) unlisten = dispose
+        else dispose()
+      })
+      .catch(() => undefined)
+    return () => {
+      active = false
+      unlisten?.()
+    }
+  }, [reloadGallerySilently])
 
   // Seções presentes (feed/reels/stories/…), em ordem estável. O chip de
   // Highlights aparece se qualquer post pertence a um álbum, mesmo que o arquivo
@@ -513,96 +557,44 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
     const video = isVideo(post.mediaType === 'video' ? 'video' : thumb.mediaType)
     const selected = selectedKeys.has(postKey(post))
     return (
-      <article
-        className={`profile-view-card${selected ? ' is-selected' : ''}${selectMode ? ' is-selecting' : ''}`}
+      <MediaCard
         key={key}
-      >
-        <button
-          className={`profile-view-select${selected ? ' is-checked' : ''}`}
-          onClick={(event) => handleSelect(post, event.shiftKey)}
-          type="button"
-          aria-pressed={selected}
-          aria-label={selected ? 'Deselect media' : 'Select media'}
-          title={selected ? 'Deselect (Shift: range)' : 'Select (Shift: range)'}
-        >
-          <span aria-hidden="true">{selected ? '✓' : ''}</span>
-        </button>
-        <button
-          className="profile-view-thumb"
-          onClick={(event) => {
-            if (selectMode) handleSelect(post, event.shiftKey)
-            else if (event.shiftKey && selectAnchorRef.current !== null) handleSelect(post, true)
-            else openLightboxForPost(post)
-          }}
-          type="button"
-          title={selectMode ? 'Toggle selection (Shift: range)' : 'Open preview'}
-        >
-          {posterSrc ? (
-            <img src={convertFileSrc(posterSrc)} alt="" loading="lazy" />
-          ) : (
-            <video src={convertFileSrc(thumb.absolutePath)} preload="metadata" muted />
-          )}
-          {video ? <span className="profile-view-play" aria-hidden="true">▶</span> : null}
-          {post.mediaType === 'slideshow' ? (
-            <span className="profile-view-badge" aria-hidden="true">▣ {post.files.length}</span>
-          ) : null}
-          {post.section && post.section !== 'timeline' ? (
-            <span className="profile-view-section" aria-hidden="true">
-              {gallery ? sectionLabel(gallery.provider, post.section) : post.section}
-            </span>
-          ) : null}
-          <span className="profile-view-thumb-overlay" aria-hidden="true">
-            {post.capturedAt
-              ? new Date(post.capturedAt * 1000).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
-              : ''}
-          </span>
-        </button>
-        {/* Per-card actions só fazem sentido fora do modo seleção; durante a
-            seleção o card é só alvo de clique, sem ruído de botões. */}
-        {selectMode ? null : (
-          <>
-            <div className="profile-view-card-actions">
-              {isEphemeralStorySection(post.section) ? null : (
-                <button
-                  className="ghost-button queue-icon-button"
-                  disabled={!post.postUrl && !gallery?.profileUrl}
-                  onClick={() => handleOpenOnline(post, gallery?.profileUrl)}
-                  type="button"
-                  title={post.postUrl ? 'Open original post online' : 'Original link unavailable — open profile'}
-                >
-                  Online
-                </button>
-              )}
-              <button
-                className="ghost-button queue-icon-button"
-                onClick={() => void revealMediaInFolder(thumb.absolutePath)}
-                type="button"
-                title="Reveal in folder"
-              >
-                Folder
-              </button>
-            </div>
-            <button
-              className="profile-view-trash"
-              onClick={() => setConfirmPosts([post])}
-              type="button"
-              aria-label="Delete"
-              title="Delete (move to Recycle Bin)"
-            >
-              <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" focusable="false">
-                <path
-                  d="M9 3h6m-9 3h12M6 6l1 14a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-14M10 10v7M14 10v7"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="1.8"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                />
-              </svg>
-            </button>
-          </>
-        )}
-      </article>
+        posterAbsPath={posterSrc}
+        videoThumbAbsPath={thumb.absolutePath}
+        isVideo={video}
+        slideshowCount={post.mediaType === 'slideshow' ? post.files.length : undefined}
+        badge={
+          post.section && post.section !== 'timeline'
+            ? gallery
+              ? sectionLabel(gallery.provider, post.section)
+              : post.section
+            : undefined
+        }
+        overlayText={
+          post.capturedAt
+            ? new Date(post.capturedAt * 1000).toLocaleTimeString(undefined, {
+                hour: '2-digit',
+                minute: '2-digit',
+              })
+            : ''
+        }
+        selected={selected}
+        selectMode={selectMode}
+        onToggleSelect={(shiftKey) => handleSelect(post, shiftKey)}
+        onOpen={(shiftKey) => {
+          if (selectMode) handleSelect(post, shiftKey)
+          else if (shiftKey && selectAnchorRef.current !== null) handleSelect(post, true)
+          else openLightboxForPost(post)
+        }}
+        hideOnline={isEphemeralStorySection(post.section)}
+        onlineDisabled={!post.postUrl && !gallery?.profileUrl}
+        onlineTitle={
+          post.postUrl ? 'Open original post online' : 'Original link unavailable — open profile'
+        }
+        onOnline={() => handleOpenOnline(post, gallery?.profileUrl)}
+        onReveal={() => void revealMediaInFolder(thumb.absolutePath)}
+        onDelete={() => setConfirmPosts([post])}
+      />
     )
   }
 
@@ -891,30 +883,16 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
       ) : null}
 
       {activeItem ? (
-        <div className="profile-view-lightbox" role="dialog" aria-modal="true" onClick={closeLightbox}>
-          <button className="profile-view-lightbox-close" onClick={closeLightbox} type="button" aria-label="Close">
-            ✕
-          </button>
-          {lightboxIndex! > 0 ? (
-            <button
-              className="profile-view-lightbox-nav prev"
-              onClick={(event) => {
-                event.stopPropagation()
-                stepLightbox(-1)
-              }}
-              type="button"
-              aria-label="Previous"
-            >
-              ◀
-            </button>
-          ) : null}
-          <div className="profile-view-lightbox-stage" onClick={(event) => event.stopPropagation()}>
-            {isVideo(activeItem.file.mediaType) ? (
-              <video src={convertFileSrc(activeItem.file.absolutePath)} controls autoPlay />
-            ) : (
-              <img src={convertFileSrc(activeItem.file.absolutePath)} alt="" />
-            )}
-            <div className="profile-view-lightbox-actions">
+        <MediaLightbox
+          fileAbsPath={activeItem.file.absolutePath}
+          isVideo={isVideo(activeItem.file.mediaType)}
+          hasPrev={lightboxIndex! > 0}
+          hasNext={lightboxIndex! < flatItems.length - 1}
+          onPrev={() => stepLightbox(-1)}
+          onNext={() => stepLightbox(1)}
+          onClose={closeLightbox}
+          actions={
+            <>
               {isEphemeralStorySection(activeItem.post.section) ? null : (
                 <button
                   className="ghost-button"
@@ -925,28 +903,23 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
                   Open online
                 </button>
               )}
-              <button className="ghost-button" onClick={() => void openMediaFile(activeItem.file.absolutePath)} type="button">
+              <button
+                className="ghost-button"
+                onClick={() => void openMediaFile(activeItem.file.absolutePath)}
+                type="button"
+              >
                 Open file
               </button>
-              <button className="ghost-button" onClick={() => void revealMediaInFolder(activeItem.file.absolutePath)} type="button">
+              <button
+                className="ghost-button"
+                onClick={() => void revealMediaInFolder(activeItem.file.absolutePath)}
+                type="button"
+              >
                 Reveal in folder
               </button>
-            </div>
-          </div>
-          {lightboxIndex! < flatItems.length - 1 ? (
-            <button
-              className="profile-view-lightbox-nav next"
-              onClick={(event) => {
-                event.stopPropagation()
-                stepLightbox(1)
-              }}
-              type="button"
-              aria-label="Next"
-            >
-              ▶
-            </button>
-          ) : null}
-        </div>
+            </>
+          }
+        />
       ) : null}
     </div>
   )

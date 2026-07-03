@@ -8,6 +8,7 @@ pub mod instagram_connector;
 pub mod runtime_log;
 pub mod scheduler_runtime;
 pub mod session_secret_store;
+pub mod single_video_runtime;
 pub mod source_delete_runtime;
 pub mod source_sync_runtime;
 pub mod storage;

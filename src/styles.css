@@ -5677,6 +5677,17 @@ p {
   text-transform: uppercase;
 }
 
+/* URL do single video: uma linha, com reticências (URLs longas do TikTok). */
+.queue-task-url {
+  display: block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-transform: none;
+  letter-spacing: 0;
+}
+
 .queue-tag {
   display: inline-flex;
   align-items: center;
@@ -9953,6 +9964,16 @@ p {
   opacity: 1;
 }
 
+/* No Single Videos o overlay inferior mostra o @autor; reserva espaço à direita
+   para não ficar embaixo da lixeira (que aparece no hover no canto inferior
+   direito) e trunca com reticências quando o handle é longo. */
+.single-videos-shell .profile-view-thumb-overlay {
+  padding-right: 2.4rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .profile-view-card-actions {
   position: absolute;
   inset: 0.4rem 0.4rem auto auto;
@@ -10205,3 +10226,66 @@ p {
 
 .profile-view-lightbox-nav.prev { left: 1.2rem; }
 .profile-view-lightbox-nav.next { right: 1.2rem; }
+
+/* ── Single videos window ─────────────────────────────────────────────── */
+.single-videos-add {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  flex-shrink: 0;
+}
+
+.single-videos-add-input,
+.single-videos-search {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 0.45rem 0.7rem;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: var(--surface-input);
+  color: var(--ink);
+  font: inherit;
+  font-size: 0.85rem;
+}
+
+.single-videos-toolbar {
+  gap: 0.6rem;
+}
+
+.single-videos-search {
+  flex: 0 1 260px;
+}
+
+/* Menu de contexto (botão direito) sobre um card do Single Videos. */
+.single-videos-context-menu {
+  position: fixed;
+  z-index: 50;
+  min-width: 240px;
+  padding: 0.3rem;
+  border-radius: 10px;
+  background: var(--surface, #1c1a17);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.55);
+}
+
+.single-videos-context-menu button {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 0.5rem 0.6rem;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--ink);
+  font-size: 0.82rem;
+  cursor: pointer;
+}
+
+.single-videos-context-menu button:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.single-videos-context-menu button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}

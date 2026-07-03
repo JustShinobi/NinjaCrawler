@@ -70,6 +70,10 @@ import type {
   SourceSyncQueueProviderStatus,
   SourceSyncQueueRecentResult,
   SourceSyncQueueStatus,
+  SingleVideo,
+  SingleVideoQueueItem,
+  SingleVideoQueueRecentResult,
+  SingleVideoQueueStatus,
   SourceMediaGallery,
   MediaGalleryPost,
   SchedulerSet,
@@ -2471,6 +2475,14 @@ export async function loadSourceSyncQueueStatus(): Promise<SourceSyncQueueStatus
   return normalizeSourceSyncQueueStatus(result)
 }
 
+export async function subscribeToSourceSyncQueue(
+  onChange: (status: SourceSyncQueueStatus) => void,
+): Promise<() => void> {
+  return listen(DESKTOP_SOURCE_SYNC_QUEUE_CHANGED_EVENT_NAME, (event) => {
+    onChange(normalizeSourceSyncQueueStatus(event.payload))
+  })
+}
+
 export async function loadSourceDeleteQueueStatus(): Promise<SourceDeleteQueueStatus> {
   const result = await withTimeout(
     invoke<unknown>('source_delete_queue_status'),
@@ -2548,6 +2560,121 @@ export async function loadSourceMediaGallery(sourceId: string): Promise<SourceMe
     buildInvokeArgs({ sourceId }, { source_id: sourceId }),
   )
   return parseSourceMediaGallery(raw, sourceId)
+}
+
+export async function openSingleVideosWindow(): Promise<void> {
+  await invoke<void>('open_single_videos_window')
+}
+
+function parseSingleVideo(raw: unknown): SingleVideo {
+  const value = isRecord(raw) ? raw : {}
+  return {
+    id: stringValue(value, ['id'], ''),
+    provider: stringValue(value, ['provider'], ''),
+    sourceUrl: stringValue(value, ['sourceUrl', 'source_url'], ''),
+    providerVideoId: optionalStringValue(value, ['providerVideoId', 'provider_video_id']),
+    uploader: optionalStringValue(value, ['uploader']),
+    title: optionalStringValue(value, ['title']),
+    relativePath: stringValue(value, ['relativePath', 'relative_path'], ''),
+    absolutePath: stringValue(value, ['absolutePath', 'absolute_path'], ''),
+    mediaType: stringValue(value, ['mediaType', 'media_type'], 'video'),
+    capturedAt: optionalNumberValue(value, ['capturedAt', 'captured_at']),
+    downloadedAt: stringValue(value, ['downloadedAt', 'downloaded_at'], ''),
+  }
+}
+
+function parseSingleVideoQueueItem(raw: unknown): SingleVideoQueueItem {
+  const value = isRecord(raw) ? raw : {}
+  const state = stringValue(value, ['state'], 'queued')
+  return {
+    id: stringValue(value, ['id'], ''),
+    url: stringValue(value, ['url'], ''),
+    provider: optionalStringValue(value, ['provider']),
+    state: state === 'running' ? 'running' : 'queued',
+    queuedAt: stringValue(value, ['queuedAt', 'queued_at'], ''),
+    startedAt: optionalStringValue(value, ['startedAt', 'started_at']),
+    progressLabel: optionalStringValue(value, ['progressLabel', 'progress_label']),
+    progressIndeterminate: booleanValue(value, ['progressIndeterminate', 'progress_indeterminate']),
+  }
+}
+
+function parseSingleVideoQueueRecentResult(raw: unknown): SingleVideoQueueRecentResult {
+  const value = isRecord(raw) ? raw : {}
+  const status = stringValue(value, ['status'], 'succeeded')
+  return {
+    url: stringValue(value, ['url'], ''),
+    provider: optionalStringValue(value, ['provider']),
+    uploader: optionalStringValue(value, ['uploader']),
+    title: optionalStringValue(value, ['title']),
+    status: status === 'failed' ? 'failed' : 'succeeded',
+    summary: stringValue(value, ['summary'], ''),
+    finishedAt: stringValue(value, ['finishedAt', 'finished_at'], ''),
+  }
+}
+
+function normalizeSingleVideoQueueStatus(raw: unknown): SingleVideoQueueStatus {
+  const value = isRecord(raw) ? raw : {}
+  const activeRaw = value.active ?? (value as Record<string, unknown>).active
+  return {
+    queuedCount: numberValue(value, ['queuedCount', 'queued_count'], 0),
+    runningCount: numberValue(value, ['runningCount', 'running_count'], 0),
+    completedCount: numberValue(value, ['completedCount', 'completed_count'], 0),
+    failedCount: numberValue(value, ['failedCount', 'failed_count'], 0),
+    active: isRecord(activeRaw) ? parseSingleVideoQueueItem(activeRaw) : undefined,
+    queuedItems: Array.isArray(value.queuedItems ?? (value as Record<string, unknown>).queued_items)
+      ? ((value.queuedItems ?? (value as Record<string, unknown>).queued_items) as unknown[]).map(
+          parseSingleVideoQueueItem,
+        )
+      : [],
+    recentResults: Array.isArray(
+      value.recentResults ?? (value as Record<string, unknown>).recent_results,
+    )
+      ? (
+          (value.recentResults ?? (value as Record<string, unknown>).recent_results) as unknown[]
+        ).map(parseSingleVideoQueueRecentResult)
+      : [],
+    updatedAt: stringValue(value, ['updatedAt', 'updated_at'], ''),
+  }
+}
+
+export async function enqueueSingleVideoDownload(url: string): Promise<SingleVideoQueueStatus> {
+  const raw = await invoke<unknown>(
+    'enqueue_single_video_download',
+    buildInvokeArgs({ url }, { url }),
+  )
+  return normalizeSingleVideoQueueStatus(raw)
+}
+
+export async function loadSingleVideoQueueStatus(): Promise<SingleVideoQueueStatus> {
+  const raw = await invoke<unknown>('single_video_queue_status')
+  return normalizeSingleVideoQueueStatus(raw)
+}
+
+const DESKTOP_SINGLE_VIDEO_QUEUE_CHANGED_EVENT = 'runtime://single-video-queue-changed'
+const DESKTOP_SINGLE_VIDEOS_CHANGED_EVENT = 'runtime://single-videos-changed'
+
+export async function subscribeToSingleVideoQueue(
+  onChange: (status: SingleVideoQueueStatus) => void,
+): Promise<() => void> {
+  return listen(DESKTOP_SINGLE_VIDEO_QUEUE_CHANGED_EVENT, (event) => {
+    onChange(normalizeSingleVideoQueueStatus(event.payload))
+  })
+}
+
+export async function subscribeToSingleVideosChanged(onChange: () => void): Promise<() => void> {
+  return listen(DESKTOP_SINGLE_VIDEOS_CHANGED_EVENT, () => {
+    onChange()
+  })
+}
+
+export async function listSingleVideos(): Promise<SingleVideo[]> {
+  const raw = await invoke<unknown>('list_single_videos')
+  return (Array.isArray(raw) ? raw : []).map(parseSingleVideo)
+}
+
+export async function deleteSingleVideo(id: string): Promise<SingleVideo[]> {
+  const raw = await invoke<unknown>('delete_single_video', buildInvokeArgs({ id }, { id }))
+  return (Array.isArray(raw) ? raw : []).map(parseSingleVideo)
 }
 
 export async function deleteSourceMedia(

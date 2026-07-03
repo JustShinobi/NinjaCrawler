@@ -66,6 +66,91 @@ export function detectTargetFromUrl(rawUrl) {
     }
   }
 
+  // TikTok story: a `/@handle/video/<id>` (ou `/photo/<id>`) aberta a partir de um
+  // story. Vira um "story" do perfil (baixa na pasta Stories/ do source rastreado).
+  if (host === 'tiktok.com' || host.endsWith('.tiktok.com')) {
+    const index = segments.findIndex((segment) => segment === 'video' || segment === 'photo')
+    if (
+      index >= 0
+      && segments[index + 1]
+      && /^\d+$/.test(segments[index + 1])
+      && segments[0]?.startsWith('@')
+    ) {
+      const handle = normalizeHandle(segments[0])
+      return {
+        kind: 'tiktokStory',
+        provider: 'tiktok',
+        handle,
+        displayName: handle.replace(/^@/, ''),
+        storyId: segments[index + 1],
+        url: url.href,
+      }
+    }
+  }
+
+  return null
+}
+
+/**
+ * Detecta uma URL de vídeo avulso baixável (TikTok/Instagram/Twitter/YouTube)
+ * para a captura "Single video". Diferente de `detectTargetFromUrl` (story do
+ * perfil), aqui basta ser um link de vídeo — o backend baixa via yt-dlp.
+ */
+export function detectVideoFromUrl(rawUrl) {
+  if (!rawUrl) return null
+  let url
+  try {
+    url = new URL(rawUrl)
+  } catch {
+    return null
+  }
+  const host = url.hostname.replace(/^www\./, '').toLowerCase()
+  const segments = url.pathname.split('/').filter(Boolean)
+
+  if (host === 'tiktok.com' || host.endsWith('.tiktok.com')) {
+    const index = segments.findIndex((segment) => segment === 'video' || segment === 'photo')
+    if (index >= 0 && segments[index + 1] && /^\d+$/.test(segments[index + 1])) {
+      const handle = segments[0]?.startsWith('@') ? normalizeHandle(segments[0]) : ''
+      return { kind: 'video', provider: 'tiktok', handle, videoId: segments[index + 1], url: url.href }
+    }
+    return null
+  }
+
+  if (host === 'instagram.com' || host.endsWith('.instagram.com')) {
+    if (['reel', 'reels', 'p', 'tv'].includes(segments[0]) && segments[1]) {
+      return { kind: 'video', provider: 'instagram', handle: '', videoId: segments[1], url: url.href }
+    }
+    return null
+  }
+
+  if (host === 'x.com' || host.endsWith('.x.com') || host === 'twitter.com' || host.endsWith('.twitter.com')) {
+    const statusIndex = segments.indexOf('status')
+    if (statusIndex > 0 && segments[statusIndex + 1] && /^\d+$/.test(segments[statusIndex + 1])) {
+      return {
+        kind: 'video',
+        provider: 'twitter',
+        handle: normalizeHandle(segments[0]),
+        videoId: segments[statusIndex + 1],
+        url: url.href,
+      }
+    }
+    return null
+  }
+
+  if (host === 'youtube.com' || host.endsWith('.youtube.com')) {
+    if (segments[0] === 'watch' && url.searchParams.get('v')) {
+      return { kind: 'video', provider: 'youtube', handle: '', videoId: url.searchParams.get('v'), url: url.href }
+    }
+    if (segments[0] === 'shorts' && segments[1]) {
+      return { kind: 'video', provider: 'youtube', handle: '', videoId: segments[1], url: url.href }
+    }
+    return null
+  }
+
+  if (host === 'youtu.be' && segments[0]) {
+    return { kind: 'video', provider: 'youtube', handle: '', videoId: segments[0], url: url.href }
+  }
+
   return null
 }
 
@@ -164,6 +249,16 @@ export async function downloadTarget(payload) {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
+  })
+  if (!response.ok) throw new Error(await readError(response))
+  return response.json()
+}
+
+export async function downloadSingleVideo(url) {
+  const response = await fetch(`${API_BASE}/single-video`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ url }),
   })
   if (!response.ok) throw new Error(await readError(response))
   return response.json()
