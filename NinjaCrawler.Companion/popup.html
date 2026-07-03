@@ -26,7 +26,14 @@
         <p class="muted">Start NinjaCrawler and keep it running.</p>
       </section>
 
-      <form id="profileForm" class="panel hidden">
+      <form id="profileForm" class="panel active-panel hidden">
+        <div class="section-heading">
+          <div>
+            <h2>Active tab</h2>
+            <p id="activeTabMeta" class="muted"></p>
+          </div>
+        </div>
+
         <div id="existingBanner" class="banner hidden">
           <strong>Already added</strong>
           <span id="existingMeta"></span>
@@ -62,6 +69,25 @@
           <button id="cancelAccountImport" type="button">Cancel</button>
         </div>
         <p id="accountImportMessage" class="message" aria-live="polite"></p>
+      </section>
+
+      <section id="profilesPanel" class="panel profiles-panel hidden">
+        <div class="section-heading">
+          <div>
+            <h2>Open profile tabs</h2>
+            <p id="profilesMeta" class="muted"></p>
+          </div>
+          <button id="selectAllButton" type="button" class="link-button">Select all</button>
+        </div>
+        <div id="profilesLoading" class="loading-row hidden" role="status" aria-live="polite">
+          <span class="spinner" aria-hidden="true"></span>
+          <span id="profilesLoadingText">Checking profiles in NinjaCrawler…</span>
+        </div>
+        <div id="profilesList" class="profile-list"></div>
+        <div id="batchActions" class="actions">
+          <button id="addSelectedButton" type="button" class="primary" disabled>Add selected profiles</button>
+        </div>
+        <p id="batchMessage" class="message" aria-live="polite"></p>
       </section>
     </main>
 

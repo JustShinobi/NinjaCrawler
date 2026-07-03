@@ -173,7 +173,7 @@ Authentication material is stored locally and is not intended to be committed to
 
 ## Chrome companion
 
-The optional extension in [`NinjaCrawler.Companion`](NinjaCrawler.Companion) can detect supported profile pages, add profiles, queue synchronization, and download the currently selected Instagram story.
+The optional extension in [`NinjaCrawler.Companion`](NinjaCrawler.Companion) can detect supported profile pages across all open tabs, add a selected batch, queue synchronization, and download the currently selected story or video.
 
 For local installation:
 

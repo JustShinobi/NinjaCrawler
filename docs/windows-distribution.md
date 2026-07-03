@@ -78,6 +78,11 @@ Companion version is read independently from `NinjaCrawler.Companion/manifest.js
 Extract the archive, open the browser extension management page, enable developer
 mode, and choose **Load unpacked** using the extracted folder.
 
+Starting with Companion 0.3.0, the archive always contains a
+`NinjaCrawler-Companion` folder and the manifest has a stable extension ID.
+Remove a pre-0.3.0 installation once. Future updates can be extracted over the
+same folder and applied with **Reload** on the browser extension management page.
+
 The Companion archive contains only runtime files and installation documentation.
 Its SHA-256 hash is included in the release `SHA256SUMS.txt`.
 

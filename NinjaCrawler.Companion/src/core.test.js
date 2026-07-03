@@ -1,5 +1,37 @@
 import { describe, expect, it } from 'vitest'
-import { detectTargetFromUrl, detectVideoFromUrl } from './core.js'
+import { collectDetectedProfiles, detectTargetFromUrl, detectVideoFromUrl } from './core.js'
+
+describe('collectDetectedProfiles', () => {
+  it('collects supported profiles across tabs and removes duplicates', () => {
+    expect(collectDetectedProfiles([
+      { id: 1, url: 'https://www.instagram.com/someone/' },
+      { id: 2, url: 'https://x.com/another' },
+      { id: 3, url: 'https://www.instagram.com/SOMEONE/reels/' },
+      { id: 4, url: 'https://example.com/not-supported' },
+    ])).toEqual([
+      {
+        key: 'instagram:@someone',
+        provider: 'instagram',
+        handle: '@someone',
+        displayName: 'someone',
+        url: 'https://www.instagram.com/someone/',
+        tabIds: [1, 3],
+      },
+      {
+        key: 'twitter:@another',
+        provider: 'twitter',
+        handle: '@another',
+        displayName: 'another',
+        url: 'https://x.com/another',
+        tabIds: [2],
+      },
+    ])
+  })
+
+  it('returns no entries when no profile tabs are open', () => {
+    expect(collectDetectedProfiles([{ id: 1, url: 'chrome://extensions' }])).toEqual([])
+  })
+})
 
 describe('detectTargetFromUrl', () => {
   it('detects a TikTok story from a /video/ link', () => {

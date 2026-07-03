@@ -21,6 +21,34 @@ export const PROVIDER_LABELS = {
   twitter: 'X / Twitter',
 }
 
+export function collectDetectedProfiles(tabs) {
+  const profiles = new Map()
+
+  for (const tab of tabs ?? []) {
+    const detected = detectProfileFromUrl(tab?.url)
+    if (!detected) continue
+
+    const key = `${detected.provider}:${detected.handle.toLocaleLowerCase()}`
+    const current = profiles.get(key)
+    if (current) {
+      current.tabIds.push(tab.id)
+      continue
+    }
+
+    profiles.set(key, {
+      key,
+      ...detected,
+      url: tab.url,
+      tabIds: tab.id == null ? [] : [tab.id],
+    })
+  }
+
+  return [...profiles.values()].sort((left, right) => {
+    const providerOrder = PROVIDER_LABELS[left.provider].localeCompare(PROVIDER_LABELS[right.provider])
+    return providerOrder || left.handle.localeCompare(right.handle)
+  })
+}
+
 export function detectProviderFromUrl(rawUrl) {
   if (!rawUrl) return null
   try {
@@ -218,6 +246,16 @@ export async function loadContext(tabUrl) {
   return response.json()
 }
 
+export async function loadContexts(tabUrls) {
+  const response = await fetch(`${API_BASE}/contexts`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ urls: tabUrls }),
+  })
+  if (!response.ok) throw new Error(await companionApiError(response))
+  return response.json()
+}
+
 export async function addSource(payload) {
   const response = await fetch(`${API_BASE}/source`, {
     method: 'POST',
@@ -225,6 +263,16 @@ export async function addSource(payload) {
     body: JSON.stringify(payload),
   })
   if (!response.ok) throw new Error(await readError(response))
+  return response.json()
+}
+
+export async function addSources(sources) {
+  const response = await fetch(`${API_BASE}/sources`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sources }),
+  })
+  if (!response.ok) throw new Error(await companionApiError(response))
   return response.json()
 }
 
@@ -285,4 +333,12 @@ async function readError(response) {
   } catch {
     return response.statusText
   }
+}
+
+async function companionApiError(response) {
+  const message = await readError(response)
+  if (message.toLocaleLowerCase().includes('unknown ninjacrawler companion api endpoint')) {
+    return 'Update and restart NinjaCrawler to use this Companion version.'
+  }
+  return message
 }

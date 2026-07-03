@@ -1,14 +1,14 @@
 use crate::domain::models::{
     CompanionAccountCapture, CompanionAccountImportInput, InstagramSourceSyncOptions,
     RunSourceSyncInput, SourceEditorSeedIntent, SourceEditorWindowIntent, SourceProfile,
-    SourceSyncOptions, TikTokSourceSyncOptions,
+    SourceProfileUpsert, SourceSyncOptions, TikTokSourceSyncOptions, WorkspaceSnapshot,
 };
 use crate::infrastructure::{
     desktop_runtime, single_video_runtime, source_sync_runtime, workspace_repository,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::thread;
@@ -55,6 +55,17 @@ struct AddSourceRequest {
     provider: String,
     handle: String,
     display_name: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AddSourcesRequest {
+    sources: Vec<AddSourceRequest>,
+}
+
+#[derive(Deserialize)]
+struct ContextsRequest {
+    urls: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -241,9 +252,23 @@ fn route_request(app: AppHandle, request: HttpRequest) -> Vec<u8> {
                 Err(error) => error_response(500, &error),
             }
         }
+        ("POST", path) if path == format!("{API_PREFIX}/contexts") => {
+            match parse_json::<ContextsRequest>(&request.body).and_then(build_contexts) {
+                Ok(contexts) => json_response(200, &contexts),
+                Err(error) => error_response(400, &error),
+            }
+        }
         ("POST", path) if path == format!("{API_PREFIX}/source") => {
             match parse_json::<AddSourceRequest>(&request.body)
                 .and_then(|input| add_source(app, input))
+            {
+                Ok(payload) => json_response(200, &payload),
+                Err(error) => error_response(400, &error),
+            }
+        }
+        ("POST", path) if path == format!("{API_PREFIX}/sources") => {
+            match parse_json::<AddSourcesRequest>(&request.body)
+                .and_then(|input| add_sources(app, input))
             {
                 Ok(payload) => json_response(200, &payload),
                 Err(error) => error_response(400, &error),
@@ -325,19 +350,38 @@ fn ensure_sensitive_companion_request(request: &HttpRequest) -> Result<(), Strin
 
 fn build_context(url: Option<&str>) -> Result<CompanionContext, String> {
     let snapshot = workspace_repository::bootstrap_workspace()?;
+    Ok(build_context_from_snapshot(&snapshot, url))
+}
+
+fn build_contexts(input: ContextsRequest) -> Result<Vec<CompanionContext>, String> {
+    if input.urls.len() > 500 {
+        return Err("A maximum of 500 tab URLs can be checked at once.".to_string());
+    }
+    let snapshot = workspace_repository::bootstrap_workspace()?;
+    Ok(input
+        .urls
+        .iter()
+        .map(|url| build_context_from_snapshot(&snapshot, Some(url)))
+        .collect())
+}
+
+fn build_context_from_snapshot(
+    snapshot: &WorkspaceSnapshot,
+    url: Option<&str>,
+) -> CompanionContext {
     let detected_profile = url.and_then(detect_profile_from_url);
     let detected_target = url.and_then(detect_target_from_url);
     let existing_source = detected_profile.as_ref().and_then(|detected| {
         find_source(&snapshot.sources, &detected.provider, &detected.handle).cloned()
     });
 
-    Ok(CompanionContext {
+    CompanionContext {
         app: "NinjaCrawler",
         api_version: 1,
         detected_profile,
         detected_target,
         existing_source,
-    })
+    }
 }
 
 fn add_source(app: AppHandle, input: AddSourceRequest) -> Result<serde_json::Value, String> {
@@ -374,6 +418,84 @@ fn add_source(app: AppHandle, input: AddSourceRequest) -> Result<serde_json::Val
         "provider": provider,
         "handle": handle,
         "displayName": display_name
+    }))
+}
+
+fn add_sources(app: AppHandle, input: AddSourcesRequest) -> Result<serde_json::Value, String> {
+    if input.sources.is_empty() {
+        return Err("Select at least one profile.".to_string());
+    }
+    if input.sources.len() > 100 {
+        return Err("A maximum of 100 profiles can be added at once.".to_string());
+    }
+
+    let mut normalized = Vec::with_capacity(input.sources.len());
+    let mut requested_keys = HashSet::new();
+    for source in input.sources {
+        let provider = normalize_provider(&source.provider)?;
+        let handle = normalize_handle(&source.handle);
+        if handle.is_empty() {
+            return Err("Profile handle is required.".to_string());
+        }
+        let key = canonical_profile_key(&provider, &handle);
+        if !requested_keys.insert(key) {
+            continue;
+        }
+        let display_name = source
+            .display_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| handle.trim_start_matches('@'))
+            .to_string();
+        normalized.push((provider, handle, display_name));
+    }
+
+    let mut snapshot = workspace_repository::bootstrap_workspace()?;
+    let mut known_keys: HashSet<String> = snapshot
+        .sources
+        .iter()
+        .map(|source| canonical_profile_key(&source.provider, &source.handle))
+        .collect();
+    let requested_count = normalized.len();
+    let mut added = Vec::new();
+
+    for (provider, handle, display_name) in normalized {
+        let key = canonical_profile_key(&provider, &handle);
+        if !known_keys.insert(key) {
+            continue;
+        }
+        let account_id = snapshot
+            .accounts
+            .iter()
+            .find(|account| account.provider == provider)
+            .map(|account| account.id.clone());
+        snapshot = workspace_repository::upsert_source_profile(SourceProfileUpsert {
+            id: None,
+            provider: provider.clone(),
+            source_kind: "profile".to_string(),
+            handle: handle.clone(),
+            display_name: display_name.clone(),
+            account_id,
+            group_id: None,
+            labels: Vec::new(),
+            ready_for_download: true,
+            sync_options: workspace_repository::default_source_sync_options(&provider),
+            remote_state: None,
+            is_subscription: None,
+        })?;
+        added.push(json!({
+            "provider": provider,
+            "handle": handle,
+            "displayName": display_name
+        }));
+    }
+
+    desktop_runtime::publish_workspace_runtime(&app, &snapshot)?;
+    Ok(json!({
+        "added": added,
+        "addedCount": added.len(),
+        "skippedCount": requested_count.saturating_sub(added.len())
     }))
 }
 

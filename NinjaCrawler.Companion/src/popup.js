@@ -1,6 +1,8 @@
 import {
   PROVIDER_LABELS,
   addSource,
+  addSources,
+  collectDetectedProfiles,
   detectProviderFromUrl,
   detectTargetFromUrl,
   detectProfileFromUrl,
@@ -9,15 +11,26 @@ import {
   downloadTarget,
   importAccount,
   loadContext,
+  loadContexts,
   previewAccount,
   syncSource,
 } from './core.js'
 
 const elements = {
   profileSummary: document.querySelector('#profileSummary'),
+  activeTabMeta: document.querySelector('#activeTabMeta'),
   statusPill: document.querySelector('#statusPill'),
   unsupportedPanel: document.querySelector('#unsupportedPanel'),
   offlinePanel: document.querySelector('#offlinePanel'),
+  profilesPanel: document.querySelector('#profilesPanel'),
+  profilesMeta: document.querySelector('#profilesMeta'),
+  profilesLoading: document.querySelector('#profilesLoading'),
+  profilesLoadingText: document.querySelector('#profilesLoadingText'),
+  profilesList: document.querySelector('#profilesList'),
+  selectAllButton: document.querySelector('#selectAllButton'),
+  addSelectedButton: document.querySelector('#addSelectedButton'),
+  batchActions: document.querySelector('#batchActions'),
+  batchMessage: document.querySelector('#batchMessage'),
   profileForm: document.querySelector('#profileForm'),
   existingBanner: document.querySelector('#existingBanner'),
   existingMeta: document.querySelector('#existingMeta'),
@@ -47,40 +60,113 @@ const state = {
   context: null,
   accountCapture: null,
   accountPreview: null,
+  profiles: [],
+  profilesAreLoading: false,
+  profilesError: '',
+  isBusy: false,
 }
 
 boot()
 
 async function boot() {
   bindEvents()
-  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true })
+  const activeTabPromise = chrome.tabs.query({ active: true, currentWindow: true })
+  const allTabsPromise = chrome.tabs.query({})
+  const [tab] = await activeTabPromise
   state.tab = tab
   state.detected = detectProfileFromUrl(tab?.url)
   state.provider = state.detected?.provider ?? detectProviderFromUrl(tab?.url)
   state.target = detectTargetFromUrl(tab?.url)
   state.video = detectVideoFromUrl(tab?.url)
 
-  if (!state.provider) {
-    showUnsupported()
+  renderActiveLoading()
+  const profilesTask = loadOpenProfiles(allTabsPromise)
+  const activeContextTask = loadActiveContext()
+  await Promise.allSettled([profilesTask, activeContextTask])
+}
+
+async function loadActiveContext() {
+  if (!state.provider) return
+  try {
+    state.context = await loadContext(state.tab.url)
+    renderContext()
+  } catch (error) {
+    showOffline(error)
+  }
+}
+
+async function loadOpenProfiles(allTabsPromise) {
+  try {
+    const tabs = await allTabsPromise
+    state.profiles = collectDetectedProfiles(tabs).map((profile) => ({
+      ...profile,
+      context: null,
+      selected: false,
+    }))
+    if (state.profiles.length === 0) {
+      if (!state.provider) {
+        showUnsupported()
+      }
+      return
+    }
+
+    state.profilesAreLoading = true
+    renderProfiles()
+    const contexts = await loadContexts(state.profiles.map((profile) => profile.url))
+    if (!Array.isArray(contexts) || contexts.length !== state.profiles.length) {
+      throw new Error('NinjaCrawler returned an incomplete profile list.')
+    }
+    state.profiles.forEach((profile, index) => {
+      profile.context = contexts[index]
+    })
+    state.profilesAreLoading = false
+    state.profilesError = ''
+    renderProfiles()
+    if (!state.provider) {
+      elements.profileSummary.textContent = 'No supported profile in the active tab'
+      setStatus('ready', 'Profiles')
+    }
+  } catch (error) {
+    state.profilesAreLoading = false
+    state.profilesError = error.message
+    if (state.profiles.length > 0) {
+      renderProfiles()
+      setBatchMessage(error.message, 'error')
+    } else {
+      showPopupError(error)
+    }
+  }
+}
+
+function renderActiveLoading() {
+  const activeSupported = Boolean(state.provider)
+  elements.unsupportedPanel.classList.add('hidden')
+  elements.offlinePanel.classList.add('hidden')
+  elements.profileForm.classList.toggle('hidden', !activeSupported)
+  elements.existingBanner.classList.add('hidden')
+  elements.accountImportPanel.classList.add('hidden')
+
+  if (!activeSupported) {
+    elements.profileSummary.textContent = 'Looking for open profile tabs…'
+    setStatus('neutral', 'Loading')
     return
   }
 
   elements.profileSummary.textContent = state.detected
     ? `${PROVIDER_LABELS[state.provider]} ${state.detected.handle}`
     : `${PROVIDER_LABELS[state.provider]} account import`
-
-  try {
-    state.context = await loadContext(tab.url)
-  } catch (error) {
-    showOffline(error)
-    return
-  }
-
-  try {
-    renderContext()
-  } catch (error) {
-    showPopupError(error)
-  }
+  elements.activeTabMeta.textContent = state.detected
+    ? `${PROVIDER_LABELS[state.provider]} · ${state.detected.handle}`
+    : `${PROVIDER_LABELS[state.provider]} account`
+  setStatus('neutral', 'Loading')
+  elements.targetButton?.classList.toggle('hidden', !state.target)
+  elements.targetButton.disabled = true
+  elements.singleVideoButton?.classList.toggle('hidden', !state.video)
+  elements.syncButton.classList.toggle('hidden', !state.detected || Boolean(state.target))
+  elements.syncButton.disabled = true
+  elements.addButton.classList.add('hidden')
+  elements.importAccountButton?.classList.remove('hidden')
+  setMessage('Loading active profile…')
 }
 
 function bindEvents() {
@@ -92,6 +178,134 @@ function bindEvents() {
   elements.confirmAccountImport?.addEventListener('click', () => submitAccountImport())
   elements.cancelAccountImport?.addEventListener('click', () => closeAccountImport())
   elements.accountDestination?.addEventListener('change', () => renderAccountDestination())
+  elements.selectAllButton?.addEventListener('click', () => toggleSelectAll())
+  elements.addSelectedButton?.addEventListener('click', () => submitSelectedProfiles())
+}
+
+function renderProfiles() {
+  const available = state.profiles.filter((profile) =>
+    profile.context && !profile.context.existingSource)
+  const existingCount = state.profiles.filter((profile) => profile.context?.existingSource).length
+  const selectedCount = available.filter((profile) => profile.selected).length
+
+  elements.profilesPanel.classList.toggle('hidden', state.profiles.length === 0)
+  elements.profilesPanel.setAttribute('aria-busy', String(state.profilesAreLoading))
+  elements.profilesLoading.classList.toggle('hidden', !state.profilesAreLoading)
+  elements.profilesLoadingText.textContent =
+    `Checking ${state.profiles.length} ${state.profiles.length === 1 ? 'profile' : 'profiles'} in NinjaCrawler…`
+  const profilesUnavailable = state.profilesAreLoading || Boolean(state.profilesError)
+  elements.profilesList.classList.toggle('hidden', profilesUnavailable)
+  elements.batchActions.classList.toggle('hidden', profilesUnavailable)
+  elements.profilesMeta.textContent =
+    `${state.profiles.length} unique ${state.profiles.length === 1 ? 'profile' : 'profiles'}`
+    + (existingCount ? ` · ${existingCount} already added` : '')
+  elements.profilesList.replaceChildren()
+
+  for (const profile of state.profiles) {
+    const existing = Boolean(profile.context?.existingSource)
+    const row = document.createElement('label')
+    row.className = `profile-row${existing ? ' is-existing' : ''}`
+
+    const checkbox = document.createElement('input')
+    checkbox.type = 'checkbox'
+    checkbox.checked = profile.selected
+    checkbox.disabled = state.profilesAreLoading || !profile.context || existing
+    checkbox.dataset.profileKey = profile.key
+    checkbox.addEventListener('change', () => {
+      profile.selected = checkbox.checked
+      updateBatchControls()
+    })
+
+    const identity = document.createElement('span')
+    identity.className = 'profile-identity'
+    const name = document.createElement('span')
+    name.className = 'profile-name'
+    name.textContent = profile.handle
+    const detail = document.createElement('span')
+    detail.className = existing ? 'profile-state' : 'profile-provider'
+    detail.textContent = existing
+      ? 'Added'
+      : profile.context
+        ? PROVIDER_LABELS[profile.provider]
+        : 'Checking…'
+    identity.append(name, detail)
+    row.append(checkbox, identity)
+    elements.profilesList.append(row)
+  }
+
+  elements.selectAllButton.classList.toggle(
+    'hidden',
+    state.profilesAreLoading || Boolean(state.profilesError) || available.length === 0,
+  )
+  elements.selectAllButton.textContent = selectedCount === available.length && available.length > 0
+    ? 'Clear'
+    : 'Select all'
+  updateBatchControls()
+}
+
+function updateBatchControls() {
+  const available = state.profiles.filter((profile) => !profile.context?.existingSource)
+  const selectedCount = available.filter((profile) => profile.selected).length
+  elements.addSelectedButton.disabled =
+    state.isBusy || state.profilesAreLoading || Boolean(state.profilesError) || selectedCount === 0
+  elements.selectAllButton.disabled = state.isBusy
+  elements.addSelectedButton.textContent = selectedCount > 0
+    ? `Add selected profiles (${selectedCount})`
+    : 'Add selected profiles'
+  elements.selectAllButton.textContent = selectedCount === available.length && available.length > 0
+    ? 'Clear'
+    : 'Select all'
+}
+
+function toggleSelectAll() {
+  const available = state.profiles.filter((profile) => !profile.context?.existingSource)
+  const select = available.some((profile) => !profile.selected)
+  available.forEach((profile) => {
+    profile.selected = select
+  })
+  renderProfiles()
+}
+
+async function submitSelectedProfiles() {
+  const selected = state.profiles.filter((profile) =>
+    profile.selected && !profile.context?.existingSource)
+  if (selected.length === 0) return
+
+  setBusy(true)
+  setBatchMessage(`Adding ${selected.length} ${selected.length === 1 ? 'profile' : 'profiles'}…`)
+  try {
+    const result = await addSources(selected.map(({ provider, handle, displayName }) => ({
+      provider,
+      handle,
+      displayName,
+    })))
+    const contexts = await loadContexts(state.profiles.map((profile) => profile.url))
+    state.profiles.forEach((profile, index) => {
+      profile.context = contexts[index]
+      profile.selected = false
+    })
+    if (state.detected) {
+      const activeProfile = state.profiles.find((profile) =>
+        profile.provider === state.detected.provider
+        && profile.handle.toLocaleLowerCase() === state.detected.handle.toLocaleLowerCase())
+      state.context = activeProfile?.context ?? state.context
+    }
+    setBatchMessage(
+      `${result.addedCount} ${result.addedCount === 1 ? 'profile added' : 'profiles added'}`
+      + (result.skippedCount ? ` · ${result.skippedCount} skipped` : ''),
+      'ok',
+    )
+    renderProfiles()
+    if (state.provider) {
+      renderContext()
+    }
+    void chrome.runtime.sendMessage({ type: 'refreshBadges' })
+  } catch (error) {
+    setBatchMessage(error.message, 'error')
+  } finally {
+    setBusy(false)
+    updateBatchControls()
+  }
 }
 
 function renderContext() {
@@ -103,6 +317,17 @@ function renderContext() {
   elements.offlinePanel.classList.add('hidden')
   elements.profileForm.classList.remove('hidden')
   elements.profileForm.classList.toggle('is-existing', Boolean(existing))
+  elements.profileSummary.textContent = detected
+    ? `${PROVIDER_LABELS[state.provider]} ${detected.handle}`
+    : `${PROVIDER_LABELS[state.provider]} account import`
+  elements.activeTabMeta.textContent = detected
+    ? `${PROVIDER_LABELS[state.provider]} · ${detected.handle}`
+    : `${PROVIDER_LABELS[state.provider]} account`
+  elements.targetButton.disabled = state.isBusy
+  elements.singleVideoButton.disabled = state.isBusy
+  elements.syncButton.disabled = state.isBusy
+  elements.addButton.disabled = state.isBusy
+  elements.importAccountButton.disabled = state.isBusy
 
   if (!detected) {
     setStatus('ready', 'Account')
@@ -316,6 +541,7 @@ function showUnsupported() {
   setStatus('neutral', 'Idle')
   elements.unsupportedPanel.classList.remove('hidden')
   elements.offlinePanel.classList.add('hidden')
+  elements.profilesPanel.classList.add('hidden')
   elements.profileForm.classList.add('hidden')
 }
 
@@ -323,9 +549,12 @@ function showOffline(error) {
   setStatus('bad', 'Offline')
   elements.profileSummary.textContent = state.detected
     ? `${PROVIDER_LABELS[state.provider]} ${state.detected.handle}`
-    : `${PROVIDER_LABELS[state.provider]} account import`
+    : state.provider
+      ? `${PROVIDER_LABELS[state.provider]} account import`
+      : 'NinjaCrawler desktop unavailable'
   elements.unsupportedPanel.classList.add('hidden')
   elements.offlinePanel.classList.remove('hidden')
+  elements.profilesPanel.classList.add('hidden')
   elements.profileForm.classList.add('hidden')
   elements.offlinePanel.querySelector('.muted').textContent = error?.message || 'Start NinjaCrawler and keep it running.'
 }
@@ -334,12 +563,14 @@ function showPopupError(error) {
   setStatus('bad', 'Error')
   elements.unsupportedPanel.classList.add('hidden')
   elements.offlinePanel.classList.remove('hidden')
+  elements.profilesPanel.classList.add('hidden')
   elements.profileForm.classList.add('hidden')
   elements.offlinePanel.querySelector('h2').textContent = 'Popup Error'
   elements.offlinePanel.querySelector('.muted').textContent = error?.message || 'Unexpected popup error.'
 }
 
 function setBusy(isBusy) {
+  state.isBusy = isBusy
   for (const button of [
     elements.addButton,
     elements.syncButton,
@@ -348,11 +579,18 @@ function setBusy(isBusy) {
     elements.importAccountButton,
     elements.confirmAccountImport,
     elements.cancelAccountImport,
+    elements.selectAllButton,
+    elements.addSelectedButton,
   ]) {
     if (button) {
       button.disabled = isBusy
     }
   }
+}
+
+function setBatchMessage(text, kind = '') {
+  elements.batchMessage.textContent = text
+  elements.batchMessage.className = `message ${kind}`.trim()
 }
 
 function setAccountImportMessage(text, kind = '') {

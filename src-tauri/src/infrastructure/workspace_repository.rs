@@ -237,7 +237,7 @@ fn normalize_instagram_source_sync_options(
     normalized
 }
 
-fn default_source_sync_options(provider: &str) -> SourceSyncOptions {
+pub(crate) fn default_source_sync_options(provider: &str) -> SourceSyncOptions {
     if provider.eq_ignore_ascii_case("instagram") {
         SourceSyncOptions {
             instagram: Some(normalize_instagram_source_sync_options(None)),

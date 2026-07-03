@@ -11,8 +11,10 @@
 
 body {
   width: 390px;
-  min-height: 420px;
+  min-height: 320px;
+  max-height: 600px;
   margin: 0;
+  overflow-y: auto;
   background: #f6f7f9;
 }
 
@@ -34,6 +36,7 @@ textarea {
   align-items: flex-start;
   justify-content: space-between;
   gap: 12px;
+  padding: 2px 1px;
 }
 
 h1 {
@@ -68,6 +71,118 @@ h2 {
   border-radius: 8px;
   background: #ffffff;
   box-shadow: 0 6px 18px rgba(22, 31, 43, 0.08);
+}
+
+.section-heading,
+.profile-row,
+.profile-identity {
+  display: flex;
+  align-items: center;
+}
+
+.section-heading {
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.link-button {
+  border: 0;
+  padding: 2px;
+  background: transparent;
+  color: #1d4ed8;
+  font-size: 11px;
+  font-weight: 720;
+  cursor: pointer;
+}
+
+.profile-list {
+  display: grid;
+  max-height: 190px;
+  overflow-y: auto;
+  border: 1px solid #e1e5eb;
+  border-radius: 7px;
+}
+
+.profiles-panel {
+  box-shadow: 0 3px 12px rgba(22, 31, 43, 0.06);
+}
+
+.active-panel {
+  border-color: #cbd5e1;
+}
+
+.loading-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #586270;
+  font-size: 11px;
+}
+
+.spinner {
+  width: 14px;
+  height: 14px;
+  border: 2px solid #cdd6e4;
+  border-top-color: #2563eb;
+  border-radius: 50%;
+  animation: spin 700ms linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.profile-row {
+  gap: 9px;
+  min-height: 42px;
+  padding: 7px 9px;
+  border-bottom: 1px solid #e8ebf0;
+  cursor: pointer;
+}
+
+.profile-row:last-child {
+  border-bottom: 0;
+}
+
+.profile-row.is-existing {
+  cursor: default;
+  background: #f7f8fa;
+}
+
+.profile-row input {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+}
+
+.profile-identity {
+  min-width: 0;
+  flex: 1;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.profile-name {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 12px;
+  font-weight: 720;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.profile-provider,
+.profile-state {
+  flex: 0 0 auto;
+  color: #657080;
+  font-size: 10px;
+}
+
+.profile-state {
+  color: #146c43;
+  font-weight: 720;
 }
 
 .hidden {
@@ -191,6 +306,11 @@ h2 {
 .actions button:disabled {
   cursor: progress;
   opacity: 0.72;
+}
+
+.link-button:disabled {
+  cursor: default;
+  opacity: 0.55;
 }
 
 .message.error {

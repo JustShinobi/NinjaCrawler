@@ -27,7 +27,7 @@ try {
     $archive = [System.IO.Compression.ZipFile]::OpenRead($assetPath)
     try {
         $entries = @($archive.Entries | ForEach-Object { $_.FullName.Replace('\', '/') })
-        $root = "NinjaCrawler-Companion-$($manifest.version)/"
+        $root = "NinjaCrawler-Companion/"
         foreach ($requiredEntry in @(
             "${root}manifest.json",
             "${root}popup.html",

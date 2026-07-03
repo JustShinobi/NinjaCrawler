@@ -2,7 +2,11 @@ import { detectProfileFromUrl, detectTargetFromUrl, loadContext } from './core.j
 import { captureAccountFromTab } from './accountCapture.js'
 
 chrome.runtime.onInstalled.addListener(() => {
-  void safeAction(() => chrome.action.setBadgeBackgroundColor({ color: '#2f855a' }))
+  void initializeBadgeFeedback()
+})
+
+chrome.runtime.onStartup.addListener(() => {
+  void initializeBadgeFeedback()
 })
 
 chrome.tabs.onActivated.addListener(({ tabId }) => {
@@ -22,6 +26,14 @@ chrome.tabs.onUpdated.addListener((_tabId, changeInfo, tab) => {
 })
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  if (message?.type === 'refreshBadges') {
+    chrome.tabs.query({ active: true })
+      .then((tabs) => Promise.all(tabs.map((tab) => refreshBadge(tab))))
+      .then(() => sendResponse({ ok: true }))
+      .catch((error) => sendResponse({ ok: false, error: error?.message || 'Badge refresh failed.' }))
+    return true
+  }
+
   if (message?.type !== 'captureAccount') return undefined
 
   chrome.tabs.get(message.tabId)
@@ -30,6 +42,16 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     .catch((error) => sendResponse({ ok: false, error: error?.message || 'Account capture failed.' }))
   return true
 })
+
+// "Reload" em chrome://extensions reinicia o service worker sem necessariamente
+// ativar ou atualizar a aba atual. Atualiza o badge assim que o worker sobe.
+void initializeBadgeFeedback()
+
+async function initializeBadgeFeedback() {
+  await safeAction(() => chrome.action.setBadgeBackgroundColor({ color: '#2f855a' }))
+  const tabs = await chrome.tabs.query({ active: true })
+  await Promise.all(tabs.map((tab) => refreshBadge(tab)))
+}
 
 async function refreshBadge(tab) {
   if (!tab?.id) return

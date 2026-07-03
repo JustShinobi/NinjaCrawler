@@ -103,7 +103,8 @@ if ($companionSourceFiles.Count -eq 0) {
 }
 
 $companionName = "NinjaCrawler-Companion-$companionVersion"
-$companionStagingPath = Join-Path $outputPath $companionName
+$companionArchiveRoot = "NinjaCrawler-Companion"
+$companionStagingPath = Join-Path $outputPath $companionArchiveRoot
 New-Item -ItemType Directory -Path $companionStagingPath -Force | Out-Null
 
 foreach ($relativePath in $companionRequiredFiles) {
