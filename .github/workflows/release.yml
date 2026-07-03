@@ -7,8 +7,12 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Existing version tag to publish (for example, v0.1.0)
+        description: Version tag to publish (for example, v0.1.0)
         required: true
+        type: string
+      sha:
+        description: Commit SHA to build. Used when the tag does not exist yet (draft release).
+        required: false
         type: string
 
 permissions:
@@ -25,11 +29,13 @@ jobs:
     timeout-minutes: 60
 
     steps:
-      - name: Check out release tag
+      - name: Check out release commit
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 0
-          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+          # Prefer the commit SHA (the tag may not exist yet for a draft release),
+          # then the dispatch tag, then the pushed ref.
+          ref: ${{ inputs.sha || inputs.tag || github.ref }}
 
       - name: Validate release version
         id: version
@@ -139,6 +145,7 @@ jobs:
           RELEASE_TAG: ${{ steps.version.outputs.tag }}
           RELEASE_VERSION: ${{ steps.version.outputs.version }}
           IS_PRERELEASE: ${{ steps.version.outputs.prerelease }}
+          RELEASE_SHA: ${{ inputs.sha || github.sha }}
         run: |
           $assets = @(Get-ChildItem release -File | ForEach-Object FullName)
           if ($assets.Count -eq 0) {
@@ -147,22 +154,39 @@ jobs:
 
           & gh release view $env:RELEASE_TAG *> $null
           if ($LASTEXITCODE -eq 0) {
-            & gh release edit $env:RELEASE_TAG `
-              --title "NinjaCrawler $env:RELEASE_VERSION" `
-              --notes-file release\CHANGELOG.md
-            if ($LASTEXITCODE -ne 0) {
-              throw "GitHub Release notes update failed."
-            }
+            # A (draft) release already exists. Attach the binaries first, then
+            # publish it last so the tag and the visible release only appear once
+            # the artifacts are in place.
             & gh release upload $env:RELEASE_TAG @assets --clobber
+            if ($LASTEXITCODE -ne 0) {
+              throw "GitHub Release asset upload failed."
+            }
+
+            $publishArgs = @(
+              'release', 'edit', $env:RELEASE_TAG
+              '--title', "NinjaCrawler $env:RELEASE_VERSION"
+              '--notes-file', 'release\CHANGELOG.md'
+              '--draft=false'
+            )
+            if ($env:IS_PRERELEASE -eq 'True') {
+              $publishArgs += '--prerelease'
+            } else {
+              $publishArgs += '--latest'
+            }
+            & gh @publishArgs
           } else {
+            # Fallback (for example a manual tag push with no pre-created release):
+            # create it already published with the assets attached.
             $arguments = @(
               'release', 'create', $env:RELEASE_TAG
-              '--verify-tag'
+              '--target', $env:RELEASE_SHA
               '--notes-file', 'release\CHANGELOG.md'
               '--title', "NinjaCrawler $env:RELEASE_VERSION"
             )
             if ($env:IS_PRERELEASE -eq 'True') {
               $arguments += '--prerelease'
+            } else {
+              $arguments += '--latest'
             }
             $arguments += $assets
             & gh @arguments

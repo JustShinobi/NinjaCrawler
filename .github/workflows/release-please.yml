@@ -4,10 +4,12 @@ name: release-please
 #   1. release-please keeps a "release PR" that bumps the version across
 #      package.json / package-lock.json / tauri.conf.json / Cargo.toml and
 #      updates CHANGELOG.md from the Conventional Commits since the last release.
-#   2. Merging that PR creates the git tag (vX.Y.Z) and a GitHub Release.
-#   3. Because tags pushed with GITHUB_TOKEN do not trigger the tag-push
-#      workflow, we explicitly dispatch the existing Release workflow to build
-#      and attach the Windows binaries to that release.
+#   2. Merging that PR creates a *draft* GitHub Release (draft: true in the
+#      config). A draft does not create the git tag yet, so nothing is visible.
+#   3. We dispatch the Release workflow with the release tag and commit SHA. It
+#      builds the Windows binaries, attaches them to the draft, and only then
+#      publishes it (--draft=false) — which is what finally creates the tag. So
+#      the tag and the visible release only appear once the artifacts are ready.
 on:
   push:
     branches:
@@ -42,3 +44,4 @@ jobs:
           --repo ${{ github.repository }}
           --ref main
           -f tag=${{ steps.release.outputs.tag_name }}
+          -f sha=${{ steps.release.outputs.sha }}
