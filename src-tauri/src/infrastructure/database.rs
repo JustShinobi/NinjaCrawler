@@ -121,7 +121,11 @@ const MIGRATIONS: &[(i64, &str)] = &[
     ),
     (
         31,
-        include_str!("../../migrations/0031_single_videos.sql"),
+        include_str!("../../migrations/0031_instagram_identity_hint_backfill.sql"),
+    ),
+    (
+        32,
+        include_str!("../../migrations/0032_single_videos.sql"),
     ),
 ];
 

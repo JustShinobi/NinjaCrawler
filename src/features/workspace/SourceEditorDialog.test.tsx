@@ -181,26 +181,36 @@ describe('SourceEditorDialog', () => {
     expect(screen.queryByLabelText(/accent color/i)).toBeNull()
   })
 
-  it('unlocks the user url for manual editing via the Edit button', () => {
-    renderDialog(
-      {},
-      {
-        source: buildSource(),
-      },
-    )
+  it.each(['instagram', 'tiktok', 'twitter', 'reddit'] as const)(
+    'unlocks the %s user url for manual editing via the Edit button',
+    (provider) => {
+      renderDialog(
+        {
+          accounts: [
+            buildAccount({
+              provider,
+              displayName: `${provider} account`,
+            }),
+          ],
+        },
+        {
+          source: buildSource({ provider }),
+        },
+      )
 
-    // Locked by default: value shown, no input.
-    expect(screen.queryByRole('textbox', { name: /user url/i })).toBeNull()
+      // Locked by default: value shown, no input.
+      expect(screen.queryByRole('textbox', { name: /user url/i })).toBeNull()
 
-    fireEvent.click(screen.getByRole('button', { name: 'Edit handle' }))
+      fireEvent.click(screen.getByRole('button', { name: 'Edit handle' }))
 
-    // Now editable: an input with the current handle that accepts a new value.
-    const input = screen.getByRole('textbox', { name: /user url/i })
-    expect((input as HTMLInputElement).value).toBe('@alpha')
-    fireEvent.change(input, { target: { value: '@renamed' } })
-    expect((input as HTMLInputElement).value).toBe('@renamed')
-    expect(screen.getByText(/Manual override/)).toBeTruthy()
-  })
+      // Now editable: an input with the current handle that accepts a new value.
+      const input = screen.getByRole('textbox', { name: /user url/i })
+      expect((input as HTMLInputElement).value).toBe('@alpha')
+      fireEvent.change(input, { target: { value: '@renamed' } })
+      expect((input as HTMLInputElement).value).toBe('@renamed')
+      expect(screen.getByText(/Manual override/)).toBeTruthy()
+    },
+  )
 
   it('uses dedicated layout panels for profile, sync, and history tabs', () => {
     renderDialog(
@@ -444,6 +454,36 @@ describe('SourceEditorDialog', () => {
       )
     })
     await waitFor(() => {
+      expect(onSaved).toHaveBeenCalledWith(savedSource)
+      expect(onClose).toHaveBeenCalledTimes(1)
+    })
+  })
+
+  it('saves and starts a manual sync for a new profile', async () => {
+    const savedSource = buildSource({
+      id: 'source-new',
+      handle: '@new-profile',
+      displayName: 'new-profile',
+    })
+    const { onClose, onSaved, store } = renderDialog()
+    store.upsertSourceProfile.mockResolvedValue(
+      buildSnapshot({
+        sources: [savedSource],
+      }),
+    )
+    store.runSourceSync.mockResolvedValue(
+      buildSnapshot({
+        sources: [savedSource],
+      }),
+    )
+
+    fireEvent.change(screen.getByRole('textbox', { name: /user url/i }), {
+      target: { value: '@new-profile' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: /save and sync/i }))
+
+    await waitFor(() => {
+      expect(store.runSourceSync).toHaveBeenCalledWith('source-new', { trigger: 'manual' })
       expect(onSaved).toHaveBeenCalledWith(savedSource)
       expect(onClose).toHaveBeenCalledTimes(1)
     })

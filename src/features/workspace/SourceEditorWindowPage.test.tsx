@@ -203,6 +203,18 @@ describe('SourceEditorWindowPage', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'save editor' }))
 
-    expect(emitFocusSourceRequestMock).toHaveBeenCalledWith('source-2')
+    expect(emitFocusSourceRequestMock).toHaveBeenCalledWith('source-2', {
+      clearSearch: false,
+    })
+  })
+
+  it('asks the main window to reveal a newly created profile', () => {
+    render(<SourceEditorWindowPage />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'save editor' }))
+
+    expect(emitFocusSourceRequestMock).toHaveBeenCalledWith('source-2', {
+      clearSearch: true,
+    })
   })
 })
