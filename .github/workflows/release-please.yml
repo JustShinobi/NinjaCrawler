@@ -1,0 +1,40 @@
+name: release-please
+
+# Automates the release flow on every merge to main:
+#   1. release-please keeps a "release PR" that bumps the version across
+#      package.json / package-lock.json / tauri.conf.json / Cargo.toml and
+#      updates CHANGELOG.md from the Conventional Commits since the last release.
+#   2. Merging that PR creates the git tag (vX.Y.Z) and a GitHub Release.
+#   3. Because tags pushed with GITHUB_TOKEN do not trigger the tag-push
+#      workflow, we explicitly dispatch the existing Release workflow to build
+#      and attach the Windows binaries to that release.
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: write
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run release-please
+        id: release
+        uses: googleapis/release-please-action@v4
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+      - name: Trigger Windows release build
+        if: ${{ steps.release.outputs.release_created == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >
+          gh workflow run release.yml
+          --repo ${{ github.repository }}
+          --ref main
+          -f tag=${{ steps.release.outputs.tag_name }}
