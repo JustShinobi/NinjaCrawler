@@ -89,7 +89,7 @@ jobs:
             echo >> "$body_file"
           fi
 
-          title="release: promote develop into main"
+          title="chore: promote develop → main"
 
           existing="$(gh pr list --base "$BASE" --head "$HEAD" --state open \
             --json number --jq '.[0].number' || true)"

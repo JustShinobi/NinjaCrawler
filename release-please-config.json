@@ -6,6 +6,7 @@
       "package-name": "ninjacrawler",
       "changelog-path": "CHANGELOG.md",
       "include-component-in-tag": false,
+      "draft": true,
       "changelog-sections": [
         { "type": "feat", "section": "Features" },
         { "type": "fix", "section": "Bug Fixes" },
