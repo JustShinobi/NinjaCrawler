@@ -26,6 +26,10 @@ jobs:
         id: release
         uses: googleapis/release-please-action@v4
         with:
+          # PAT so release-please can open its release PR. The default
+          # GITHUB_TOKEN is blocked by "Allow GitHub Actions to create and
+          # approve pull requests" being disabled on the repo.
+          token: ${{ secrets.GH_TOKEN }}
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
 
