@@ -3360,6 +3360,8 @@ p {
   position: fixed;
   z-index: 38;
   width: 248px;
+  max-height: calc(100vh - 56px);
+  overflow-y: auto;
   border: 1px solid var(--line-strong);
   background: var(--canvas);
   box-shadow: var(--shadow-popover);

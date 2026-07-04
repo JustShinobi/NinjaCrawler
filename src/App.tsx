@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow'
 import {
   changeSourceMediaPath,
@@ -664,7 +664,6 @@ function App() {
         : pendingCommand
           ? formatCommandLabel(pendingCommand)
           : 'Ready'
-  const contextMenuPosition = profileContextMenu ? clampContextMenuPosition(profileContextMenu.x, profileContextMenu.y) : undefined
 
   const fileMenuItems: MenuItem[] = [
     { label: 'Import', onSelect: () => void handleOpenImportWindow() },
@@ -1442,11 +1441,11 @@ function App() {
         />
       </main>
 
-      {contextMenuSource && contextMenuPosition ? (
+      {contextMenuSource && profileContextMenu ? (
         <ProfileContextMenu
+          anchor={{ x: profileContextMenu.x, y: profileContextMenu.y }}
           handle={contextMenuSource.handle}
           items={profileContextMenuItems}
-          position={contextMenuPosition}
           providerLabel={providerLabels.get(contextMenuSource.provider) ?? contextMenuSource.provider}
         />
       ) : null}
@@ -1870,18 +1869,34 @@ function MenuButton({ items, label, openMenu, setOpenMenu }: MenuButtonProps) {
 }
 
 interface ProfileContextMenuProps {
+  anchor: {
+    x: number
+    y: number
+  }
   handle: string
   items: ProfileContextMenuItem[]
-  position: {
-    left: number
-    top: number
-  }
   providerLabel: string
 }
 
-function ProfileContextMenu({ handle, items, position, providerLabel }: ProfileContextMenuProps) {
+function ProfileContextMenu({ anchor, handle, items, providerLabel }: ProfileContextMenuProps) {
+  const menuRef = useRef<HTMLDivElement>(null)
+  const [position, setPosition] = useState(() => clampContextMenuPosition(anchor.x, anchor.y))
+
+  useLayoutEffect(() => {
+    const node = menuRef.current
+    if (!node) {
+      return
+    }
+
+    // Reposition using the menu's real rendered size instead of a fixed estimate,
+    // so a tall menu (many items) never overflows past the window edge.
+    const rect = node.getBoundingClientRect()
+    setPosition(clampContextMenuPosition(anchor.x, anchor.y, rect.width, rect.height))
+  }, [anchor.x, anchor.y, items.length])
+
   return (
     <div
+      ref={menuRef}
       className="profile-context-menu"
       data-profile-context-menu-root
       role="menu"
@@ -2020,18 +2035,24 @@ function formatCommandLabel(command: string): string {
     .join(' ')
 }
 
-function clampContextMenuPosition(x: number, y: number): { left: number; top: number } {
+const CONTEXT_MENU_TOP_MIN = 44
+const CONTEXT_MENU_MARGIN = 12
+const CONTEXT_MENU_DEFAULT_WIDTH = 248
+const CONTEXT_MENU_DEFAULT_HEIGHT = 360
+
+function clampContextMenuPosition(
+  x: number,
+  y: number,
+  width: number = CONTEXT_MENU_DEFAULT_WIDTH,
+  height: number = CONTEXT_MENU_DEFAULT_HEIGHT,
+): { left: number; top: number } {
   if (typeof window === 'undefined') {
     return { left: x, top: y }
   }
 
-  const width = 248
-  const height = 360
-  const margin = 12
-
   return {
-    left: Math.max(margin, Math.min(x, window.innerWidth - width - margin)),
-    top: Math.max(44, Math.min(y, window.innerHeight - height - margin)),
+    left: Math.max(CONTEXT_MENU_MARGIN, Math.min(x, window.innerWidth - width - CONTEXT_MENU_MARGIN)),
+    top: Math.max(CONTEXT_MENU_TOP_MIN, Math.min(y, window.innerHeight - height - CONTEXT_MENU_MARGIN)),
   }
 }
 
