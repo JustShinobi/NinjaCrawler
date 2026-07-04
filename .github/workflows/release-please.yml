@@ -10,10 +10,18 @@ name: release-please
 #      builds the Windows binaries, attaches them to the draft, and only then
 #      publishes it (--draft=false) — which is what finally creates the tag. So
 #      the tag and the visible release only appear once the artifacts are ready.
+#
+# workflow_dispatch exists so the Release workflow can re-invoke this after it
+# creates the tag. Because the tag is born late (step 3), the run triggered by
+# the release-PR merge tries to open the *next* release PR before the tag of the
+# just-released version exists, loses its anchor and rebuilds the changelog from
+# scratch (this produced the inflated PRs #47 and #53). Re-running once the tag
+# exists re-anchors it and clears/regenerates that PR correctly.
 on:
   push:
     branches:
       - main
+  workflow_dispatch:
 
 permissions:
   contents: write
