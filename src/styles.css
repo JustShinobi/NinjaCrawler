@@ -7342,24 +7342,35 @@ p {
   height: 1.12rem;
 }
 
-.source-editor-setting-row input[type="text"] {
+.source-editor-setting-row input[type="text"],
+.source-editor-setting-row input[type="number"],
+.source-editor-setting-row input[type="date"] {
   width: min(260px, 100%);
   min-height: 38px;
+  box-sizing: border-box;
   padding: 0.55rem 0.65rem;
   border-radius: 8px;
   background: var(--surface-input);
   color: var(--ink);
   border: 1px solid var(--line);
+  color-scheme: dark;
 }
 
 .source-editor-setting-row input[type="text"]::placeholder,
+.source-editor-setting-row input[type="number"]::placeholder,
+.source-editor-setting-row input[type="date"]::placeholder,
 .source-editor-setting-input input::placeholder {
   color: var(--muted-strong);
+  opacity: 1;
 }
 
-.source-editor-setting-row-disabled input[type="text"] {
+.source-editor-setting-row-disabled input[type="text"],
+.source-editor-setting-row-disabled input[type="number"],
+.source-editor-setting-row-disabled input[type="date"] {
   color: var(--muted);
   background: var(--panel-alt);
+  border-color: var(--line);
+  opacity: 0.72;
 }
 
 .source-editor-setting-row-field {
@@ -7372,7 +7383,9 @@ p {
 }
 
 .source-editor-setting-input input {
+  width: 100%;
   min-height: 38px;
+  box-sizing: border-box;
   padding: 0.55rem 0.65rem;
   border-radius: 8px;
   background: var(--surface-input);
@@ -7602,6 +7615,42 @@ p {
   font-size: 0.68rem;
   line-height: 1;
   cursor: help;
+}
+
+.accounts-help-tooltip-shell {
+  position: relative;
+  display: inline-flex;
+  flex: 0 0 auto;
+}
+
+.accounts-help-tooltip-content {
+  position: absolute;
+  z-index: 40;
+  left: calc(100% + 8px);
+  top: 50%;
+  width: max-content;
+  max-width: min(300px, 45vw);
+  padding: 0.55rem 0.65rem;
+  border: 1px solid var(--line-warm-strong);
+  border-radius: 8px;
+  background: var(--bg-card);
+  box-shadow: var(--shadow-card);
+  color: var(--ink);
+  font-size: 0.76rem;
+  font-weight: 400;
+  line-height: 1.4;
+  pointer-events: none;
+  opacity: 0;
+  transform: translate(2px, -50%);
+  visibility: hidden;
+  transition: opacity 120ms ease, transform 120ms ease, visibility 120ms ease;
+}
+
+.accounts-help-tooltip-shell:hover .accounts-help-tooltip-content,
+.accounts-help-tooltip-shell:focus-within .accounts-help-tooltip-content {
+  opacity: 1;
+  transform: translate(0, -50%);
+  visibility: visible;
 }
 
 .accounts-help-tooltip:hover,

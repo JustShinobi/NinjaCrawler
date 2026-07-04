@@ -144,6 +144,10 @@ export interface TikTokSourceSyncOptions {
   getTimeline?: boolean
   getStoriesUser?: boolean
   getReposts?: boolean
+  getLikedVideos?: boolean
+  likedVideosLimit?: number
+  likedVideosIncremental?: boolean
+  likedVideosKnownPageThreshold?: number
   downloadVideos?: boolean
   downloadPhotos?: boolean
   useNativeTitle?: boolean

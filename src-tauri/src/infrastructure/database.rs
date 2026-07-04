@@ -103,10 +103,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
         26,
         include_str!("../../migrations/0026_instagram_media_post_code.sql"),
     ),
-    (
-        27,
-        include_str!("../../migrations/0027_deleted_media.sql"),
-    ),
+    (27, include_str!("../../migrations/0027_deleted_media.sql")),
     (
         28,
         include_str!("../../migrations/0028_instagram_highlight_membership.sql"),
@@ -123,13 +120,18 @@ const MIGRATIONS: &[(i64, &str)] = &[
         31,
         include_str!("../../migrations/0031_instagram_identity_hint_backfill.sql"),
     ),
-    (
-        32,
-        include_str!("../../migrations/0032_single_videos.sql"),
-    ),
+    (32, include_str!("../../migrations/0032_single_videos.sql")),
     (
         33,
         include_str!("../../migrations/0033_instagram_identity_hint_reconcile.sql"),
+    ),
+    (
+        34,
+        include_str!("../../migrations/0034_account_sync_media_ledger.sql"),
+    ),
+    (
+        35,
+        include_str!("../../migrations/0035_account_sync_scope_state.sql"),
     ),
 ];
 

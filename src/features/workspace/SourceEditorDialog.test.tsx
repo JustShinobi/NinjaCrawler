@@ -611,6 +611,26 @@ describe('SourceEditorDialog', () => {
     fireEvent.click(screen.getByRole('tab', { name: /sync/i }))
 
     expect(screen.queryByText('TikTok sync editor not modeled yet')).toBeNull()
+    const likedVideos = screen.getByRole('checkbox', { name: 'Liked videos' })
+    const likedVideosLimit = screen.getByRole('spinbutton', { name: 'Liked videos limit' }) as HTMLInputElement
+    const incrementalLikes = screen.getByRole('checkbox', { name: 'Incremental liked videos' }) as HTMLInputElement
+    const knownPages = screen.getByRole('spinbutton', { name: 'Known pages before stopping' }) as HTMLInputElement
+    const downloadFrom = screen.getByLabelText('Download from') as HTMLInputElement
+    expect(likedVideos).toBeTruthy()
+    expect(likedVideosLimit.value).toBe('100')
+    expect(likedVideosLimit.disabled).toBe(true)
+    expect(incrementalLikes.checked).toBe(true)
+    expect(incrementalLikes.disabled).toBe(true)
+    expect(knownPages.value).toBe('3')
+    expect(knownPages.disabled).toBe(true)
+    expect(downloadFrom.type).toBe('text')
+    expect(screen.getByRole('button', { name: 'Pick Download from' })).toBeTruthy()
+    expect(screen.getByText(/files are saved to this profile's Liked\/ subfolder/i)).toBeTruthy()
+    expect(screen.queryByRole('button', { name: /Sync the profile feed/i })).toBeNull()
+    fireEvent.click(likedVideos)
+    expect(likedVideosLimit.disabled).toBe(false)
+    expect(incrementalLikes.disabled).toBe(false)
+    expect(knownPages.disabled).toBe(false)
     expect(screen.getByRole('checkbox', { name: 'Download videos' })).toBeTruthy()
     expect(screen.getByRole('checkbox', { name: 'Download photos' })).toBeTruthy()
   })

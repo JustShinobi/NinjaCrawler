@@ -166,7 +166,6 @@ const TIKTOK_SETTINGS_LAYOUT: ProviderAccountSettingsLayout = {
   ],
   fields: [
     { key: 'tiktok.account.mediaPath', category: 'account', label: 'Path', kind: 'text', placeholder: 'F:/SCrawler/Data/TikTok', defaultValue: '' },
-
     { key: 'tiktok.auth.useUserAgent', category: 'authorization', label: 'Use UserAgent', kind: 'toggle', defaultValue: 'true' },
     { key: 'tiktok.auth.userAgent', category: 'authorization', label: 'UserAgent', kind: 'textarea', defaultValue: '' },
 
@@ -175,6 +174,7 @@ const TIKTOK_SETTINGS_LAYOUT: ProviderAccountSettingsLayout = {
     { key: 'tiktok.defaults.getTimeline', category: 'defaults', label: 'Get Timeline', tooltip: 'tiktok.com/@<user>', kind: 'toggle', defaultValue: 'true' },
     { key: 'tiktok.defaults.getStoriesUser', category: 'defaults', label: 'Get User Stories', kind: 'toggle', defaultValue: 'false' },
     { key: 'tiktok.defaults.getReposts', category: 'defaults', label: 'Get Reposts', kind: 'toggle', defaultValue: 'false' },
+    { key: 'tiktok.defaults.getLikedVideos', category: 'defaults', label: 'Get Liked Videos', kind: 'toggle', defaultValue: 'false' },
     { key: 'tiktok.defaults.downloadVideos', category: 'defaults', label: 'Download videos', tooltip: 'Videos are fetched with yt-dlp.', kind: 'toggle', defaultValue: 'true' },
     { key: 'tiktok.defaults.downloadPhotos', category: 'defaults', label: 'Download photos', tooltip: 'Slideshow posts are parsed with gallery-dl.', kind: 'toggle', defaultValue: 'true' },
     { key: 'tiktok.defaults.separateVideoFolder', category: 'defaults', label: 'Separate video folder', tooltip: 'Download videos into a "Video" subfolder.', kind: 'toggle', defaultValue: 'false' },
@@ -185,7 +185,6 @@ const TIKTOK_SETTINGS_LAYOUT: ProviderAccountSettingsLayout = {
     { key: 'tiktok.defaults.removeTagsFromTitle', category: 'download', label: 'Remove tags from title', kind: 'toggle', defaultValue: 'false' },
     { key: 'tiktok.defaults.useParsedVideoDate', category: 'download', label: 'Use video date as file date', kind: 'toggle', defaultValue: 'true' },
     { key: 'tiktok.defaults.abortOnLimit', category: 'download', label: 'Abort on limit', kind: 'toggle', defaultValue: 'true' },
-
     { key: 'tiktok.defaults.sleepTimerSecs', category: 'timers', label: 'Sleep timer (s)', tooltip: 'Seconds between sections. -1 disables.', kind: 'number', defaultValue: '-1' },
     { key: 'tiktok.account.delayBetweenDownloadsSecs', category: 'timers', label: 'Delay between profiles (s)', tooltip: "Seconds the sync queue waits after each of this account's profiles before the next download. 0 falls back to the global default in Settings.", kind: 'number', defaultValue: '0' },
   ],
@@ -341,6 +340,7 @@ export function extractSourceDefaultsFromAccountSettings(
           getTimeline: parseOptionalToggle(draft['tiktok.defaults.getTimeline']),
           getStoriesUser: parseOptionalToggle(draft['tiktok.defaults.getStoriesUser']),
           getReposts: parseOptionalToggle(draft['tiktok.defaults.getReposts']),
+          getLikedVideos: parseOptionalToggle(draft['tiktok.defaults.getLikedVideos']),
           downloadVideos: parseOptionalToggle(draft['tiktok.defaults.downloadVideos']),
           downloadPhotos: parseOptionalToggle(draft['tiktok.defaults.downloadPhotos']),
           useNativeTitle: parseOptionalToggle(draft['tiktok.defaults.useNativeTitle']),

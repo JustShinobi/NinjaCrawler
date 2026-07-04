@@ -13,5 +13,6 @@ pub mod source_delete_runtime;
 pub mod source_sync_runtime;
 pub mod storage;
 pub mod tiktok_connector;
+pub mod tiktok_likes_runtime;
 pub mod twitter_connector;
 pub mod workspace_repository;

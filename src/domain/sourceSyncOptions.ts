@@ -214,6 +214,10 @@ export const DEFAULT_TIKTOK_SOURCE_SYNC_OPTIONS: TikTokSourceSyncOptions = {
   getTimeline: true,
   getStoriesUser: false,
   getReposts: false,
+  getLikedVideos: false,
+  likedVideosLimit: 100,
+  likedVideosIncremental: true,
+  likedVideosKnownPageThreshold: 3,
   downloadVideos: true,
   downloadPhotos: true,
   useNativeTitle: false,
@@ -237,6 +241,18 @@ export function createTikTokSourceSyncOptions(
     getTimeline: overrides?.getTimeline ?? DEFAULT_TIKTOK_SOURCE_SYNC_OPTIONS.getTimeline,
     getStoriesUser: overrides?.getStoriesUser ?? DEFAULT_TIKTOK_SOURCE_SYNC_OPTIONS.getStoriesUser,
     getReposts: overrides?.getReposts ?? DEFAULT_TIKTOK_SOURCE_SYNC_OPTIONS.getReposts,
+    getLikedVideos: overrides?.getLikedVideos ?? DEFAULT_TIKTOK_SOURCE_SYNC_OPTIONS.getLikedVideos,
+    likedVideosLimit: Math.max(0, Math.trunc(overrides?.likedVideosLimit ?? DEFAULT_TIKTOK_SOURCE_SYNC_OPTIONS.likedVideosLimit ?? 100)),
+    likedVideosIncremental:
+      overrides?.likedVideosIncremental ?? DEFAULT_TIKTOK_SOURCE_SYNC_OPTIONS.likedVideosIncremental,
+    likedVideosKnownPageThreshold: Math.max(
+      1,
+      Math.trunc(
+        overrides?.likedVideosKnownPageThreshold
+          ?? DEFAULT_TIKTOK_SOURCE_SYNC_OPTIONS.likedVideosKnownPageThreshold
+          ?? 3,
+      ),
+    ),
     downloadVideos: overrides?.downloadVideos ?? DEFAULT_TIKTOK_SOURCE_SYNC_OPTIONS.downloadVideos,
     downloadPhotos: overrides?.downloadPhotos ?? DEFAULT_TIKTOK_SOURCE_SYNC_OPTIONS.downloadPhotos,
     useNativeTitle: overrides?.useNativeTitle ?? DEFAULT_TIKTOK_SOURCE_SYNC_OPTIONS.useNativeTitle,
