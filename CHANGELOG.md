@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.8.1](https://github.com/MetalDevOps/NinjaCrawler/compare/v0.8.0...v0.8.1) (2026-07-04)
+
+
+### Bug Fixes
+
+* **workspace:** prevent profile context menu from overflowing window ([4330085](https://github.com/MetalDevOps/NinjaCrawler/commit/433008594b8a94bf573b34ecafc7a7984f74de89))
+* **workspace:** prevent profile context menu from overflowing window ([34a8296](https://github.com/MetalDevOps/NinjaCrawler/commit/34a8296e294e11d84a4a69a8f8fe704e28f1246a))
+
 ## [0.8.0](https://github.com/MetalDevOps/NinjaCrawler/compare/v0.7.0...v0.8.0) (2026-07-04)
 
 
