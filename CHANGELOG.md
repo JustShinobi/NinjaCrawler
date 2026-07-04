@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.9.0](https://github.com/MetalDevOps/NinjaCrawler/compare/v0.8.1...v0.9.0) (2026-07-04)
+
+
+### Features
+
+* **tiktok:** add authenticated liked-video sync ([03ea0a8](https://github.com/MetalDevOps/NinjaCrawler/commit/03ea0a8b3e779a16c3c70c68d4399ed8f688bd90))
+* **tiktok:** add liked videos sync support ([c473194](https://github.com/MetalDevOps/NinjaCrawler/commit/c473194d17a05413d29df21938890149be3b1d78))
+* **workspace:** improve sync panel tooltips ([c7ec9f7](https://github.com/MetalDevOps/NinjaCrawler/commit/c7ec9f7c649dbc480f5f26d65e72477aa86a8d37))
+
 ## [0.8.1](https://github.com/MetalDevOps/NinjaCrawler/compare/v0.8.0...v0.8.1) (2026-07-04)
 
 
