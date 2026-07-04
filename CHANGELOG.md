@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.0](https://github.com/MetalDevOps/NinjaCrawler/compare/v0.7.0...v0.8.0) (2026-07-04)
+
+
+### Features
+
+* **companion:** add batch companion flows and release packaging support ([9aec1c0](https://github.com/MetalDevOps/NinjaCrawler/commit/9aec1c0ac3707aa030409d1a364a941a3982082a))
+
 ## [0.7.0](https://github.com/MetalDevOps/NinjaCrawler/compare/v0.6.0...v0.7.0) (2026-07-03)
 
 
