@@ -203,16 +203,29 @@ jobs:
           }
 
       - name: Re-anchor release-please
-        # The git tag now exists (the publish step above created it). Re-invoke
-        # release-please so it re-anchors on this tag and clears/regenerates any
-        # release PR that was inflated because it ran on the release-PR merge —
-        # before this tag existed — and rebuilt the changelog from scratch (this
-        # is what produced the bloated PRs #47 and #53). No-op when there is
-        # nothing new to release. Uses the PAT, like release-please.yml itself.
+        # The git tag now exists (the publish step above created it). The
+        # release-please run triggered by the release-PR merge already opened the
+        # NEXT release PR *before* this tag existed, so it lost its anchor and
+        # rebuilt the changelog from the start of the project (this produced the
+        # bloated PRs #47, #53 and #58). Re-running release-please does NOT
+        # deflate an already-open pending release PR — only closing it and
+        # regenerating does. So: close that stale release PR, then re-dispatch
+        # release-please, which recreates a correctly-anchored PR (or nothing,
+        # when there is nothing to release since this tag). Uses the PAT, like
+        # release-please.yml itself.
         if: success()
+        shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
-        run: >
-          gh workflow run release-please.yml
-          --repo ${{ github.repository }}
-          --ref main
+        run: |
+          $stale = gh pr list --repo ${{ github.repository }} --base main --state open `
+            --json number,headRefName `
+            --jq '.[] | select(.headRefName | startswith("release-please--")) | .number'
+          foreach ($pr in @($stale)) {
+            if ($pr) {
+              Write-Host "Closing stale release PR #$pr (opened before the tag existed)."
+              gh pr close $pr --repo ${{ github.repository }} `
+                --comment "Superseded by the release workflow: closing so release-please re-anchors on the freshly created tag instead of rebuilding the changelog from scratch."
+            }
+          }
+          gh workflow run release-please.yml --repo ${{ github.repository }} --ref main
