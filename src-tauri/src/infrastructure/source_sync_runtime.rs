@@ -110,6 +110,15 @@ fn register_queue_app_handle(app: &AppHandle) {
     }
 }
 
+pub fn registered_app_handle() -> Result<AppHandle, String> {
+    queue_app_handle()
+        .lock()
+        .map_err(|_| "Source sync queue app handle lock is poisoned.".to_string())?
+        .as_ref()
+        .cloned()
+        .ok_or_else(|| "Source sync queue is not attached to the desktop runtime.".to_string())
+}
+
 fn publish_queue_status_event_from_registered_app() {
     let app = queue_app_handle()
         .lock()

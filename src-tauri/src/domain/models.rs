@@ -913,6 +913,16 @@ pub struct TikTokSourceSyncOptions {
     pub get_stories_user: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub get_reposts: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub get_liked_videos: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub liked_videos_limit: Option<i64>,
+    /// Encerra a listagem depois de páginas consecutivas já baixadas, mas
+    /// somente quando uma varredura completa anterior estabeleceu a baseline.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub liked_videos_incremental: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub liked_videos_known_page_threshold: Option<i64>,
     /// Story capturado pelo Companion: baixa só este vídeo na pasta Stories/ do
     /// perfil, sem enumerar a timeline.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -974,6 +984,10 @@ pub fn default_tiktok_source_sync_options() -> TikTokSourceSyncOptions {
         get_timeline: Some(true),
         get_stories_user: Some(false),
         get_reposts: Some(false),
+        get_liked_videos: Some(false),
+        liked_videos_limit: Some(100),
+        liked_videos_incremental: Some(true),
+        liked_videos_known_page_threshold: Some(3),
         target_video_url: None,
         download_videos: Some(true),
         download_photos: Some(true),

@@ -36,31 +36,31 @@ interface SourceEditorSyncPanelProps {
 interface ToggleDefinition {
   key: keyof InstagramSyncUpsertOptions
   label: string
-  tooltip: string
+  tooltip?: string
 }
 
-const SECTION_TOGGLES: Array<{ key: 'timeline' | 'reels' | 'stories' | 'storiesUser' | 'tagged', label: string, tooltip: string }> = [
-  { key: 'timeline', label: 'Timeline', tooltip: 'Sync the main feed.' },
-  { key: 'reels', label: 'Reels', tooltip: 'Sync reels.' },
-  { key: 'stories', label: 'Stories', tooltip: 'Sync stories.' },
-  { key: 'storiesUser', label: 'Stories (user)', tooltip: 'Sync user stories.' },
-  { key: 'tagged', label: 'Tagged', tooltip: 'Sync tagged posts.' },
+const SECTION_TOGGLES: Array<{ key: 'timeline' | 'reels' | 'stories' | 'storiesUser' | 'tagged', label: string, tooltip?: string }> = [
+  { key: 'timeline', label: 'Timeline' },
+  { key: 'reels', label: 'Reels' },
+  { key: 'stories', label: 'Stories' },
+  { key: 'storiesUser', label: 'Stories (user)' },
+  { key: 'tagged', label: 'Tagged' },
 ]
 
 const BEHAVIOR_TOGGLES: ToggleDefinition[] = [
-  { key: 'temporary', label: 'Temporary', tooltip: 'Mark this profile as temporary.' },
-  { key: 'favorite', label: 'Favorite', tooltip: 'Mark this profile as favorite.' },
+  { key: 'temporary', label: 'Temporary' },
+  { key: 'favorite', label: 'Favorite' },
   { key: 'getUserMediaOnly', label: 'User media only', tooltip: 'Focus on media instead of extra metadata.' },
   { key: 'verifiedProfile', label: 'Verified profile', tooltip: 'Use verified-profile post count behavior.' },
-  { key: 'forceUpdateUserName', label: 'Force update username', tooltip: 'Refresh username on each sync.' },
-  { key: 'forceUpdateUserInformation', label: 'Force update user information', tooltip: 'Refresh full user information on sync.' },
-  { key: 'downloadText', label: 'Download text', tooltip: 'Save text with media output.' },
-  { key: 'downloadTextPosts', label: 'Download text posts', tooltip: 'Save text-only posts when supported.' },
+  { key: 'forceUpdateUserName', label: 'Force update username' },
+  { key: 'forceUpdateUserInformation', label: 'Force update user information' },
+  { key: 'downloadText', label: 'Download text' },
+  { key: 'downloadTextPosts', label: 'Download text posts' },
 ]
 
 const MEDIA_TOGGLES: ToggleDefinition[] = [
-  { key: 'downloadImages', label: 'Download images', tooltip: 'Download images.' },
-  { key: 'downloadVideos', label: 'Download videos', tooltip: 'Download videos.' },
+  { key: 'downloadImages', label: 'Download images' },
+  { key: 'downloadVideos', label: 'Download videos' },
   { key: 'placeExtractedImageIntoVideoFolder', label: 'Place extracted image in video folder', tooltip: 'Keep extracted images beside the video.' },
 ]
 
@@ -124,6 +124,7 @@ export function SourceEditorSyncPanel({
   if (tiktokSyncOptions) {
     return (
       <TikTokSyncPanel
+        localDateFormat={localDateFormat}
         onTikTokSyncOptionsChange={onTikTokSyncOptionsChange}
         tiktokSyncOptions={tiktokSyncOptions}
       />
@@ -236,14 +237,12 @@ export function SourceEditorSyncPanel({
               label="Date from"
               localDateFormat={localDateFormat}
               onChange={(value) => updateInstagramOption(onInstagramSyncOptionsChange, 'dateFrom', value)}
-              tooltip="Inclusive start date."
               value={instagramSyncOptions.dateFrom ?? ''}
             />
             <LocalizedDateFieldRow
               label="Date to"
               localDateFormat={localDateFormat}
               onChange={(value) => updateInstagramOption(onInstagramSyncOptionsChange, 'dateTo', value)}
-              tooltip="Inclusive end date."
               value={instagramSyncOptions.dateTo ?? ''}
             />
           </SyncGroupCard>
@@ -254,13 +253,11 @@ export function SourceEditorSyncPanel({
             checked={Boolean(instagramSyncOptions.textSpecialFolder)}
             label="Text special folder"
             onChange={(checked) => updateInstagramOption(onInstagramSyncOptionsChange, 'textSpecialFolder', checked)}
-            tooltip="Use a dedicated folder for text output."
           />
           <FieldRow
             disabled={!instagramSyncOptions.textSpecialFolder}
             label="Special path"
             onChange={(value) => updateInstagramOption(onInstagramSyncOptionsChange, 'specialPath', value)}
-            tooltip={instagramSyncOptions.textSpecialFolder ? 'Custom folder for text output.' : 'Enable "Text special folder" to edit this path.'}
             value={instagramSyncOptions.specialPath ?? ''}
           />
           <FieldRow
@@ -273,13 +270,11 @@ export function SourceEditorSyncPanel({
             checked={Boolean(instagramSyncOptions.scriptEnabled)}
             label="Enable post-sync script"
             onChange={(checked) => updateInstagramOption(onInstagramSyncOptionsChange, 'scriptEnabled', checked)}
-            tooltip="Run a command after sync completes."
           />
           <FieldRow
             disabled={!instagramSyncOptions.scriptEnabled}
             label="Script"
             onChange={(value) => updateInstagramOption(onInstagramSyncOptionsChange, 'script', value)}
-            tooltip={instagramSyncOptions.scriptEnabled ? 'Command to run after sync.' : 'Enable "Post-sync script" to provide a command.'}
             value={instagramSyncOptions.script ?? ''}
           />
         </SyncGroupCard>
@@ -311,7 +306,6 @@ function TwitterSyncPanel({ twitterSyncOptions, onTwitterSyncOptionsChange }: Tw
               checked={Boolean(twitterSyncOptions.profileModel)}
               label="Profile (timeline)"
               onChange={(checked) => updateTwitterOption(onTwitterSyncOptionsChange, 'profileModel', checked)}
-              tooltip="Download the main timeline (x.com/<user>)."
             />
             <ToggleRow
               checked={Boolean(twitterSyncOptions.searchModel)}
@@ -323,7 +317,6 @@ function TwitterSyncPanel({ twitterSyncOptions, onTwitterSyncOptionsChange }: Tw
               checked={Boolean(twitterSyncOptions.likesModel)}
               label="Likes"
               onChange={(checked) => updateTwitterOption(onTwitterSyncOptionsChange, 'likesModel', checked)}
-              tooltip="Download the user's liked posts (x.com/<user>/likes)."
             />
             <ToggleRow
               checked={Boolean(twitterSyncOptions.searchUseGraphqlEndpoint)}
@@ -350,13 +343,11 @@ function TwitterSyncPanel({ twitterSyncOptions, onTwitterSyncOptionsChange }: Tw
               checked={Boolean(twitterSyncOptions.downloadImages)}
               label="Download images"
               onChange={(checked) => updateTwitterOption(onTwitterSyncOptionsChange, 'downloadImages', checked)}
-              tooltip="Download photos."
             />
             <ToggleRow
               checked={Boolean(twitterSyncOptions.downloadVideos)}
               label="Download videos"
               onChange={(checked) => updateTwitterOption(onTwitterSyncOptionsChange, 'downloadVideos', checked)}
-              tooltip="Download videos."
             />
             <ToggleRow
               checked={Boolean(twitterSyncOptions.downloadGifs)}
@@ -436,10 +427,11 @@ function TwitterSyncPanel({ twitterSyncOptions, onTwitterSyncOptionsChange }: Tw
 
 interface TikTokSyncPanelProps {
   tiktokSyncOptions: TikTokSyncUpsertOptions
+  localDateFormat: LocalDateFormat
   onTikTokSyncOptionsChange: (mutate: (current: TikTokSyncUpsertOptions) => TikTokSyncUpsertOptions) => void
 }
 
-function TikTokSyncPanel({ tiktokSyncOptions, onTikTokSyncOptionsChange }: TikTokSyncPanelProps) {
+function TikTokSyncPanel({ tiktokSyncOptions, localDateFormat, onTikTokSyncOptionsChange }: TikTokSyncPanelProps) {
   return (
     <div className="source-editor-sync-shell">
       <div className="source-editor-sync-groups">
@@ -449,7 +441,6 @@ function TikTokSyncPanel({ tiktokSyncOptions, onTikTokSyncOptionsChange }: TikTo
               checked={Boolean(tiktokSyncOptions.getTimeline)}
               label="Timeline"
               onChange={(checked) => updateTikTokOption(onTikTokSyncOptionsChange, 'getTimeline', checked)}
-              tooltip="Sync the profile feed (tiktok.com/@user)."
             />
             <ToggleRow
               checked={Boolean(tiktokSyncOptions.getStoriesUser)}
@@ -463,6 +454,35 @@ function TikTokSyncPanel({ tiktokSyncOptions, onTikTokSyncOptionsChange }: TikTo
               onChange={(checked) => updateTikTokOption(onTikTokSyncOptionsChange, 'getReposts', checked)}
               tooltip="Sync reposts (saved to the Reposts/ subfolder)."
             />
+            <ToggleRow
+              checked={Boolean(tiktokSyncOptions.getLikedVideos)}
+              label="Liked videos"
+              onChange={(checked) => updateTikTokOption(onTikTokSyncOptionsChange, 'getLikedVideos', checked)}
+              tooltip="Sync videos liked by the authenticated TikTok account. Files are saved to this profile's Liked/ subfolder."
+            />
+            <NumberFieldRow
+              disabled={!tiktokSyncOptions.getLikedVideos}
+              label="Liked videos limit"
+              min={0}
+              onChange={(value) => updateTikTokOption(onTikTokSyncOptionsChange, 'likedVideosLimit', Math.max(0, value))}
+              tooltip="Maximum liked videos per sync. Use 0 to fetch every available liked video."
+              value={tiktokSyncOptions.likedVideosLimit ?? 100}
+            />
+            <ToggleRow
+              checked={tiktokSyncOptions.likedVideosIncremental !== false}
+              disabled={!tiktokSyncOptions.getLikedVideos}
+              label="Incremental liked videos"
+              onChange={(checked) => updateTikTokOption(onTikTokSyncOptionsChange, 'likedVideosIncremental', checked)}
+              tooltip="After one complete scan, stop when consecutive pages contain only downloaded media. Disable this to force a full rescan, including media that may have become visible again."
+            />
+            <NumberFieldRow
+              disabled={!tiktokSyncOptions.getLikedVideos || tiktokSyncOptions.likedVideosIncremental === false}
+              label="Known pages before stopping"
+              min={1}
+              onChange={(value) => updateTikTokOption(onTikTokSyncOptionsChange, 'likedVideosKnownPageThreshold', Math.max(1, value))}
+              tooltip="Number of consecutive pages containing only existing downloads before an incremental scan stops."
+              value={tiktokSyncOptions.likedVideosKnownPageThreshold ?? 3}
+            />
           </SyncGroupCard>
 
           <SyncGroupCard className="source-editor-sync-group-media" title="Media">
@@ -470,13 +490,11 @@ function TikTokSyncPanel({ tiktokSyncOptions, onTikTokSyncOptionsChange }: TikTo
               checked={Boolean(tiktokSyncOptions.downloadVideos)}
               label="Download videos"
               onChange={(checked) => updateTikTokOption(onTikTokSyncOptionsChange, 'downloadVideos', checked)}
-              tooltip="Download videos (fetched with yt-dlp)."
             />
             <ToggleRow
               checked={Boolean(tiktokSyncOptions.downloadPhotos)}
               label="Download photos"
               onChange={(checked) => updateTikTokOption(onTikTokSyncOptionsChange, 'downloadPhotos', checked)}
-              tooltip="Download slideshow photo posts."
             />
             <ToggleRow
               checked={Boolean(tiktokSyncOptions.separateVideoFolder)}
@@ -518,7 +536,6 @@ function TikTokSyncPanel({ tiktokSyncOptions, onTikTokSyncOptionsChange }: TikTo
               disabled={!tiktokSyncOptions.useNativeTitle}
               label="Remove hashtags from title"
               onChange={(checked) => updateTikTokOption(onTikTokSyncOptionsChange, 'removeTagsFromTitle', checked)}
-              tooltip="Strip #hashtags from the caption before naming. Applies when 'Use native title' is on."
             />
           </SyncGroupCard>
         </div>
@@ -540,16 +557,16 @@ function TikTokSyncPanel({ tiktokSyncOptions, onTikTokSyncOptionsChange }: TikTo
           </SyncGroupCard>
 
           <SyncGroupCard className="source-editor-sync-group-naming" title="Date range">
-            <DateFieldRow
+            <EpochDateFieldRow
               label="Download from"
+              localDateFormat={localDateFormat}
               onChange={(epoch) => updateTikTokOption(onTikTokSyncOptionsChange, 'downloadFromDate', epoch)}
-              tooltip="Only download posts created on/after this date. Leave empty for no lower bound."
               value={tiktokSyncOptions.downloadFromDate}
             />
-            <DateFieldRow
+            <EpochDateFieldRow
               label="Download until"
+              localDateFormat={localDateFormat}
               onChange={(epoch) => updateTikTokOption(onTikTokSyncOptionsChange, 'downloadToDate', epoch)}
-              tooltip="Only download posts created on/before this date. Leave empty for no upper bound."
               value={tiktokSyncOptions.downloadToDate}
             />
           </SyncGroupCard>
@@ -600,7 +617,7 @@ function ToggleRow({ label, tooltip, checked, disabled = false, onChange }: Togg
     <div className={disabled ? 'source-editor-setting-row source-editor-setting-row-disabled' : 'source-editor-setting-row'}>
       <div className="source-editor-setting-copy">
         <label htmlFor={inputId}>{label}</label>
-        {helpButton(label, tooltip)}
+        {helpButton(tooltip)}
       </div>
       <input
         aria-label={label}
@@ -635,17 +652,18 @@ function FieldRow({
     <div className={disabled ? 'source-editor-setting-row source-editor-setting-row-disabled' : 'source-editor-setting-row'}>
       <div className="source-editor-setting-copy">
         <label htmlFor={inputId}>{label}</label>
-        {helpButton(label, tooltip)}
+        {helpButton(tooltip)}
       </div>
       <input aria-label={label} disabled={disabled} id={inputId} onChange={(event) => onChange(event.target.value)} type="text" value={value} />
     </div>
   )
 }
 
-interface DateFieldRowProps {
+interface EpochDateFieldRowProps {
   label: string
   tooltip?: string
   value?: number
+  localDateFormat: LocalDateFormat
   onChange: (epochSeconds: number | undefined) => void
 }
 
@@ -658,31 +676,28 @@ function epochToDateInput(value?: number): string {
   return new Date(value * 1000).toISOString().slice(0, 10)
 }
 
-function DateFieldRow({ label, tooltip, value, onChange }: DateFieldRowProps) {
-  const inputId = useId()
-
+function EpochDateFieldRow({
+  label,
+  tooltip,
+  value,
+  localDateFormat,
+  onChange,
+}: EpochDateFieldRowProps) {
   return (
-    <div className="source-editor-setting-row">
-      <div className="source-editor-setting-copy">
-        <label htmlFor={inputId}>{label}</label>
-        {helpButton(label, tooltip)}
-      </div>
-      <input
-        aria-label={label}
-        id={inputId}
-        onChange={(event) => {
-          const text = event.target.value
-          if (!text) {
-            onChange(undefined)
-            return
-          }
-          const epoch = Math.floor(Date.parse(`${text}T00:00:00Z`) / 1000)
-          onChange(Number.isFinite(epoch) ? epoch : undefined)
-        }}
-        type="date"
-        value={epochToDateInput(value)}
-      />
-    </div>
+    <LocalizedDateFieldRow
+      label={label}
+      localDateFormat={localDateFormat}
+      onChange={(isoDate) => {
+        if (!isoDate) {
+          onChange(undefined)
+          return
+        }
+        const epoch = Math.floor(Date.parse(`${isoDate}T00:00:00Z`) / 1000)
+        onChange(Number.isFinite(epoch) ? epoch : undefined)
+      }}
+      tooltip={tooltip}
+      value={epochToDateInput(value)}
+    />
   )
 }
 
@@ -691,22 +706,24 @@ interface NumberFieldRowProps {
   tooltip?: string
   value: number
   disabled?: boolean
+  min?: number
   onChange: (value: number) => void
 }
 
-function NumberFieldRow({ label, tooltip, value, disabled = false, onChange }: NumberFieldRowProps) {
+function NumberFieldRow({ label, tooltip, value, disabled = false, min, onChange }: NumberFieldRowProps) {
   const inputId = useId()
 
   return (
     <div className={disabled ? 'source-editor-setting-row source-editor-setting-row-disabled' : 'source-editor-setting-row'}>
       <div className="source-editor-setting-copy">
         <label htmlFor={inputId}>{label}</label>
-        {helpButton(label, tooltip)}
+        {helpButton(tooltip)}
       </div>
       <input
         aria-label={label}
         disabled={disabled}
         id={inputId}
+        min={min}
         onChange={(event) => {
           const parsed = Number.parseInt(event.target.value, 10)
           onChange(Number.isNaN(parsed) ? -1 : parsed)
@@ -789,7 +806,7 @@ function LocalizedDateFieldRow({
     <div className={disabled ? 'source-editor-setting-row source-editor-setting-row-disabled source-editor-setting-row-field' : 'source-editor-setting-row source-editor-setting-row-field'}>
       <div className="source-editor-setting-copy">
         <label htmlFor={inputId}>{label}</label>
-        {helpButton(label, tooltip)}
+        {helpButton(tooltip)}
       </div>
       <div className="source-editor-setting-input plans-date-picker-field" ref={fieldRef}>
         <div className="plans-date-picker-control">
@@ -849,20 +866,24 @@ function LocalizedDateFieldRow({
   )
 }
 
-function helpButton(label: string, tooltip?: string) {
+function helpButton(tooltip?: string) {
   if (!tooltip) {
     return null
   }
 
   return (
-    <button
-      aria-label={`Help for ${label}`}
-      className="accounts-help-tooltip"
-      title={tooltip}
-      type="button"
-    >
-      i
-    </button>
+    <span className="accounts-help-tooltip-shell">
+      <button
+        aria-label={`More information: ${tooltip}`}
+        className="accounts-help-tooltip"
+        type="button"
+      >
+        i
+      </button>
+      <span className="accounts-help-tooltip-content" role="tooltip">
+        {tooltip}
+      </span>
+    </span>
   )
 }
 

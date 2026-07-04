@@ -232,28 +232,32 @@ where
         return Err("source sync cancelled by user".to_string());
     }
 
-    report_progress(TikTokProgress {
-        label: "Parsing profile".to_string(),
-        detail: format!("Listing TikTok posts for '{handle}'."),
-        downloaded_items: Some(0),
-        progress_percent: Some(0),
-        indeterminate: true,
-    });
-
-    let listed = enumerate_posts(request, &profile_url, &is_cancelled)?;
-    connector_debug::append_current(
-        "internal.tiktok",
-        "system",
-        "listing.complete",
-        format!(
-            "posts_received={}\nuploader_id={}\nrate_limited={}",
-            listed.posts.len(),
-            listed.uploader_id.as_deref().unwrap_or("unknown"),
-            listed.rate_limited
-        ),
-    );
-    rate_limited = rate_limited || listed.rate_limited;
-    let resolved_user_id = listed.uploader_id.clone();
+    let mut listed = if request.sections.timeline {
+        report_progress(TikTokProgress {
+            label: "Parsing profile".to_string(),
+            detail: format!("Listing TikTok posts for '{handle}'."),
+            downloaded_items: Some(0),
+            progress_percent: Some(0),
+            indeterminate: true,
+        });
+        let listed = enumerate_posts(request, &profile_url, &is_cancelled)?;
+        connector_debug::append_current(
+            "internal.tiktok",
+            "system",
+            "listing.complete",
+            format!(
+                "posts_received={}\nuploader_id={}\nrate_limited={}",
+                listed.posts.len(),
+                listed.uploader_id.as_deref().unwrap_or("unknown"),
+                listed.rate_limited
+            ),
+        );
+        rate_limited = rate_limited || listed.rate_limited;
+        Some(listed)
+    } else {
+        None
+    };
+    let resolved_user_id = listed.as_ref().and_then(|value| value.uploader_id.clone());
 
     // Duplicata no primeiro sync: cancela antes de baixar qualquer coisa.
     if let Some(uid) = resolved_user_id.as_deref() {
@@ -267,7 +271,11 @@ where
     // conhecemos do ledger e abrimos sua página (o handle no path é ignorado);
     // se o `uniqueId` atual difere do salvo — e o `author.id` confirma a
     // identidade — devolvemos o novo handle para o chamador atualizar o perfil.
-    if duplicate_user_id.is_none() && listed.posts.is_empty() && !listed.rate_limited {
+    if duplicate_user_id.is_none()
+        && listed
+            .as_ref()
+            .is_some_and(|value| value.posts.is_empty() && !value.rate_limited)
+    {
         if let Some(known_post_id) = newest_known_timeline_post_id(&request.ledger_post_keys) {
             if let Some(author) = fetch_post_author(request, &known_post_id, &is_cancelled) {
                 let identity_ok = match (request.user_id_hint.as_deref(), author.author_id.as_deref()) {
@@ -288,12 +296,16 @@ where
 
     // Avatar: o yt-dlp não expõe a foto do canal, então buscamos a página de um
     // post (write-pages + impersonate) e extraímos `author.avatarLarger`.
-    let resolved_avatar_url = match (duplicate_user_id.is_none(), listed.posts.first()) {
+    let resolved_avatar_url = match (
+        duplicate_user_id.is_none(),
+        listed.as_ref().and_then(|value| value.posts.first()),
+    ) {
         (true, Some(first_post)) => fetch_avatar(request, &first_post.post_id, &is_cancelled),
         _ => None,
     };
 
     if duplicate_user_id.is_none() && resolved_handle.is_none() {
+        if request.sections.timeline {
         // Seleciona os posts novos (dedup por ledger). O tipo (vídeo/foto) só é
         // conhecido no download: o yt-dlp baixa o vídeo; posts de foto rendem
         // áudio-only e são roteados para o gallery-dl. Por isso a filtragem por
@@ -302,7 +314,11 @@ where
         let to_date = request.download_to_date.filter(|value| *value > 0);
         let mut seen: HashSet<String> = HashSet::new();
         let mut selected: Vec<EnumeratedPost> = Vec::new();
-        for post in listed.posts {
+        for post in listed
+            .take()
+            .map(|value| value.posts)
+            .unwrap_or_default()
+        {
             summary.normalized_post_count += 1;
             if !seen.insert(post.post_id.clone()) {
                 continue;
@@ -446,6 +462,7 @@ where
                 provider_post_key: post_id,
                 media_section: "timeline".to_string(),
             });
+        }
         }
 
         // Stories (efêmeros, 24h) e Reposts: via gallery-dl.

@@ -1612,6 +1612,8 @@ function normalizeTikTokSourceSyncOptions(value: unknown): TikTokSourceSyncOptio
     getTimeline: booleanValue(value, ['getTimeline', 'get_timeline'], DEFAULT_TIKTOK_SOURCE_SYNC_OPTIONS.getTimeline ?? true),
     getStoriesUser: booleanValue(value, ['getStoriesUser', 'get_stories_user'], DEFAULT_TIKTOK_SOURCE_SYNC_OPTIONS.getStoriesUser ?? false),
     getReposts: booleanValue(value, ['getReposts', 'get_reposts'], DEFAULT_TIKTOK_SOURCE_SYNC_OPTIONS.getReposts ?? false),
+    getLikedVideos: booleanValue(value, ['getLikedVideos', 'get_liked_videos'], DEFAULT_TIKTOK_SOURCE_SYNC_OPTIONS.getLikedVideos ?? false),
+    likedVideosLimit: Math.max(0, Math.trunc(numberValue(value, ['likedVideosLimit', 'liked_videos_limit'], DEFAULT_TIKTOK_SOURCE_SYNC_OPTIONS.likedVideosLimit ?? 100))),
     downloadVideos: booleanValue(value, ['downloadVideos', 'download_videos'], DEFAULT_TIKTOK_SOURCE_SYNC_OPTIONS.downloadVideos ?? true),
     downloadPhotos: booleanValue(value, ['downloadPhotos', 'download_photos'], DEFAULT_TIKTOK_SOURCE_SYNC_OPTIONS.downloadPhotos ?? true),
     useNativeTitle: booleanValue(value, ['useNativeTitle', 'use_native_title'], DEFAULT_TIKTOK_SOURCE_SYNC_OPTIONS.useNativeTitle ?? false),

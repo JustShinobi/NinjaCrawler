@@ -4,22 +4,23 @@ version = "0.8.0" # x-release-please-version
 description = "Local-first desktop crawler manager"
 authors = ["MetalDevOps"]
 edition = "2021"
+default-run = "ninjacrawler"
 
 [lib]
 name = "ninjacrawler_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
-tauri-build = { version = "2", features = [] }
+tauri-build = { version = "2.6.3", features = [] }
 
 [dependencies]
 chrono = { version = "0.4", features = ["clock"] }
 rusqlite = { version = "0.37", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tauri = { version = "2", features = ["protocol-asset", "tray-icon"] }
+tauri = { version = "2.11.5", features = ["protocol-asset", "tray-icon"] }
 tauri-plugin-window-state = "2.4.1"
-tauri-plugin-opener = "2"
+tauri-plugin-opener = "2.5.4"
 rfd = "0.15"
 uuid = { version = "1", features = ["v4", "fast-rng"] }
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls", "gzip", "brotli", "deflate"] }

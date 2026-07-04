@@ -1,10 +1,40 @@
 import { describe, expect, it } from 'vitest'
 import {
   createSourceSyncOptions,
+  createTikTokSourceSyncOptions,
   createTwitterSourceSyncOptions,
   DEFAULT_TWITTER_SOURCE_SYNC_OPTIONS,
   resolveTwitterSourceSyncOptions,
 } from './sourceSyncOptions'
+
+describe('tiktok source sync options', () => {
+  it('preserves explicit false values for every section', () => {
+    const options = createTikTokSourceSyncOptions({
+      getTimeline: false,
+      getStoriesUser: false,
+      getReposts: false,
+      getLikedVideos: false,
+      likedVideosLimit: 0,
+      likedVideosIncremental: false,
+      likedVideosKnownPageThreshold: 5,
+    })
+
+    expect(options.getTimeline).toBe(false)
+    expect(options.getStoriesUser).toBe(false)
+    expect(options.getReposts).toBe(false)
+    expect(options.getLikedVideos).toBe(false)
+    expect(options.likedVideosLimit).toBe(0)
+    expect(options.likedVideosIncremental).toBe(false)
+    expect(options.likedVideosKnownPageThreshold).toBe(5)
+  })
+
+  it('enables safe incremental liked-video scans by default', () => {
+    const options = createTikTokSourceSyncOptions()
+
+    expect(options.likedVideosIncremental).toBe(true)
+    expect(options.likedVideosKnownPageThreshold).toBe(3)
+  })
+})
 
 describe('twitter source sync options', () => {
   it('mirrors the SCrawler defaults', () => {

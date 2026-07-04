@@ -16,34 +16,33 @@ use std::time::Duration as StdDuration;
 use uuid::Uuid;
 
 use crate::domain::models::{
+    default_tiktok_source_sync_options, default_twitter_source_sync_options,
+};
+use crate::domain::models::{
     AccountSyncRun, AppSetting, AppSettingUpsert, BatchSourceProfilePatch, CloneSyncPlanInput,
     CompanionAccountCandidate, CompanionAccountCapture, CompanionAccountImportInput,
     CompanionAccountImportResult, CompanionAccountPreview, DesktopRuntimeState,
-    ImportMethodDescriptor, ImportPreview, ImportPreviewOptions,
-    ImportPreviewProfile, ImportPreviewSummary, ImportProblem, ImportProviderDescriptor,
-    ImportRootDescriptor, ImportRunProfileResult, ImportRunRequest, ImportRunResult,
+    ImportMethodDescriptor, ImportPreview, ImportPreviewOptions, ImportPreviewProfile,
+    ImportPreviewSummary, ImportProblem, ImportProviderDescriptor, ImportRootDescriptor,
+    ImportRunProfileResult, ImportRunRequest, ImportRunResult,
     InstagramExtractImageFromVideoSections, InstagramNamingLedgerBackfillResult,
     InstagramSourceSyncOptions, InstagramSyncOptionsPatch, MediaGalleryFile, MediaGalleryPost,
-    MoveSyncPlanInput, ProviderAccount,
-    ProviderAccountCookie, ProviderAccountCookieImport, ProviderAccountEditor,
-    ProviderAccountImportState,
-    ProviderAccountSession, ProviderAccountSettingValue, ProviderAccountSettingValueKind,
-    ProviderAccountUpsert, RunSyncPlanNowInput, RuntimeLogContext, RuntimeLogEntry,
-    RuntimeLogQuery, SchedulerGroup, SchedulerGroupUpsert, SchedulerPlanCriteria,
-    SchedulerPlanNotifications, SchedulerSet, SchedulerSetUpsert, SetSyncPlanPauseInput,
-    SkipSyncPlanInput, SourceAvailabilityCheckItem, SourceAvailabilityCheckResult,
-    SingleVideo, SourceMediaGallery, SourceProfile,
+    MoveSyncPlanInput, ProviderAccount, ProviderAccountCookie, ProviderAccountCookieImport,
+    ProviderAccountEditor, ProviderAccountImportState, ProviderAccountSession,
+    ProviderAccountSettingValue, ProviderAccountSettingValueKind, ProviderAccountUpsert,
+    RunSyncPlanNowInput, RuntimeLogContext, RuntimeLogEntry, RuntimeLogQuery, SchedulerGroup,
+    SchedulerGroupUpsert, SchedulerPlanCriteria, SchedulerPlanNotifications, SchedulerSet,
+    SchedulerSetUpsert, SetSyncPlanPauseInput, SingleVideo, SkipSyncPlanInput,
+    SourceAvailabilityCheckItem, SourceAvailabilityCheckResult, SourceMediaGallery, SourceProfile,
     SourceProfileDeleteMode, SourceProfileUpsert, SourceSyncOptions, SourceSyncRun, SyncPlan,
     SyncPlanRun, SyncPlanTargetPreview, SyncPlanTargetPreviewInput, SyncPlanTargetPreviewSource,
     SyncPlanUpsert, TikTokSourceSyncOptions, TwitterSourceSyncOptions, WorkspaceSnapshot,
 };
-use crate::domain::models::{
-    default_tiktok_source_sync_options, default_twitter_source_sync_options,
-};
 use crate::infrastructure::storage::StorageLayout;
 use crate::infrastructure::{
-    connector_debug, connector_runtime, database, instagram_connector, runtime_log, session_secret_store,
-    source_sync_runtime, storage, tiktok_connector, twitter_connector,
+    connector_debug, connector_runtime, database, instagram_connector, runtime_log,
+    session_secret_store, source_sync_runtime, storage, tiktok_connector, tiktok_likes_runtime,
+    twitter_connector,
 };
 use crate::providers;
 
@@ -268,7 +267,9 @@ fn normalize_source_sync_options(provider: &str, options: &SourceSyncOptions) ->
         }
     } else if provider.eq_ignore_ascii_case("twitter") {
         SourceSyncOptions {
-            twitter: Some(normalize_twitter_source_sync_options(options.twitter.clone())),
+            twitter: Some(normalize_twitter_source_sync_options(
+                options.twitter.clone(),
+            )),
             ..Default::default()
         }
     } else if provider.eq_ignore_ascii_case("tiktok") {
@@ -291,6 +292,14 @@ fn normalize_tiktok_source_sync_options(
     merged.get_timeline = merged.get_timeline.or(defaults.get_timeline);
     merged.get_stories_user = merged.get_stories_user.or(defaults.get_stories_user);
     merged.get_reposts = merged.get_reposts.or(defaults.get_reposts);
+    merged.get_liked_videos = merged.get_liked_videos.or(defaults.get_liked_videos);
+    merged.liked_videos_limit = merged.liked_videos_limit.or(defaults.liked_videos_limit);
+    merged.liked_videos_incremental = merged
+        .liked_videos_incremental
+        .or(defaults.liked_videos_incremental);
+    merged.liked_videos_known_page_threshold = merged
+        .liked_videos_known_page_threshold
+        .or(defaults.liked_videos_known_page_threshold);
     merged.download_videos = merged.download_videos.or(defaults.download_videos);
     merged.download_photos = merged.download_photos.or(defaults.download_photos);
     merged.use_native_title = merged.use_native_title.or(defaults.use_native_title);
@@ -372,6 +381,27 @@ fn source_tiktok_sync_options(source: &SourceProfile) -> TikTokSourceSyncOptions
     normalize_source_sync_options(&source.provider, &source.sync_options)
         .tiktok
         .unwrap_or_else(|| normalize_tiktok_source_sync_options(None))
+}
+
+fn twitter_model_selection(
+    options: &TwitterSourceSyncOptions,
+) -> twitter_connector::TwitterModelSelection {
+    twitter_connector::TwitterModelSelection {
+        media: options.media_model.unwrap_or(true),
+        profile: options.profile_model.unwrap_or(true),
+        search: options.search_model.unwrap_or(false),
+        likes: options.likes_model.unwrap_or(false),
+    }
+}
+
+fn tiktok_section_selection(
+    options: &TikTokSourceSyncOptions,
+) -> tiktok_connector::TikTokSectionSelection {
+    tiktok_connector::TikTokSectionSelection {
+        timeline: options.get_timeline.unwrap_or(true),
+        stories: options.get_stories_user.unwrap_or(false),
+        reposts: options.get_reposts.unwrap_or(false),
+    }
 }
 
 /// Grava a identidade estável do Instagram diretamente no perfil. O histórico
@@ -584,12 +614,18 @@ fn preserve_persisted_twitter_metadata(
         .twitter
         .get_or_insert_with(default_twitter_source_sync_options);
     if !incoming_hint_present {
-        if let Some(hint) = persisted.user_id_hint.filter(|value| !value.trim().is_empty()) {
+        if let Some(hint) = persisted
+            .user_id_hint
+            .filter(|value| !value.trim().is_empty())
+        {
             twitter.user_id_hint = Some(hint);
         }
     }
     if !incoming_special_present {
-        if let Some(special) = persisted.special_path.filter(|value| !value.trim().is_empty()) {
+        if let Some(special) = persisted
+            .special_path
+            .filter(|value| !value.trim().is_empty())
+        {
             twitter.special_path = Some(special);
         }
     }
@@ -640,12 +676,18 @@ fn preserve_persisted_tiktok_metadata(
         .tiktok
         .get_or_insert_with(default_tiktok_source_sync_options);
     if !incoming_hint_present {
-        if let Some(hint) = persisted.user_id_hint.filter(|value| !value.trim().is_empty()) {
+        if let Some(hint) = persisted
+            .user_id_hint
+            .filter(|value| !value.trim().is_empty())
+        {
             tiktok.user_id_hint = Some(hint);
         }
     }
     if !incoming_special_present {
-        if let Some(special) = persisted.special_path.filter(|value| !value.trim().is_empty()) {
+        if let Some(special) = persisted
+            .special_path
+            .filter(|value| !value.trim().is_empty())
+        {
             tiktok.special_path = Some(special);
         }
     }
@@ -718,8 +760,9 @@ fn preserve_persisted_instagram_metadata(
         .map(str::trim)
         .map(|value| !value.is_empty())
         .unwrap_or(false);
-    let incoming_prev_present =
-        instagram_handles_present(incoming.and_then(|instagram| instagram.previous_handles.as_ref()));
+    let incoming_prev_present = instagram_handles_present(
+        incoming.and_then(|instagram| instagram.previous_handles.as_ref()),
+    );
     if incoming_hint_present && incoming_prev_present {
         return;
     }
@@ -1205,7 +1248,10 @@ pub fn load_all_asset_media_paths() -> Result<Vec<PathBuf>, String> {
         // mediaPath de cada conta (todos os providers usam `<provider>.account.mediaPath`).
         for account in load_accounts(connection)? {
             let settings = load_provider_account_settings_map(connection, &account.id)?;
-            let key = format!("{}.account.mediaPath", account.provider.to_ascii_lowercase());
+            let key = format!(
+                "{}.account.mediaPath",
+                account.provider.to_ascii_lowercase()
+            );
             if let Some(media_path) = setting_value(&settings, &key) {
                 let trimmed = media_path.trim();
                 if !trimmed.is_empty() {
@@ -1935,7 +1981,9 @@ const GALLERY_IMAGE_EXTS: [&str; 6] = ["jpg", "jpeg", "png", "webp", "heic", "gi
 fn gallery_timestamp_from_tiktok_id(post_id: &str) -> Option<i64> {
     let id = post_id.trim().parse::<u64>().ok()?;
     let seconds = (id >> 32) as i64;
-    (1_400_000_000..4_000_000_000).contains(&seconds).then_some(seconds)
+    (1_400_000_000..4_000_000_000)
+        .contains(&seconds)
+        .then_some(seconds)
 }
 
 /// Converte o prefixo de data dos nomes (`YYYY-MM-DD HH.MM.SS`, hora local) em
@@ -2029,7 +2077,8 @@ fn derive_post_metadata(
     let mut post_id: Option<String> = None;
     let mut best_len = 0usize;
     for token in &tokens {
-        if token.len() >= 10 && token.chars().all(|c| c.is_ascii_digit()) && token.len() >= best_len {
+        if token.len() >= 10 && token.chars().all(|c| c.is_ascii_digit()) && token.len() >= best_len
+        {
             best_len = token.len();
             post_id = Some((*token).to_string());
         }
@@ -2055,7 +2104,9 @@ fn derive_post_metadata(
             && t.chars().all(|c| c.is_ascii_digit())
             && Some(t.to_string()) != post_id
         {
-            t.parse::<i64>().ok().filter(|v| (1_400_000_000..4_000_000_000).contains(v))
+            t.parse::<i64>()
+                .ok()
+                .filter(|v| (1_400_000_000..4_000_000_000).contains(v))
         } else {
             None
         }
@@ -2154,7 +2205,8 @@ fn load_gallery_media_ledger_links(
         }
         // Fallback para imports legados (SCrawler) baixados ANTES do shortcode ser
         // persistido no ledger: lê o código (casing original) direto do XML.
-        for (relative_path, (post_code, section)) in load_legacy_instagram_post_codes(profile_root) {
+        for (relative_path, (post_code, section)) in load_legacy_instagram_post_codes(profile_root)
+        {
             let entry = links.entry(relative_path).or_default();
             if entry.post_code.is_none() {
                 entry.post_code = post_code;
@@ -2335,7 +2387,9 @@ pub fn load_source_media_gallery(source_id: String) -> Result<SourceMediaGallery
                 None
             };
             // Liga ao ledger pelo relative_path (que no banco é lowercased).
-            let link = ledger_links.get(&relative_path.to_ascii_lowercase()).cloned();
+            let link = ledger_links
+                .get(&relative_path.to_ascii_lowercase())
+                .cloned();
             // Instagram: agrupa o carrossel pelo shortcode — todas as fotos do
             // post compartilham o mesmo code, então viram UM card (slideshow).
             // Sem code (mídia antiga sem link), cai para o id derivado do nome.
@@ -2397,7 +2451,8 @@ pub fn load_source_media_gallery(source_id: String) -> Result<SourceMediaGallery
                     }
                 }
                 if entry.ledger_post_code.is_none() {
-                    if let Some(post_code) = link.post_code.filter(|value| !value.trim().is_empty()) {
+                    if let Some(post_code) = link.post_code.filter(|value| !value.trim().is_empty())
+                    {
                         entry.ledger_post_code = Some(post_code);
                     }
                 }
@@ -2413,8 +2468,8 @@ pub fn load_source_media_gallery(source_id: String) -> Result<SourceMediaGallery
             // Twitter: o status id não está no nome nem (para mídia antiga) no
             // ledger; recupera do XML do SCrawler casando pelo media key.
             if entry.ledger_post_key.is_none() && !twitter_post_keys.is_empty() {
-                if let Some(status_id) =
-                    twitter_media_key_from_file_name(file_name).and_then(|key| twitter_post_keys.get(&key))
+                if let Some(status_id) = twitter_media_key_from_file_name(file_name)
+                    .and_then(|key| twitter_post_keys.get(&key))
                 {
                     entry.ledger_post_key = Some(status_id.clone());
                 }
@@ -2550,11 +2605,11 @@ fn extract_post_tombstone_keys(
 ) -> (Option<String>, Option<String>) {
     match provider {
         "tiktok" => (
-            post.post_id
-                .clone()
-                .or_else(|| post.post_url.as_deref().and_then(|url| {
+            post.post_id.clone().or_else(|| {
+                post.post_url.as_deref().and_then(|url| {
                     url_segment_after(url, "/video/").or_else(|| url_segment_after(url, "/photo/"))
-                })),
+                })
+            }),
             None,
         ),
         "twitter" => (
@@ -2638,7 +2693,8 @@ pub fn delete_source_media(
         };
         let profile_root =
             resolved_source_media_output_root_with_connection(connection, layout, &source_profile)?;
-        let canonical_root = fs::canonicalize(&profile_root).unwrap_or_else(|_| profile_root.clone());
+        let canonical_root =
+            fs::canonicalize(&profile_root).unwrap_or_else(|_| profile_root.clone());
 
         ensure_provider_deleted_media_table(connection)?;
         let now = now_timestamp();
@@ -3090,10 +3146,9 @@ pub fn check_source_availability(
                 .and_then(|instagram| instagram.user_id_hint.clone())
                 .map(|value| value.trim().to_string())
                 .filter(|value| !value.is_empty());
-            let history_user_id_hint =
-                load_latest_instagram_profile_user_id_hint(connection, &id)
-                    .ok()
-                    .flatten();
+            let history_user_id_hint = load_latest_instagram_profile_user_id_hint(connection, &id)
+                .ok()
+                .flatten();
             let user_id_hint = preferred_instagram_user_id_hint(
                 source_user_id_hint.as_deref(),
                 history_user_id_hint.as_deref(),
@@ -3232,22 +3287,18 @@ pub fn check_source_availability(
                     Some(InstagramIdentityErrorClassification::PrivateOrRestricted),
                     Some(hint),
                     false,
-                ) => {
-                    Some(instagram_connector::resolve_profile_identity(
-                        &request,
-                        Some(hint),
-                    ))
-                }
+                ) => Some(instagram_connector::resolve_profile_identity(
+                    &request,
+                    Some(hint),
+                )),
                 (
                     Some(InstagramIdentityErrorClassification::UsernameUnresolvable),
                     Some(hint),
                     false,
-                ) => {
-                    Some(instagram_connector::resolve_profile_identity(
-                        &request,
-                        Some(hint),
-                    ))
-                }
+                ) => Some(instagram_connector::resolve_profile_identity(
+                    &request,
+                    Some(hint),
+                )),
                 _ => None,
             };
 
@@ -3589,8 +3640,13 @@ pub fn run_sync_plan_now(
         "manual"
     };
     with_workspace(|connection, layout| {
-        let source_ids =
-            run_sync_plan_now_with_connection(connection, layout, &input.id, trigger, &now_timestamp())?;
+        let source_ids = run_sync_plan_now_with_connection(
+            connection,
+            layout,
+            &input.id,
+            trigger,
+            &now_timestamp(),
+        )?;
         let snapshot = load_snapshot(connection, layout)?;
         let requests = source_ids
             .into_iter()
@@ -3659,8 +3715,8 @@ pub fn clone_sync_plan(input: CloneSyncPlanInput) -> Result<WorkspaceSnapshot, S
     })
 }
 
-pub fn process_scheduler_tick(
-) -> Result<(WorkspaceSnapshot, Vec<PlanSyncEnqueueRequest>), String> {
+pub fn process_scheduler_tick() -> Result<(WorkspaceSnapshot, Vec<PlanSyncEnqueueRequest>), String>
+{
     with_workspace(|connection, layout| {
         let requests =
             process_scheduler_tick_with_connection(connection, layout, &now_timestamp())?;
@@ -3787,9 +3843,11 @@ pub fn sync_delay_for_account(account_id: Option<&str>, provider: &str) -> u64 {
             }
         }
 
-        Ok(load_app_setting_value(connection, SYNC_DELAY_BETWEEN_PROFILES_SETTING_KEY)?
-            .and_then(|value| value.trim().parse::<u64>().ok())
-            .unwrap_or(0))
+        Ok(
+            load_app_setting_value(connection, SYNC_DELAY_BETWEEN_PROFILES_SETTING_KEY)?
+                .and_then(|value| value.trim().parse::<u64>().ok())
+                .unwrap_or(0),
+        )
     })
     .unwrap_or(0)
     .min(3600)
@@ -3929,7 +3987,9 @@ fn run_yt_dlp_video_download(
     );
     let mut command = Command::new(&yt_dlp);
     configure_background_command(&mut command);
-    command.env("PYTHONUTF8", "1").env("PYTHONIOENCODING", "utf-8");
+    command
+        .env("PYTHONUTF8", "1")
+        .env("PYTHONIOENCODING", "utf-8");
     command
         .arg("--no-playlist")
         .arg("--no-simulate")
@@ -3982,7 +4042,9 @@ fn run_yt_dlp_video_download(
     })?;
     let absolute_path = PathBuf::from(&file_path);
     if !absolute_path.exists() {
-        return Err(format!("Downloaded file was not found on disk: {file_path}"));
+        return Err(format!(
+            "Downloaded file was not found on disk: {file_path}"
+        ));
     }
 
     let mut fields = meta_line.as_deref().unwrap_or("").split('\t');
@@ -4759,7 +4821,8 @@ fn delete_provider_account_with_connection(
         session_secret_store::delete_secret(layout, &secret_ref)?;
     }
     if let Some(secret_ref) = load_account_import_backup_secret_ref(connection, &id)? {
-        if load_account_session_secret_ref(connection, &id)?.as_deref() != Some(secret_ref.as_str()) {
+        if load_account_session_secret_ref(connection, &id)?.as_deref() != Some(secret_ref.as_str())
+        {
             session_secret_store::delete_secret(layout, &secret_ref)?;
         }
     }
@@ -4810,15 +4873,27 @@ fn merge_protected_authorization_settings(
             ("instagram.auth.igWwwClaim", metadata.ig_www_claim.clone()),
             ("instagram.auth.userAgent", metadata.user_agent.clone()),
             ("instagram.auth.secChUa", metadata.sec_ch_ua.clone()),
-            ("instagram.auth.secChUaFullVersionList", metadata.sec_ch_ua_full_version_list.clone()),
-            ("instagram.auth.secChUaPlatformVersion", metadata.sec_ch_ua_platform_version.clone()),
+            (
+                "instagram.auth.secChUaFullVersionList",
+                metadata.sec_ch_ua_full_version_list.clone(),
+            ),
+            (
+                "instagram.auth.secChUaPlatformVersion",
+                metadata.sec_ch_ua_platform_version.clone(),
+            ),
         ],
         "twitter" => vec![
-            ("twitter.auth.useUserAgent", metadata.user_agent.as_ref().map(|_| "true".to_string())),
+            (
+                "twitter.auth.useUserAgent",
+                metadata.user_agent.as_ref().map(|_| "true".to_string()),
+            ),
             ("twitter.auth.userAgent", metadata.user_agent.clone()),
         ],
         "tiktok" => vec![
-            ("tiktok.auth.useUserAgent", metadata.user_agent.as_ref().map(|_| "true".to_string())),
+            (
+                "tiktok.auth.useUserAgent",
+                metadata.user_agent.as_ref().map(|_| "true".to_string()),
+            ),
             ("tiktok.auth.userAgent", metadata.user_agent.clone()),
         ],
         _ => Vec::new(),
@@ -4871,7 +4946,8 @@ fn save_provider_account_settings_with_connection(
 ) -> Result<ProviderAccountEditor, String> {
     ensure_provider_account_exists(connection, &account_id)?;
     let account = load_provider_account_by_id(connection, &account_id)?;
-    let protect_authorization = load_provider_account_import_state(connection, &account_id)?.is_some();
+    let protect_authorization =
+        load_provider_account_import_state(connection, &account_id)?.is_some();
 
     let mut seen_keys = HashSet::new();
     let mut serialized_values = Vec::new();
@@ -5001,7 +5077,11 @@ fn update_protected_authorization_metadata(
             "UPDATE provider_account_sessions
              SET fingerprint = ?2, updated_at = ?3
              WHERE account_id = ?1",
-            params![account_id, session_fingerprint(&updated_payload), now_timestamp()],
+            params![
+                account_id,
+                session_fingerprint(&updated_payload),
+                now_timestamp()
+            ],
         )
         .map_err(|error| error.to_string())?;
     Ok(())
@@ -6034,8 +6114,10 @@ fn load_legacy_instagram_post_codes(
         return map;
     };
     for entry in entries {
-        let relative_path =
-            legacy_instagram_candidate_relative_path(&entry.file_name, entry.special_folder.as_deref());
+        let relative_path = legacy_instagram_candidate_relative_path(
+            &entry.file_name,
+            entry.special_folder.as_deref(),
+        );
         if relative_path.is_empty() {
             continue;
         }
@@ -6101,7 +6183,10 @@ fn find_user_twitter_data_xml(profile_root: &Path) -> Result<Option<PathBuf>, St
 /// basename of the `File` attribute in the SCrawler `User_Twitter_*_Data.xml`,
 /// letting us pair a file on disk with its tweet status id.
 fn twitter_media_key_from_file_name(file_name: &str) -> Option<String> {
-    let stem = file_name.rsplit_once('.').map(|(s, _)| s).unwrap_or(file_name);
+    let stem = file_name
+        .rsplit_once('.')
+        .map(|(s, _)| s)
+        .unwrap_or(file_name);
     let (_, rest) = strip_gallery_date_prefix(stem);
     let mut key = rest.trim().to_ascii_lowercase();
     if let Some(stripped) = key.strip_prefix("gif_") {
@@ -6129,7 +6214,8 @@ fn load_legacy_twitter_post_keys(profile_root: &Path) -> HashMap<String, String>
             continue;
         }
         if let Some(media_key) = twitter_media_key_from_file_name(&entry.file_name) {
-            map.entry(media_key).or_insert_with(|| status_id.to_string());
+            map.entry(media_key)
+                .or_insert_with(|| status_id.to_string());
         }
     }
     map
@@ -6990,12 +7076,7 @@ fn execute_twitter_source_sync_with_connection(
         user_agent,
         profile_root: profile_root.clone(),
         cache_root,
-        models: twitter_connector::TwitterModelSelection {
-            media: options.media_model.unwrap_or(true),
-            profile: options.profile_model.unwrap_or(true),
-            search: options.search_model.unwrap_or(false),
-            likes: options.likes_model.unwrap_or(false),
-        },
+        models: twitter_model_selection(&options),
         ledger_post_keys,
         ledger_media_keys,
         existing_relative_paths,
@@ -7172,7 +7253,12 @@ fn execute_twitter_source_sync_with_connection(
                         &started_at,
                         &finished_at,
                     )?;
-                    propagate_source_sync_account_health(connection, context, &outcome, &finished_at)?;
+                    propagate_source_sync_account_health(
+                        connection,
+                        context,
+                        &outcome,
+                        &finished_at,
+                    )?;
                     source_sync_runtime::report_source_sync_progress(
                         &context.source.id,
                         Some(100),
@@ -7251,8 +7337,7 @@ fn execute_twitter_source_sync_with_connection(
                         }
                     }
                 });
-                let resolved_avatar =
-                    provider_avatar.or_else(|| find_source_avatar(&profile_root));
+                let resolved_avatar = provider_avatar.or_else(|| find_source_avatar(&profile_root));
                 if let Some(avatar_path) = resolved_avatar {
                     let _ = update_source_profile_image(
                         connection,
@@ -7289,7 +7374,10 @@ fn execute_twitter_source_sync_with_connection(
             }
         }
         Err(error) => {
-            let cancelled_by_user = error.trim().to_ascii_lowercase().contains("cancelled by user");
+            let cancelled_by_user = error
+                .trim()
+                .to_ascii_lowercase()
+                .contains("cancelled by user");
             SourceSyncOutcome {
                 tool: "internal.twitter".to_string(),
                 status: if cancelled_by_user {
@@ -7340,7 +7428,8 @@ fn source_twitter_sync_options_with_override(
     source: &SourceProfile,
     sync_options_override: Option<&SourceSyncOptions>,
 ) -> TwitterSourceSyncOptions {
-    if let Some(override_options) = sync_options_override.and_then(|options| options.twitter.clone())
+    if let Some(override_options) =
+        sync_options_override.and_then(|options| options.twitter.clone())
     {
         return normalize_twitter_source_sync_options(Some(override_options));
     }
@@ -7351,7 +7440,8 @@ fn source_tiktok_sync_options_with_override(
     source: &SourceProfile,
     sync_options_override: Option<&SourceSyncOptions>,
 ) -> TikTokSourceSyncOptions {
-    if let Some(override_options) = sync_options_override.and_then(|options| options.tiktok.clone()) {
+    if let Some(override_options) = sync_options_override.and_then(|options| options.tiktok.clone())
+    {
         return normalize_tiktok_source_sync_options(Some(override_options));
     }
     source_tiktok_sync_options(source)
@@ -7370,6 +7460,33 @@ fn execute_tiktok_source_sync_with_connection(
 ) -> Result<SourceSyncOutcome, String> {
     let options = source_tiktok_sync_options_with_override(&context.source, sync_options_override);
     let started_at = now_timestamp();
+    let timeline_enabled = options.get_timeline.unwrap_or(true);
+    let stories_enabled = options.get_stories_user.unwrap_or(false);
+    let reposts_enabled = options.get_reposts.unwrap_or(false);
+    let liked_videos_enabled = options.get_liked_videos.unwrap_or(false);
+    let liked_videos_limit = options.liked_videos_limit.unwrap_or(100);
+    let liked_videos_incremental = options.liked_videos_incremental.unwrap_or(true);
+    let liked_videos_known_page_threshold = options.liked_videos_known_page_threshold.unwrap_or(3);
+    if liked_videos_limit < 0 {
+        return Err("TikTok liked videos limit cannot be negative.".to_string());
+    }
+    if liked_videos_known_page_threshold < 1 {
+        return Err("TikTok liked videos known-page threshold must be at least 1.".to_string());
+    }
+    let target_video_url = options
+        .target_video_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let profile_sections_enabled =
+        timeline_enabled || stories_enabled || reposts_enabled || target_video_url.is_some();
+    if !profile_sections_enabled && !liked_videos_enabled {
+        return Err(
+            "No TikTok sync section is enabled. Select Timeline, User Stories, Reposts, or Liked videos."
+                .to_string(),
+        );
+    }
 
     let handle = sanitize_source_handle("tiktok", &context.source.handle)
         .trim_start_matches('@')
@@ -7410,8 +7527,11 @@ fn execute_tiktok_source_sync_with_connection(
     let yt_dlp_executable =
         connector_runtime::resolve_connector_executable(connection, layout, "yt-dlp")?;
     // Usado só para os Stories (extractor `/stories` do gallery-dl).
-    let gallery_dl_executable =
-        connector_runtime::resolve_connector_executable(connection, layout, "gallery-dl")?;
+    let gallery_dl_executable = if stories_enabled || reposts_enabled {
+        connector_runtime::resolve_connector_executable(connection, layout, "gallery-dl")?
+    } else {
+        String::new()
+    };
 
     let ledger_post_keys =
         load_provider_sync_post_ledger_keys(connection, "tiktok", &context.source.id)?;
@@ -7427,17 +7547,8 @@ fn execute_tiktok_source_sync_with_connection(
         user_agent,
         profile_root: profile_root.clone(),
         cache_root,
-        sections: tiktok_connector::TikTokSectionSelection {
-            timeline: options.get_timeline.unwrap_or(true),
-            stories: options.get_stories_user.unwrap_or(false),
-            reposts: options.get_reposts.unwrap_or(false),
-        },
-        target_video_url: options
-            .target_video_url
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(str::to_string),
+        sections: tiktok_section_selection(&options),
+        target_video_url,
         download_videos: options.download_videos.unwrap_or(true),
         download_photos: options.download_photos.unwrap_or(true),
         separate_video_folder: options.separate_video_folder.unwrap_or(false),
@@ -7474,36 +7585,113 @@ fn execute_tiktok_source_sync_with_connection(
         Some(0),
     );
 
+    let likes_execution = if liked_videos_enabled {
+        match source_sync_runtime::registered_app_handle() {
+            Ok(app) => tiktok_likes_runtime::run_source_sync(
+                &app,
+                tiktok_likes_runtime::TikTokLikesSourceRequest {
+                    account_id: context.account.id.clone(),
+                    source_id: context.source.id.clone(),
+                    source_handle: handle.clone(),
+                    profile_root: profile_root.clone(),
+                    item_limit: liked_videos_limit as usize,
+                    incremental: liked_videos_incremental,
+                    known_page_threshold: liked_videos_known_page_threshold as usize,
+                },
+                |percent, label, detail, indeterminate, downloaded| {
+                    let queue_percent = percent.map(|value| {
+                        if profile_sections_enabled {
+                            value / 2
+                        } else {
+                            value
+                        }
+                    });
+                    source_sync_runtime::report_source_sync_progress(
+                        &context.source.id,
+                        queue_percent,
+                        Some(label),
+                        Some(detail),
+                        indeterminate,
+                        downloaded,
+                    );
+                },
+                || cancel_token.load(Ordering::SeqCst),
+            ),
+            Err(error) => Err(error),
+        }
+    } else {
+        Ok(tiktok_likes_runtime::TikTokLikesSyncResult::default())
+    };
     let is_first_sync = context.source.last_synced_at.is_none();
     let dup_source_id = context.source.id.clone();
-    let execution = tiktok_connector::run_profile_sync(
-        &request,
-        |progress| {
-            source_sync_runtime::report_source_sync_progress(
-                &context.source.id,
-                progress.progress_percent,
-                Some(progress.label),
-                Some(progress.detail),
-                progress.indeterminate,
-                progress.downloaded_items,
-            );
-        },
-        || cancel_token.load(Ordering::SeqCst),
-        |user_id| {
-            is_first_sync
-                && find_source_with_same_user_id(connection, "tiktok", user_id, &dup_source_id)
-                    .ok()
-                    .flatten()
-                    .is_some()
-        },
-    );
+    let combined_execution = match likes_execution {
+        Err(error) => Err(error),
+        Ok(likes) => {
+            let profile_execution = if profile_sections_enabled {
+                tiktok_connector::run_profile_sync(
+                    &request,
+                    |progress| {
+                        let queue_percent = progress.progress_percent.map(|value| {
+                            if liked_videos_enabled {
+                                50 + (value / 2)
+                            } else {
+                                value
+                            }
+                        });
+                        let downloaded_items = progress
+                            .downloaded_items
+                            .map(|value| value + likes.downloaded as u32);
+                        source_sync_runtime::report_source_sync_progress(
+                            &context.source.id,
+                            queue_percent,
+                            Some(progress.label),
+                            Some(progress.detail),
+                            progress.indeterminate,
+                            downloaded_items,
+                        );
+                    },
+                    || cancel_token.load(Ordering::SeqCst),
+                    |user_id| {
+                        is_first_sync
+                            && find_source_with_same_user_id(
+                                connection,
+                                "tiktok",
+                                user_id,
+                                &dup_source_id,
+                            )
+                            .ok()
+                            .flatten()
+                            .is_some()
+                    },
+                )
+            } else {
+                Ok(tiktok_connector::TikTokConnectorResult {
+                    observed_posts: Vec::new(),
+                    downloaded_media: Vec::new(),
+                    section_errors: Vec::new(),
+                    rate_limited: false,
+                    limit_aborted: false,
+                    resolved_user_id: None,
+                    resolved_avatar_url: None,
+                    duplicate_user_id: None,
+                    resolved_handle: None,
+                    manifest_summary: tiktok_connector::TikTokManifestSummary::default(),
+                })
+            };
+            profile_execution.map(|result| (result, likes))
+        }
+    };
     clear_source_sync_cancel_token(&context.source.id);
     let finished_at = now_timestamp();
 
-    let command_preview = format!("internal.tiktok profile {} -> {}", handle, profile_root.display());
+    let command_preview = format!(
+        "internal.tiktok profile {} -> {}",
+        handle,
+        profile_root.display()
+    );
 
-    let outcome = match execution {
-        Ok(result) => {
+    let outcome = match combined_execution {
+        Ok((result, likes)) => {
             if let Some(user_id) = result.duplicate_user_id.as_deref() {
                 if let Some(dup_outcome) = detect_duplicate_user_id_on_first_sync(
                     connection,
@@ -7601,7 +7789,12 @@ fn execute_tiktok_source_sync_with_connection(
                         &started_at,
                         &finished_at,
                     )?;
-                    propagate_source_sync_account_health(connection, context, &outcome, &finished_at)?;
+                    propagate_source_sync_account_health(
+                        connection,
+                        context,
+                        &outcome,
+                        &finished_at,
+                    )?;
                     source_sync_runtime::report_source_sync_progress(
                         &context.source.id,
                         Some(100),
@@ -7658,8 +7851,12 @@ fn execute_tiktok_source_sync_with_connection(
             )?;
 
             if let Some(user_id) = result.resolved_user_id.as_deref() {
-                let _ =
-                    persist_tiktok_user_id_hint(connection, &context.source.id, user_id, &finished_at);
+                let _ = persist_tiktok_user_id_hint(
+                    connection,
+                    &context.source.id,
+                    user_id,
+                    &finished_at,
+                );
             }
 
             if !context.source.profile_image_custom {
@@ -7696,13 +7893,28 @@ fn execute_tiktok_source_sync_with_connection(
                 }
             }
 
-            let downloaded = result.downloaded_media.len();
+            let downloaded = result.downloaded_media.len() + likes.downloaded;
             let mut summary = format!(
                 "TikTok sync succeeded. Downloaded {} media item(s) from {} new post(s) (queued {}).",
                 downloaded,
                 result.observed_posts.len(),
                 result.manifest_summary.queued_asset_count
             );
+            if liked_videos_enabled {
+                summary.push_str(&format!(
+                    " Liked videos: read {} pages, discovered {}, downloaded {}, skipped {} existing, failed {}{}.",
+                    likes.pages_read,
+                    likes.discovered,
+                    likes.downloaded,
+                    likes.skipped_existing,
+                    likes.failed,
+                    if likes.stopped_incrementally {
+                        ", stopped at the configured known-page threshold"
+                    } else {
+                        ""
+                    }
+                ));
+            }
             if result.limit_aborted {
                 summary.push_str(" Rate limit reached; remaining posts were skipped.");
             }
@@ -7722,7 +7934,10 @@ fn execute_tiktok_source_sync_with_connection(
             }
         }
         Err(error) => {
-            let cancelled_by_user = error.trim().to_ascii_lowercase().contains("cancelled by user");
+            let cancelled_by_user = error
+                .trim()
+                .to_ascii_lowercase()
+                .contains("cancelled by user");
             SourceSyncOutcome {
                 tool: "internal.tiktok".to_string(),
                 status: if cancelled_by_user {
@@ -7743,7 +7958,14 @@ fn execute_tiktok_source_sync_with_connection(
         }
     };
 
-    persist_source_sync_run(connection, context, &outcome, trigger, &started_at, &finished_at)?;
+    persist_source_sync_run(
+        connection,
+        context,
+        &outcome,
+        trigger,
+        &started_at,
+        &finished_at,
+    )?;
     propagate_source_sync_account_health(connection, context, &outcome, &finished_at)?;
     source_sync_runtime::report_source_sync_progress(
         &context.source.id,
@@ -10718,12 +10940,14 @@ fn process_scheduler_tick_with_connection(
                     "scheduler",
                     now,
                 )?;
-                requests.extend(source_ids.into_iter().map(|source_id| {
-                    PlanSyncEnqueueRequest {
-                        source_id,
-                        trigger: "scheduler".to_string(),
-                    }
-                }));
+                requests.extend(
+                    source_ids
+                        .into_iter()
+                        .map(|source_id| PlanSyncEnqueueRequest {
+                            source_id,
+                            trigger: "scheduler".to_string(),
+                        }),
+                );
             } else {
                 update_sync_plan_runtime_state(
                     connection,
@@ -11650,20 +11874,32 @@ fn validate_companion_capture(
         "tiktok" => &["tiktok.com"],
         _ => &[],
     };
-    let cookie_names = capture.cookies.iter()
+    let cookie_names = capture
+        .cookies
+        .iter()
         .filter(|cookie| !cookie.value.trim().is_empty())
         .map(|cookie| cookie.name.to_ascii_lowercase())
         .collect::<HashSet<_>>();
     for cookie in &capture.cookies {
         if cookie.value.len() > 16 * 1024
-            || !allowed_domains.iter().any(|domain| domain_matches_allowed(&cookie.domain, domain))
+            || !allowed_domains
+                .iter()
+                .any(|domain| domain_matches_allowed(&cookie.domain, domain))
         {
             return Err("The capture contains an invalid provider cookie.".to_string());
         }
     }
     let allowed_auth = [
-        "csrfToken", "appId", "asbdId", "igWwwClaim", "userAgent", "secChUa",
-        "secChUaFullVersionList", "secChUaPlatformVersion", "lsd", "dtsg",
+        "csrfToken",
+        "appId",
+        "asbdId",
+        "igWwwClaim",
+        "userAgent",
+        "secChUa",
+        "secChUaFullVersionList",
+        "secChUaPlatformVersion",
+        "lsd",
+        "dtsg",
     ];
     for (key, value) in &capture.authorization {
         if !allowed_auth.contains(&key.as_str()) || value.len() > 16 * 1024 {
@@ -11692,16 +11928,30 @@ fn companion_metadata(
     provider: &str,
     capture: &CompanionAccountCapture,
 ) -> CapturedBrowserMetadata {
-    let value = |key: &str| capture.authorization.get(key)
-        .map(|value| value.trim().to_string()).filter(|value| !value.is_empty());
-    let cookie = |name: &str| capture.cookies.iter()
-        .find(|cookie| cookie.name.eq_ignore_ascii_case(name))
-        .map(|cookie| cookie.value.trim().to_string()).filter(|value| !value.is_empty());
+    let value = |key: &str| {
+        capture
+            .authorization
+            .get(key)
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    };
+    let cookie = |name: &str| {
+        capture
+            .cookies
+            .iter()
+            .find(|cookie| cookie.name.eq_ignore_ascii_case(name))
+            .map(|cookie| cookie.value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    };
     CapturedBrowserMetadata {
-        csrf_token: (provider == "instagram").then(|| value("csrfToken").or_else(|| cookie("csrftoken"))).flatten(),
+        csrf_token: (provider == "instagram")
+            .then(|| value("csrfToken").or_else(|| cookie("csrftoken")))
+            .flatten(),
         app_id: (provider == "instagram").then(|| value("appId")).flatten(),
         asbd_id: (provider == "instagram").then(|| value("asbdId")).flatten(),
-        ig_www_claim: (provider == "instagram").then(|| value("igWwwClaim")).flatten(),
+        ig_www_claim: (provider == "instagram")
+            .then(|| value("igWwwClaim"))
+            .flatten(),
         user_agent: value("userAgent"),
         sec_ch_ua: value("secChUa"),
         sec_ch_ua_full_version_list: value("secChUaFullVersionList"),
@@ -11719,10 +11969,15 @@ fn preview_companion_account_with_connection(
     let provider = normalize_companion_provider(&capture.provider)?;
     let missing_required_fields = validate_companion_capture(&provider, capture)?;
     let username = companion_username(&capture.identity.username);
-    let captured_id = capture.identity.provider_user_id.as_deref()
-        .map(str::trim).filter(|value| !value.is_empty());
+    let captured_id = capture
+        .identity
+        .provider_user_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
     let mut candidates = Vec::new();
-    for account in load_accounts(connection)?.into_iter()
+    for account in load_accounts(connection)?
+        .into_iter()
         .filter(|account| account.provider.eq_ignore_ascii_case(&provider))
     {
         let state = load_companion_import_record(connection, &account.id)?;
@@ -11730,7 +11985,11 @@ fn preview_companion_account_with_connection(
             if captured_id.is_some() && captured_id == state.provider_user_id.as_deref() {
                 Some("provider_user_id".to_string())
             } else if !username.is_empty()
-                && state.provider_username.as_deref().map(companion_username).as_deref()
+                && state
+                    .provider_username
+                    .as_deref()
+                    .map(companion_username)
+                    .as_deref()
                     == Some(username.as_str())
             {
                 Some("username".to_string())
@@ -11748,23 +12007,47 @@ fn preview_companion_account_with_connection(
             has_session,
         });
     }
-    candidates.sort_by(|left, right| right.match_kind.is_some()
-        .cmp(&left.match_kind.is_some()).then_with(|| left.display_name.cmp(&right.display_name)));
-    let suggested_account_id = candidates.iter()
+    candidates.sort_by(|left, right| {
+        right
+            .match_kind
+            .is_some()
+            .cmp(&left.match_kind.is_some())
+            .then_with(|| left.display_name.cmp(&right.display_name))
+    });
+    let suggested_account_id = candidates
+        .iter()
         .find(|candidate| candidate.match_kind.as_deref() == Some("provider_user_id"))
         .map(|candidate| candidate.account_id.clone());
     let metadata = companion_metadata(&provider, capture);
     let authorization_fields = [
-        ("csrfToken", metadata.csrf_token.as_ref()), ("appId", metadata.app_id.as_ref()),
-        ("asbdId", metadata.asbd_id.as_ref()), ("igWwwClaim", metadata.ig_www_claim.as_ref()),
-        ("userAgent", metadata.user_agent.as_ref()), ("secChUa", metadata.sec_ch_ua.as_ref()),
-        ("secChUaFullVersionList", metadata.sec_ch_ua_full_version_list.as_ref()),
-        ("secChUaPlatformVersion", metadata.sec_ch_ua_platform_version.as_ref()),
-        ("lsd", metadata.lsd.as_ref()), ("dtsg", metadata.dtsg.as_ref()),
-    ].into_iter().filter_map(|(key, value)| value.map(|_| key.to_string())).collect();
+        ("csrfToken", metadata.csrf_token.as_ref()),
+        ("appId", metadata.app_id.as_ref()),
+        ("asbdId", metadata.asbd_id.as_ref()),
+        ("igWwwClaim", metadata.ig_www_claim.as_ref()),
+        ("userAgent", metadata.user_agent.as_ref()),
+        ("secChUa", metadata.sec_ch_ua.as_ref()),
+        (
+            "secChUaFullVersionList",
+            metadata.sec_ch_ua_full_version_list.as_ref(),
+        ),
+        (
+            "secChUaPlatformVersion",
+            metadata.sec_ch_ua_platform_version.as_ref(),
+        ),
+        ("lsd", metadata.lsd.as_ref()),
+        ("dtsg", metadata.dtsg.as_ref()),
+    ]
+    .into_iter()
+    .filter_map(|(key, value)| value.map(|_| key.to_string()))
+    .collect();
     Ok(CompanionAccountPreview {
-        provider, username, cookie_count: capture.cookies.len(), authorization_fields,
-        missing_required_fields, candidates, suggested_account_id,
+        provider,
+        username,
+        cookie_count: capture.cookies.len(),
+        authorization_fields,
+        missing_required_fields,
+        candidates,
+        suggested_account_id,
     })
 }
 
@@ -11799,10 +12082,12 @@ fn clear_plaintext_companion_authorization(
     account_id: &str,
     provider: &str,
 ) -> Result<(), String> {
-    connection.execute(
-        "DELETE FROM provider_account_settings WHERE account_id = ?1 AND setting_key LIKE ?2",
-        params![account_id, format!("{provider}.auth.%")],
-    ).map_err(|error| error.to_string())?;
+    connection
+        .execute(
+            "DELETE FROM provider_account_settings WHERE account_id = ?1 AND setting_key LIKE ?2",
+            params![account_id, format!("{provider}.auth.%")],
+        )
+        .map_err(|error| error.to_string())?;
     Ok(())
 }
 
@@ -11813,13 +12098,18 @@ fn import_companion_account_with_connection(
 ) -> Result<CompanionAccountImportResult, String> {
     let preview = preview_companion_account_with_connection(connection, layout, &input.capture)?;
     if !preview.missing_required_fields.is_empty() {
-        return Err(format!("The browser session is incomplete: {}.",
-            preview.missing_required_fields.join(", ")));
+        return Err(format!(
+            "The browser session is incomplete: {}.",
+            preview.missing_required_fields.join(", ")
+        ));
     }
     let provider = preview.provider;
     let username = preview.username;
-    let (account_id, created) = match input.target_account_id.as_deref()
-        .map(str::trim).filter(|value| !value.is_empty())
+    let (account_id, created) = match input
+        .target_account_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
     {
         Some(id) => {
             let account = load_provider_account_by_id(connection, id)?;
@@ -11841,20 +12131,41 @@ fn import_companion_account_with_connection(
     let new_ref = format!("companion-{}-{}", account_id, Uuid::new_v4());
     session_secret_store::store_secret(layout, &new_ref, &payload)?;
     let imported_at = now_timestamp();
-    connection.execute_batch("BEGIN IMMEDIATE TRANSACTION").map_err(|error| error.to_string())?;
+    connection
+        .execute_batch("BEGIN IMMEDIATE TRANSACTION")
+        .map_err(|error| error.to_string())?;
     let persisted = (|| {
         if created {
             let descriptor = providers::provider_runtime(&provider)
-                .ok_or_else(|| "Provider runtime is unavailable.".to_string())?.descriptor();
-            upsert_provider_account_with_connection(connection, layout, ProviderAccountUpsert {
-                id: Some(account_id.clone()), provider: provider.clone(),
-                display_name: input.create_display_name.as_deref().map(str::trim)
-                    .filter(|value| !value.is_empty()).unwrap_or(&username).to_string(),
-                auth_mode: "imported_session".to_string(), auth_state: "ready".to_string(),
-                capabilities: descriptor.default_capabilities, last_validated_at: None,
-            })?;
+                .ok_or_else(|| "Provider runtime is unavailable.".to_string())?
+                .descriptor();
+            upsert_provider_account_with_connection(
+                connection,
+                layout,
+                ProviderAccountUpsert {
+                    id: Some(account_id.clone()),
+                    provider: provider.clone(),
+                    display_name: input
+                        .create_display_name
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .unwrap_or(&username)
+                        .to_string(),
+                    auth_mode: "imported_session".to_string(),
+                    auth_state: "ready".to_string(),
+                    capabilities: descriptor.default_capabilities,
+                    last_validated_at: None,
+                },
+            )?;
         }
-        write_provider_account_session_record(connection, &account_id, &new_ref, &payload, &imported_at)?;
+        write_provider_account_session_record(
+            connection,
+            &account_id,
+            &new_ref,
+            &payload,
+            &imported_at,
+        )?;
         clear_plaintext_companion_authorization(connection, &account_id, &provider)?;
         connection.execute(
             "INSERT INTO provider_account_import_state (
@@ -11889,19 +12200,32 @@ fn import_companion_account_with_connection(
         return Err(error.to_string());
     }
     if let Some(previous_backup) = old_state.and_then(|state| state.backup_secret_ref) {
-        if old_session.as_ref().map(|session| session.secret_ref.as_str()) != Some(previous_backup.as_str()) {
+        if old_session
+            .as_ref()
+            .map(|session| session.secret_ref.as_str())
+            != Some(previous_backup.as_str())
+        {
             let _ = session_secret_store::delete_secret(layout, &previous_backup);
         }
     }
-    let snapshot = validate_provider_account_with_connection(connection, layout, account_id.clone())?;
-    let account = snapshot.accounts.iter().find(|account| account.id == account_id)
+    let snapshot =
+        validate_provider_account_with_connection(connection, layout, account_id.clone())?;
+    let account = snapshot
+        .accounts
+        .iter()
+        .find(|account| account.id == account_id)
         .ok_or_else(|| "Imported account disappeared after validation.".to_string())?;
-    let validation_error = snapshot.account_sessions.iter()
+    let validation_error = snapshot
+        .account_sessions
+        .iter()
         .find(|session| session.account_id == account_id)
         .and_then(|session| session.last_validation_error.clone());
     Ok(CompanionAccountImportResult {
-        account_id, created, auth_state: account.auth_state.clone(),
-        validation_error, can_revert: old_session.is_some(),
+        account_id,
+        created,
+        auth_state: account.auth_state.clone(),
+        validation_error,
+        can_revert: old_session.is_some(),
     })
 }
 
@@ -11915,13 +12239,26 @@ fn revert_provider_account_import_with_connection(
         .ok_or_else(|| "The account does not have a current session.".to_string())?;
     let state = load_companion_import_record(connection, account_id)?
         .ok_or_else(|| "The account does not have a Companion import backup.".to_string())?;
-    let backup_ref = state.backup_secret_ref.clone()
+    let backup_ref = state
+        .backup_secret_ref
+        .clone()
         .ok_or_else(|| "The account does not have a previous import to restore.".to_string())?;
     let backup_payload = session_secret_store::load_secret(layout, &backup_ref)?;
-    let restored_at = state.backup_imported_at.clone().unwrap_or_else(now_timestamp);
-    connection.execute_batch("BEGIN IMMEDIATE TRANSACTION").map_err(|error| error.to_string())?;
+    let restored_at = state
+        .backup_imported_at
+        .clone()
+        .unwrap_or_else(now_timestamp);
+    connection
+        .execute_batch("BEGIN IMMEDIATE TRANSACTION")
+        .map_err(|error| error.to_string())?;
     let reverted = (|| {
-        write_provider_account_session_record(connection, account_id, &backup_ref, &backup_payload, &restored_at)?;
+        write_provider_account_session_record(
+            connection,
+            account_id,
+            &backup_ref,
+            &backup_payload,
+            &restored_at,
+        )?;
         clear_plaintext_companion_authorization(connection, account_id, &account.provider)?;
         connection.execute(
             "UPDATE provider_account_import_state SET provider_user_id=?2, provider_username=?3,
@@ -11937,7 +12274,9 @@ fn revert_provider_account_import_with_connection(
         let _ = connection.execute_batch("ROLLBACK");
         return Err(error);
     }
-    connection.execute_batch("COMMIT").map_err(|error| error.to_string())?;
+    connection
+        .execute_batch("COMMIT")
+        .map_err(|error| error.to_string())?;
     validate_provider_account_with_connection(connection, layout, account_id.to_string())
 }
 
@@ -11947,8 +12286,13 @@ mod companion_account_import_tests {
 
     fn cookie(name: &str, value: &str) -> ProviderAccountCookie {
         ProviderAccountCookie {
-            domain: ".x.com".to_string(), name: name.to_string(), value: value.to_string(),
-            path: "/".to_string(), expires_at: None, secure: true, http_only: true,
+            domain: ".x.com".to_string(),
+            name: name.to_string(),
+            value: value.to_string(),
+            path: "/".to_string(),
+            expires_at: None,
+            secure: true,
+            http_only: true,
         }
     }
 
@@ -11957,10 +12301,17 @@ mod companion_account_import_tests {
             provider: "twitter".to_string(),
             current_url: "https://x.com/home".to_string(),
             identity: crate::domain::models::CompanionAccountIdentity {
-                provider_user_id: Some("42".to_string()), username: "ninja".to_string(),
+                provider_user_id: Some("42".to_string()),
+                username: "ninja".to_string(),
             },
-            cookies: vec![cookie("auth_token", token), cookie("ct0", &format!("csrf-{token}"))],
-            authorization: HashMap::from([("userAgent".to_string(), "Mozilla/5.0 Test".to_string())]),
+            cookies: vec![
+                cookie("auth_token", token),
+                cookie("ct0", &format!("csrf-{token}")),
+            ],
+            authorization: HashMap::from([(
+                "userAgent".to_string(),
+                "Mozilla/5.0 Test".to_string(),
+            )]),
         }
     }
 
@@ -11968,56 +12319,96 @@ mod companion_account_import_tests {
     fn import_and_revert_swap_the_protected_session() {
         let temp = tempfile::tempdir().expect("temp dir");
         let layout = storage::workspace_layout_from_roots(
-            temp.path().join("localappdata"), temp.path().join("userprofile"),
-        ).expect("layout");
+            temp.path().join("localappdata"),
+            temp.path().join("userprofile"),
+        )
+        .expect("layout");
         with_workspace_layout(layout, |connection, test_layout| {
-            upsert_provider_account_with_connection(connection, test_layout, ProviderAccountUpsert {
-                id: Some("account-1".to_string()), provider: "twitter".to_string(),
-                display_name: "Existing".to_string(), auth_mode: "imported_session".to_string(),
-                auth_state: "ready".to_string(), capabilities: vec!["posts".to_string()],
-                last_validated_at: None,
-            })?;
+            upsert_provider_account_with_connection(
+                connection,
+                test_layout,
+                ProviderAccountUpsert {
+                    id: Some("account-1".to_string()),
+                    provider: "twitter".to_string(),
+                    display_name: "Existing".to_string(),
+                    auth_mode: "imported_session".to_string(),
+                    auth_state: "ready".to_string(),
+                    capabilities: vec!["posts".to_string()],
+                    last_validated_at: None,
+                },
+            )?;
             save_provider_account_cookies_with_connection(
-                connection, test_layout, "account-1",
+                connection,
+                test_layout,
+                "account-1",
                 vec![cookie("auth_token", "old"), cookie("ct0", "old-csrf")],
             )?;
             let result = import_companion_account_with_connection(
-                connection, test_layout, CompanionAccountImportInput {
-                    capture: capture("new"), target_account_id: Some("account-1".to_string()),
+                connection,
+                test_layout,
+                CompanionAccountImportInput {
+                    capture: capture("new"),
+                    target_account_id: Some("account-1".to_string()),
                     create_display_name: None,
                 },
             )?;
             assert!(result.can_revert);
-            assert!(load_provider_account_cookies_with_connection(connection, test_layout, "account-1")?
-                .iter().any(|item| item.name == "auth_token" && item.value == "new"));
-            let plaintext = connection.query_row(
-                "SELECT COUNT(*) FROM provider_account_settings
+            assert!(load_provider_account_cookies_with_connection(
+                connection,
+                test_layout,
+                "account-1"
+            )?
+            .iter()
+            .any(|item| item.name == "auth_token" && item.value == "new"));
+            let plaintext = connection
+                .query_row(
+                    "SELECT COUNT(*) FROM provider_account_settings
                  WHERE account_id='account-1' AND setting_key='twitter.auth.userAgent'",
-                [], |row| row.get::<_, i64>(0),
-            ).map_err(|error| error.to_string())?;
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .map_err(|error| error.to_string())?;
             assert_eq!(plaintext, 0);
             revert_provider_account_import_with_connection(connection, test_layout, "account-1")?;
-            assert!(load_provider_account_cookies_with_connection(connection, test_layout, "account-1")?
-                .iter().any(|item| item.name == "auth_token" && item.value == "old"));
+            assert!(load_provider_account_cookies_with_connection(
+                connection,
+                test_layout,
+                "account-1"
+            )?
+            .iter()
+            .any(|item| item.name == "auth_token" && item.value == "old"));
             Ok(())
-        }).expect("import and revert");
+        })
+        .expect("import and revert");
     }
 
     #[test]
     fn preview_is_redacted() {
         let temp = tempfile::tempdir().expect("temp dir");
         let layout = storage::workspace_layout_from_roots(
-            temp.path().join("localappdata"), temp.path().join("userprofile"),
-        ).expect("layout");
+            temp.path().join("localappdata"),
+            temp.path().join("userprofile"),
+        )
+        .expect("layout");
         with_workspace_layout(layout, |connection, test_layout| {
             let preview = preview_companion_account_with_connection(
-                connection, test_layout, &capture("super-secret"),
+                connection,
+                test_layout,
+                &capture("super-secret"),
             )?;
             assert_eq!(preview.cookie_count, 2);
-            assert!(!serde_json::to_string(&preview).map_err(|error| error.to_string())?
+            assert!(!serde_json::to_string(&preview)
+                .map_err(|error| error.to_string())?
                 .contains("super-secret"));
+            let mut reddit = capture("token");
+            reddit.provider = "reddit".to_string();
+            assert!(
+                preview_companion_account_with_connection(connection, test_layout, &reddit,)
+                    .is_err()
+            );
             Ok(())
-        }).expect("preview");
+        })
+        .expect("preview");
     }
 }
 
@@ -12906,12 +13297,7 @@ fn persist_source_sync_run(
         raw.push_str("\nmanifest=");
         raw.push_str(manifest);
     }
-    connector_debug::append_current(
-        &outcome.tool,
-        event_type,
-        "sync.result",
-        raw,
-    );
+    connector_debug::append_current(&outcome.tool, event_type, "sync.result", raw);
 
     connection
         .execute(
@@ -14767,7 +15153,13 @@ fn refresh_profile_picture_from_provider(
 /// `_400x400`, etc.), espelhando o que o SCrawler faz com o UserPicture.
 fn upgrade_twitter_avatar_url(url: &str) -> String {
     const SIZE_SUFFIXES: [&str; 7] = [
-        "_normal", "_bigger", "_mini", "_200x200", "_400x400", "_x96", "_reasonably_small",
+        "_normal",
+        "_bigger",
+        "_mini",
+        "_200x200",
+        "_400x400",
+        "_x96",
+        "_reasonably_small",
     ];
     let (base, query) = match url.split_once('?') {
         Some((base, query)) => (base, Some(query)),
@@ -15360,7 +15752,8 @@ fn update_instagram_source_handle_after_sync(
         .map_err(|error| error.to_string())?;
 
     let updated_sync_options_json = existing.and_then(|(old_handle, sync_options_json)| {
-        if sanitize_source_handle("instagram", &old_handle).eq_ignore_ascii_case(&normalized_handle) {
+        if sanitize_source_handle("instagram", &old_handle).eq_ignore_ascii_case(&normalized_handle)
+        {
             return None;
         }
         let mut options = deserialize_source_sync_options("instagram", &sync_options_json);
@@ -15565,7 +15958,11 @@ fn persist_provider_account_session_payload(
     let imported_at = now_timestamp();
     session_secret_store::store_secret(layout, &secret_ref, secret_payload)?;
     if let Err(error) = write_provider_account_session_record(
-        connection, account_id, &secret_ref, secret_payload, &imported_at,
+        connection,
+        account_id,
+        &secret_ref,
+        secret_payload,
+        &imported_at,
     ) {
         let _ = session_secret_store::delete_secret(layout, &secret_ref);
         return Err(error);
@@ -16039,8 +16436,7 @@ pub fn change_source_media_path(
             );
 
             let folder = sanitize_path_segment(
-                sanitize_source_handle("instagram", &source.handle)
-                    .trim_start_matches('@'),
+                sanitize_source_handle("instagram", &source.handle).trim_start_matches('@'),
             );
             let new_root = base.join(&folder);
             if new_root == old_root {
@@ -16335,9 +16731,87 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
+    fn provider_section_selections_preserve_explicit_false_values() {
+        let mut twitter = default_twitter_source_sync_options();
+        twitter.media_model = Some(false);
+        twitter.profile_model = Some(false);
+        twitter.search_model = Some(false);
+        twitter.likes_model = Some(false);
+        let twitter =
+            twitter_model_selection(&normalize_twitter_source_sync_options(Some(twitter)));
+        assert!(!twitter.media);
+        assert!(!twitter.profile);
+        assert!(!twitter.search);
+        assert!(!twitter.likes);
+
+        let mut tiktok = default_tiktok_source_sync_options();
+        tiktok.get_timeline = Some(false);
+        tiktok.get_stories_user = Some(false);
+        tiktok.get_reposts = Some(false);
+        tiktok.get_liked_videos = Some(false);
+        tiktok.liked_videos_limit = Some(0);
+        tiktok.liked_videos_incremental = Some(false);
+        tiktok.liked_videos_known_page_threshold = Some(5);
+        let tiktok = normalize_tiktok_source_sync_options(Some(tiktok));
+        let sections = tiktok_section_selection(&tiktok);
+        assert!(!sections.timeline);
+        assert!(!sections.stories);
+        assert!(!sections.reposts);
+        assert_eq!(tiktok.get_liked_videos, Some(false));
+        assert_eq!(tiktok.liked_videos_limit, Some(0));
+        assert_eq!(tiktok.liked_videos_incremental, Some(false));
+        assert_eq!(tiktok.liked_videos_known_page_threshold, Some(5));
+    }
+
+    #[test]
+    fn instagram_profile_sections_can_disable_every_account_enabled_section() {
+        let mut source = sample_source_profile_model();
+        source.provider = "instagram".to_string();
+        source.sync_options = SourceSyncOptions {
+            instagram: Some(InstagramSourceSyncOptions {
+                timeline: false,
+                reels: false,
+                stories: false,
+                stories_user: false,
+                tagged: false,
+                ..InstagramSourceSyncOptions::default()
+            }),
+            ..SourceSyncOptions::default()
+        };
+        let settings = HashMap::from([
+            (
+                "instagram.download.timeline".to_string(),
+                "true".to_string(),
+            ),
+            ("instagram.download.reels".to_string(), "true".to_string()),
+            ("instagram.download.stories".to_string(), "true".to_string()),
+            (
+                "instagram.download.storiesUser".to_string(),
+                "true".to_string(),
+            ),
+            (
+                "instagram.download.taggedPosts".to_string(),
+                "true".to_string(),
+            ),
+        ]);
+
+        let sections = build_instagram_section_selection(&source, &settings, None);
+
+        assert!(!sections.timeline);
+        assert!(!sections.reels);
+        assert!(!sections.stories);
+        assert!(!sections.stories_user);
+        assert!(!sections.tagged);
+    }
+
+    #[test]
     fn derive_post_metadata_tiktok_tokkit_video() {
-        let d = derive_post_metadata("tiktok", "gaaby.tls_1775147243_7624199329925958920.mp4", None)
-            .expect("derived");
+        let d = derive_post_metadata(
+            "tiktok",
+            "gaaby.tls_1775147243_7624199329925958920.mp4",
+            None,
+        )
+        .expect("derived");
         assert_eq!(d.post_id.as_deref(), Some("7624199329925958920"));
         assert_eq!(d.media_type, "video");
         assert!(d.captured_at.is_some());
@@ -16360,16 +16834,31 @@ mod tests {
     #[test]
     fn build_post_url_tiktok_video_vs_photo_and_profile() {
         assert_eq!(
-            build_post_url("tiktok", "reeh_dmris", Some("7252779904704564486"), true, None)
-                .as_deref(),
+            build_post_url(
+                "tiktok",
+                "reeh_dmris",
+                Some("7252779904704564486"),
+                true,
+                None
+            )
+            .as_deref(),
             Some("https://www.tiktok.com/@reeh_dmris/video/7252779904704564486")
         );
         assert_eq!(
-            build_post_url("tiktok", "@reeh_dmris", Some("7315175620856581381"), false, None)
-                .as_deref(),
+            build_post_url(
+                "tiktok",
+                "@reeh_dmris",
+                Some("7315175620856581381"),
+                false,
+                None
+            )
+            .as_deref(),
             Some("https://www.tiktok.com/@reeh_dmris/photo/7315175620856581381")
         );
-        assert_eq!(source_target_url("tiktok", "reeh_dmris"), "https://www.tiktok.com/@reeh_dmris");
+        assert_eq!(
+            source_target_url("tiktok", "reeh_dmris"),
+            "https://www.tiktok.com/@reeh_dmris"
+        );
     }
 
     #[test]
@@ -16380,7 +16869,8 @@ mod tests {
         );
         // GIF_ prefix (and casing) is normalized to match the XML File basename.
         assert_eq!(
-            twitter_media_key_from_file_name("2025-11-10 15.11.32 GIF_G5aakG1WoAA2yHs.mp4").as_deref(),
+            twitter_media_key_from_file_name("2025-11-10 15.11.32 GIF_G5aakG1WoAA2yHs.mp4")
+                .as_deref(),
             Some("g5aakg1woaa2yhs")
         );
         // Raw SCrawler name without a date prefix.
@@ -16393,12 +16883,21 @@ mod tests {
     #[test]
     fn build_post_url_twitter_uses_status_id() {
         assert_eq!(
-            build_post_url("twitter", "@someone", Some("1700000000000000001"), false, None)
-                .as_deref(),
+            build_post_url(
+                "twitter",
+                "@someone",
+                Some("1700000000000000001"),
+                false,
+                None
+            )
+            .as_deref(),
             Some("https://x.com/someone/status/1700000000000000001")
         );
         // Sem id não há link.
-        assert_eq!(build_post_url("twitter", "someone", None, false, None), None);
+        assert_eq!(
+            build_post_url("twitter", "someone", None, false, None),
+            None
+        );
     }
 
     #[test]
@@ -16936,10 +17435,9 @@ mod tests {
         )
         .expect("legacy problem marker");
 
-        let parsed = serde_json::from_str::<instagram_connector::InstagramManifestSummary>(
-            &legacy_summary,
-        )
-        .expect("new summary fields must default when reading legacy history");
+        let parsed =
+            serde_json::from_str::<instagram_connector::InstagramManifestSummary>(&legacy_summary)
+                .expect("new summary fields must default when reading legacy history");
         assert_eq!(parsed.sections[0].skipped_out_of_range_item_count, 0);
         assert_eq!(
             load_latest_instagram_profile_user_id_hint(&connection, "source-1")
@@ -17071,8 +17569,7 @@ mod tests {
     #[test]
     fn instagram_identity_hint_prefers_confirmed_history_over_imported_hint() {
         assert_eq!(
-            preferred_instagram_user_id_hint(Some("59617797093"), Some("74818949106"))
-                .as_deref(),
+            preferred_instagram_user_id_hint(Some("59617797093"), Some("74818949106")).as_deref(),
             Some("74818949106")
         );
         assert_eq!(
@@ -17528,7 +18025,10 @@ mod tests {
         assert_eq!(list, Some(vec!["OldName".to_string()]));
         // Acrescenta um segundo nome antigo distinto.
         let list = push_previous_instagram_handle(list, "older_one", "newname");
-        assert_eq!(list, Some(vec!["OldName".to_string(), "older_one".to_string()]));
+        assert_eq!(
+            list,
+            Some(vec!["OldName".to_string(), "older_one".to_string()])
+        );
         // O handle atual nunca entra na lista.
         assert_eq!(
             push_previous_instagram_handle(None, "@newname", "newname"),
@@ -18765,8 +19265,7 @@ mod tests {
         let root = temp_dir.path();
         let pictures_dir = root.join(PROFILE_SETTINGS_DIR_NAME).join("Pictures");
         fs::create_dir_all(&pictures_dir).expect("pictures dir");
-        fs::write(pictures_dir.join("UserPicture.jpg"), b"imported-avatar")
-            .expect("user picture");
+        fs::write(pictures_dir.join("UserPicture.jpg"), b"imported-avatar").expect("user picture");
 
         let resolved = find_source_avatar(root).expect("avatar path should resolve");
         assert!(
@@ -19932,7 +20431,11 @@ mod tests {
         .expect("seed scheduler state");
 
         let before_due = with_workspace_layout(layout.clone(), |connection, test_layout| {
-            process_scheduler_tick_with_connection(connection, test_layout, "2026-03-10T00:10:00Z")?;
+            process_scheduler_tick_with_connection(
+                connection,
+                test_layout,
+                "2026-03-10T00:10:00Z",
+            )?;
             load_snapshot(connection, test_layout)
         })
         .expect("tick before startup delay");
@@ -19948,7 +20451,11 @@ mod tests {
         );
 
         let after_due = with_workspace_layout(layout, |connection, test_layout| {
-            process_scheduler_tick_with_connection(connection, test_layout, "2026-03-10T00:31:00Z")?;
+            process_scheduler_tick_with_connection(
+                connection,
+                test_layout,
+                "2026-03-10T00:31:00Z",
+            )?;
             load_snapshot(connection, test_layout)
         })
         .expect("tick after restart should still honor persisted launch state");
