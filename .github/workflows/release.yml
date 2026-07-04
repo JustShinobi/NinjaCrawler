@@ -201,3 +201,18 @@ jobs:
           if ($LASTEXITCODE -ne 0) {
             throw "GitHub Release publication failed."
           }
+
+      - name: Re-anchor release-please
+        # The git tag now exists (the publish step above created it). Re-invoke
+        # release-please so it re-anchors on this tag and clears/regenerates any
+        # release PR that was inflated because it ran on the release-PR merge —
+        # before this tag existed — and rebuilt the changelog from scratch (this
+        # is what produced the bloated PRs #47 and #53). No-op when there is
+        # nothing new to release. Uses the PAT, like release-please.yml itself.
+        if: success()
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: >
+          gh workflow run release-please.yml
+          --repo ${{ github.repository }}
+          --ref main
