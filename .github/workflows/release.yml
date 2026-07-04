@@ -121,11 +121,18 @@ jobs:
 
       - name: Generate changelog
         shell: pwsh
+        env:
+          # Resolve the changelog against the commit SHA, never the tag: on the
+          # draft-release path the tag does not exist yet (it is only created
+          # when the release is published in the last step), so passing the tag
+          # as the ref made `git rev-parse` fail and stalled the release as a
+          # draft. The SHA is always present (it is the checked-out commit).
+          RELEASE_SHA: ${{ inputs.sha || github.sha }}
         run: |
           powershell -ExecutionPolicy Bypass `
             -File Tools\New-NinjaCrawlerChangelog.ps1 `
             -Version "${{ steps.version.outputs.version }}" `
-            -CurrentRef "${{ steps.version.outputs.tag }}" `
+            -CurrentRef "$env:RELEASE_SHA" `
             -CurrentTag "${{ steps.version.outputs.tag }}" `
             -Repository "${{ github.repository }}" `
             -OutputPath "release\CHANGELOG.md"

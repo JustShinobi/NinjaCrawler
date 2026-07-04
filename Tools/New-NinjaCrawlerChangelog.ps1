@@ -43,8 +43,10 @@ function Resolve-RepositoryName {
 
 function Get-SectionName {
     param(
-        [Parameter(Mandatory = $true)]
-        [string]$Type
+        # Non-conventional commits (no type prefix) resolve to an empty string;
+        # accept it so a single such commit cannot abort the whole release.
+        [AllowEmptyString()]
+        [string]$Type = ""
     )
 
     switch ($Type) {
@@ -58,10 +60,28 @@ function Get-SectionName {
     }
 }
 
-$currentCommit = (
-    Invoke-Git -Arguments @("rev-parse", "--verify", "$CurrentRef`^{commit}") |
-        Select-Object -First 1
-).Trim()
+function Resolve-Commit {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Ref
+    )
+
+    # Do not use Invoke-Git here: a not-yet-created tag (draft-release path)
+    # would abort the whole release. Probe quietly and fall back to HEAD so the
+    # changelog is still generated from the checked-out commit.
+    $resolved = @(& git rev-parse --verify --quiet "$Ref`^{commit}")
+    if ($LASTEXITCODE -eq 0 -and $resolved.Count -gt 0) {
+        return $resolved[0].Trim()
+    }
+
+    Write-Warning "Ref '$Ref' could not be resolved; falling back to HEAD."
+    return (
+        Invoke-Git -Arguments @("rev-parse", "--verify", "HEAD`^{commit}") |
+            Select-Object -First 1
+    ).Trim()
+}
+
+$currentCommit = Resolve-Commit -Ref $CurrentRef
 $releaseDate = (
     Invoke-Git -Arguments @("show", "-s", "--format=%cs", $currentCommit) |
         Select-Object -First 1
