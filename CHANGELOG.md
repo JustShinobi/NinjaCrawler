@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.10.0](https://github.com/MetalDevOps/NinjaCrawler/compare/v0.9.0...v0.10.0) (2026-07-06)
+
+
+### Features
+
+* harden webview CSP and close UI↔backend gaps ([#66](https://github.com/MetalDevOps/NinjaCrawler/issues/66)) ([824620e](https://github.com/MetalDevOps/NinjaCrawler/commit/824620efb41d6a437e8a930d19f5157b4fbf5e08))
+* **tiktok:** collect, persist, and sort media stats ([#64](https://github.com/MetalDevOps/NinjaCrawler/issues/64)) ([8ad2217](https://github.com/MetalDevOps/NinjaCrawler/commit/8ad2217e8f75c973020e246f38a3d68d2f0c3bab))
+* **workspace:** implement media thumbnails, profile-view virtualization, and zero-distinction mono fonts ([#65](https://github.com/MetalDevOps/NinjaCrawler/issues/65)) ([d7e689b](https://github.com/MetalDevOps/NinjaCrawler/commit/d7e689b67fc599146ab05b323fae1d493023b3fe))
+
+
+### Bug Fixes
+
+* **instagram:** POST GraphQL queries so reels and feed sync ([#62](https://github.com/MetalDevOps/NinjaCrawler/issues/62)) ([be45445](https://github.com/MetalDevOps/NinjaCrawler/commit/be4544555489b451691abf4f3c7bae37e956a900))
+
 ## [0.9.0](https://github.com/MetalDevOps/NinjaCrawler/compare/v0.8.1...v0.9.0) (2026-07-04)
 
 
