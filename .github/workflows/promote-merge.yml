@@ -1,0 +1,58 @@
+name: promote-merge
+
+# Merges the standing develop -> main promotion PR as a MERGE COMMIT — never a
+# squash. Squashing the promotion collapses every feat/fix on develop into a
+# single `chore: promote` commit, so release-please finds "no user facing
+# commits" and skips the release (this is exactly what stalled 0.10.0 after the
+# squashed promotes #60/#63). Because the repo's default merge button is
+# "Squash and merge" (use_squash_pr_title_as_default=true), letting a human pick
+# the method by hand is a foot-gun.
+#
+# Use this instead of clicking the green button:
+#   * add the `promote` label to the develop -> main PR, or
+#   * run the workflow manually (workflow_dispatch).
+# It always merges with `--merge`, regardless of the repo's default method.
+on:
+  pull_request:
+    types: [labeled]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: promote-merge
+  cancel-in-progress: false
+
+jobs:
+  promote-merge:
+    name: Merge develop -> main as a merge commit
+    # For label events, only react to the `promote` label on a develop -> main
+    # PR; workflow_dispatch always runs and finds the open PR itself.
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.label.name == 'promote' &&
+       github.event.pull_request.base.ref == 'main' &&
+       github.event.pull_request.head.ref == 'develop')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Merge the develop -> main promotion PR
+        env:
+          # PAT for parity with the other release workflows; the default
+          # GITHUB_TOKEN is restricted on this repo.
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          pr="$(gh pr list --repo "$REPO" --base main --head develop \
+            --state open --json number --jq '.[0].number' || true)"
+          if [ -z "$pr" ]; then
+            echo "No open develop -> main promotion PR to merge; nothing to do."
+            exit 0
+          fi
+          echo "Merging promotion PR #$pr as a merge commit."
+          # --merge forces a merge commit even though the repo defaults to
+          # squash. Branch protection still gates this on required checks.
+          gh pr merge "$pr" --repo "$REPO" --merge
