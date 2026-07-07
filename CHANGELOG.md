@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.11.0](https://github.com/MetalDevOps/NinjaCrawler/compare/v0.10.0...v0.11.0) (2026-07-07)
+
+
+### Features
+
+* **companion:** add profile sync action ([#76](https://github.com/MetalDevOps/NinjaCrawler/issues/76)) ([01d3ea9](https://github.com/MetalDevOps/NinjaCrawler/commit/01d3ea99c9da16d21d6b2663493c4ecabf132387))
+* detect and flag unavailable/private profiles (TikTok + Instagram) ([#73](https://github.com/MetalDevOps/NinjaCrawler/issues/73)) ([e638398](https://github.com/MetalDevOps/NinjaCrawler/commit/e638398baf96731bfc5da75d423163ac114e89c8))
+* **instagram:** categorize legacy SCrawler reels correctly ([#72](https://github.com/MetalDevOps/NinjaCrawler/issues/72)) ([9e25d6c](https://github.com/MetalDevOps/NinjaCrawler/commit/9e25d6c1100fe00791c512246eb0c12aebf8bd91))
+
 ## [0.10.0](https://github.com/MetalDevOps/NinjaCrawler/compare/v0.9.0...v0.10.0) (2026-07-06)
 
 
