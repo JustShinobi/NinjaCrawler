@@ -1,0 +1,152 @@
+name: create-pr
+
+on:
+  workflow_dispatch:
+    inputs:
+      head_branch:
+        description: Branch to open or refresh as a pull request
+        required: true
+        type: string
+      base_branch:
+        description: Target branch. Defaults to PR_DEFAULT_BASE_BRANCH or develop.
+        required: false
+        type: string
+      model:
+        description: Gemini model to use for the generated title and body
+        required: true
+        type: choice
+        default: gemini-3.5-flash
+        options:
+          - gemini-3.5-flash
+          - gemini-3.1-flash
+          - gemini-3.1-flash-lite
+          - gemini-3-flash
+          - custom
+      custom_model:
+        description: Model name to use when model is custom
+        required: false
+        type: string
+      validation_notes:
+        description: Validation commands or manual checks to include in the generated PR body
+        required: false
+        type: string
+      draft:
+        description: Create the PR as draft when it does not already exist
+        required: false
+        type: boolean
+        default: false
+  pull_request_target:
+    types:
+      - labeled
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+concurrency:
+  group: create-pr-${{ github.event_name }}-${{ github.event_name == 'workflow_dispatch' && inputs.head_branch || github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  create-or-update-pr:
+    name: Create or update PR
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (
+        github.event_name == 'pull_request_target' &&
+        github.event.action == 'labeled' &&
+        startsWith(github.event.label.name, 'pr-model/') &&
+        github.event.pull_request.head.repo.full_name == github.repository
+      )
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    env:
+      GH_TOKEN: ${{ secrets.GH_TOKEN }}
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      PR_ALLOWED_MODELS: ${{ vars.PR_ALLOWED_MODELS }}
+      PR_ALLOWED_MODELS_B64: ${{ vars.PR_ALLOWED_MODELS_B64 }}
+      PR_ATTRIBUTION_BLOCKLIST: ${{ vars.PR_ATTRIBUTION_BLOCKLIST }}
+      PR_ATTRIBUTION_BLOCKLIST_B64: ${{ vars.PR_ATTRIBUTION_BLOCKLIST_B64 }}
+      PR_DEFAULT_BASE_BRANCH: ${{ vars.PR_DEFAULT_BASE_BRANCH }}
+      PR_GENERATOR_MODEL: ${{ vars.PR_GENERATOR_MODEL }}
+      PR_GENERATOR_PROMPT: ${{ vars.PR_GENERATOR_PROMPT }}
+      PR_GENERATOR_PROMPT_B64: ${{ vars.PR_GENERATOR_PROMPT_B64 }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.base.ref || github.ref }}
+
+      - name: Generate pull request content
+        id: content
+        env:
+          PR_BASE_BRANCH: ${{ github.event_name == 'workflow_dispatch' && (inputs.base_branch || vars.PR_DEFAULT_BASE_BRANCH || 'develop') || github.event.pull_request.base.ref }}
+          PR_CUSTOM_MODEL: ${{ github.event_name == 'workflow_dispatch' && inputs.custom_model || '' }}
+          PR_EXISTING_BODY: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.body || '' }}
+          PR_EXISTING_TITLE: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.title || '' }}
+          PR_HEAD_BRANCH: ${{ github.event_name == 'workflow_dispatch' && inputs.head_branch || github.event.pull_request.head.ref }}
+          PR_MODEL_INPUT: ${{ github.event_name == 'workflow_dispatch' && inputs.model || '' }}
+          PR_MODEL_LABEL: ${{ github.event_name == 'pull_request_target' && github.event.label.name || '' }}
+          PR_VALIDATION_NOTES: ${{ github.event_name == 'workflow_dispatch' && inputs.validation_notes || '' }}
+        run: node .github/scripts/build-pr-content.mjs
+
+      - name: Create or update pull request
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        env:
+          BASE_BRANCH: ${{ steps.content.outputs.base_branch }}
+          BODY_FILE: ${{ steps.content.outputs.body_file }}
+          DRAFT: ${{ inputs.draft }}
+          HEAD_BRANCH: ${{ steps.content.outputs.head_branch }}
+          TITLE: ${{ steps.content.outputs.title }}
+        run: |
+          set -euo pipefail
+
+          existing="$(gh pr list --base "$BASE_BRANCH" --head "$HEAD_BRANCH" --state open \
+            --json number --jq '.[0].number' || true)"
+
+          if [ -n "$existing" ]; then
+            echo "Updating existing PR #$existing"
+            gh pr edit "$existing" --title "$TITLE" --body-file "$BODY_FILE"
+          else
+            echo "Creating PR from $HEAD_BRANCH to $BASE_BRANCH"
+            draft_args=()
+            if [ "$DRAFT" = "true" ]; then
+              draft_args+=(--draft)
+            fi
+            gh pr create --base "$BASE_BRANCH" --head "$HEAD_BRANCH" \
+              --title "$TITLE" --body-file "$BODY_FILE" "${draft_args[@]}"
+          fi
+
+      - name: Regenerate labeled pull request
+        if: ${{ github.event_name == 'pull_request_target' }}
+        env:
+          BODY_FILE: ${{ steps.content.outputs.body_file }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          TITLE: ${{ steps.content.outputs.title }}
+        run: |
+          set -euo pipefail
+          gh pr edit "$PR_NUMBER" --title "$TITLE" --body-file "$BODY_FILE"
+
+      - name: Remove model label after regeneration
+        if: ${{ github.event_name == 'pull_request_target' }}
+        env:
+          LABEL: ${{ github.event.label.name }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          gh pr edit "$PR_NUMBER" --remove-label "$LABEL"
+
+      - name: Report label-triggered generation failure
+        if: ${{ failure() && github.event_name == 'pull_request_target' }}
+        env:
+          LABEL: ${{ github.event.label.name }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          gh pr comment "$PR_NUMBER" \
+            --body "PR generation for label \`$LABEL\` failed. The label was left in place so the request can be retried. Workflow run: $RUN_URL"
