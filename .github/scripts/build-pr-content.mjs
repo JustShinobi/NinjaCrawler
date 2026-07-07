@@ -6,7 +6,7 @@ import { execFileSync } from "node:child_process";
 const DEFAULT_MODEL = "gemini-3.5-flash";
 const LABEL_PREFIX = "pr-model/";
 const DEFAULT_DIFF_MAX_CHARS = 50000;
-const GEMINI_API_BASE_URL = "https://generativelanguage.googleapis.com/v1beta";
+const INTERACTIONS_ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/interactions";
 
 function fail(message) {
   console.error(`Error: ${message}`);
@@ -281,7 +281,7 @@ function extractGeminiText(response) {
 
   const stepTexts = [];
   for (const step of response.steps ?? []) {
-    const contents = step?.modelOutput?.content ?? step?.model_output?.content ?? [];
+    const contents = step?.content ?? step?.modelOutput?.content ?? step?.model_output?.content ?? [];
     for (const content of contents) {
       if (typeof content?.text?.text === "string") {
         stepTexts.push(content.text.text);
@@ -346,27 +346,19 @@ async function generateContent(model, prompt) {
     fail("GEMINI_API_KEY must be configured.");
   }
 
-  const modelPath = model.startsWith("models/") || model.startsWith("publishers/")
-    ? model
-    : `models/${model}`;
-  const encodedModelPath = modelPath.split("/").map(encodeURIComponent).join("/");
-  const endpoint = `${GEMINI_API_BASE_URL}/${encodedModelPath}:generateContent`;
-  const response = await fetch(endpoint, {
+  const response = await fetch(INTERACTIONS_ENDPOINT, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       "x-goog-api-key": apiKey,
     },
     body: JSON.stringify({
-      contents: [
-        {
-          role: "user",
-          parts: [{ text: prompt }],
-        },
-      ],
-      generationConfig: {
-        responseMimeType: "application/json",
-        responseSchema: {
+      model,
+      input: prompt,
+      response_format: {
+        type: "text",
+        mime_type: "application/json",
+        schema: {
           type: "object",
           additionalProperties: false,
           required: ["title", "body"],
@@ -386,7 +378,14 @@ async function generateContent(model, prompt) {
   });
 
   if (!response.ok) {
-    fail(`Gemini API request failed with HTTP ${response.status}.`);
+    let details = "";
+    try {
+      const errorBody = await response.json();
+      details = errorBody?.error?.message ? ` ${errorBody.error.message}` : "";
+    } catch {
+      details = "";
+    }
+    fail(`Gemini API request failed with HTTP ${response.status}.${details}`);
   }
 
   return parseJsonText(extractGeminiText(await response.json()));
