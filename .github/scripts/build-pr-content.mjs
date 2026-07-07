@@ -6,7 +6,7 @@ import { execFileSync } from "node:child_process";
 const DEFAULT_MODEL = "gemini-3.5-flash";
 const LABEL_PREFIX = "pr-model/";
 const DEFAULT_DIFF_MAX_CHARS = 50000;
-const INTERACTIONS_ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/interactions";
+const GEMINI_API_BASE_URL = "https://generativelanguage.googleapis.com/v1beta";
 
 function fail(message) {
   console.error(`Error: ${message}`);
@@ -15,6 +15,23 @@ function fail(message) {
 
 function env(name) {
   return process.env[name] ?? "";
+}
+
+function readVariable(name) {
+  const repo = env("GITHUB_REPOSITORY").trim();
+  if (!repo) {
+    return "";
+  }
+
+  try {
+    return execFileSync("gh", ["variable", "get", name, "--repo", repo], {
+      encoding: "utf8",
+      maxBuffer: 2 * 1024 * 1024,
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+  } catch {
+    return "";
+  }
 }
 
 function readConfig(name, { required = false } = {}) {
@@ -27,6 +44,20 @@ function readConfig(name, { required = false } = {}) {
   if (encoded.length > 0) {
     try {
       return Buffer.from(encoded, "base64").toString("utf8").trim();
+    } catch {
+      fail(`${name}_B64 is not valid base64.`);
+    }
+  }
+
+  const variablePlain = readVariable(name);
+  if (variablePlain.length > 0) {
+    return variablePlain;
+  }
+
+  const variableEncoded = readVariable(`${name}_B64`);
+  if (variableEncoded.length > 0) {
+    try {
+      return Buffer.from(variableEncoded, "base64").toString("utf8").trim();
     } catch {
       fail(`${name}_B64 is not valid base64.`);
     }
@@ -109,7 +140,7 @@ function resolveModel() {
     return model;
   }
 
-  const selected = env("PR_MODEL_INPUT").trim() || env("PR_GENERATOR_MODEL").trim() || DEFAULT_MODEL;
+  const selected = env("PR_MODEL_INPUT").trim() || readConfig("PR_GENERATOR_MODEL") || DEFAULT_MODEL;
   const model = selected === "custom" ? env("PR_CUSTOM_MODEL").trim() : selected;
   if (!model) {
     fail("custom_model is required when model is custom.");
@@ -191,8 +222,7 @@ function collectContext(baseBranch, headBranch) {
 
 function buildPrompt(configuredPrompt, context) {
   const validationNotes = env("PR_VALIDATION_NOTES").trim();
-  const existingTitle = env("PR_EXISTING_TITLE").trim();
-  const existingBody = env("PR_EXISTING_BODY").trim();
+  const { title: existingTitle, body: existingBody } = readExistingPullRequest();
 
   return [
     "Follow the configured pull request instructions exactly.",
@@ -279,25 +309,64 @@ function extractGeminiText(response) {
   fail("Gemini response did not include text content.");
 }
 
+function readExistingPullRequest() {
+  const prNumber = env("PR_NUMBER").trim();
+  if (!prNumber) {
+    return { title: "", body: "" };
+  }
+
+  const repo = env("GITHUB_REPOSITORY").trim();
+  if (!repo) {
+    return { title: "", body: "" };
+  }
+
+  try {
+    const raw = execFileSync(
+      "gh",
+      ["pr", "view", prNumber, "--repo", repo, "--json", "title,body"],
+      {
+        encoding: "utf8",
+        maxBuffer: 2 * 1024 * 1024,
+        stdio: ["ignore", "pipe", "ignore"],
+      },
+    );
+    const parsed = JSON.parse(raw);
+    return {
+      title: String(parsed.title ?? ""),
+      body: String(parsed.body ?? ""),
+    };
+  } catch {
+    return { title: "", body: "" };
+  }
+}
+
 async function generateContent(model, prompt) {
   const apiKey = env("GEMINI_API_KEY").trim();
   if (!apiKey) {
     fail("GEMINI_API_KEY must be configured.");
   }
 
-  const response = await fetch(INTERACTIONS_ENDPOINT, {
+  const modelPath = model.startsWith("models/") || model.startsWith("publishers/")
+    ? model
+    : `models/${model}`;
+  const encodedModelPath = modelPath.split("/").map(encodeURIComponent).join("/");
+  const endpoint = `${GEMINI_API_BASE_URL}/${encodedModelPath}:generateContent`;
+  const response = await fetch(endpoint, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       "x-goog-api-key": apiKey,
     },
     body: JSON.stringify({
-      model,
-      input: prompt,
-      response_format: {
-        type: "text",
-        mime_type: "application/json",
-        schema: {
+      contents: [
+        {
+          role: "user",
+          parts: [{ text: prompt }],
+        },
+      ],
+      generationConfig: {
+        responseMimeType: "application/json",
+        responseSchema: {
           type: "object",
           additionalProperties: false,
           required: ["title", "body"],
