@@ -16,4 +16,15 @@ describe('Companion popup layout', () => {
     expect(popupHtml).toContain('role="status"')
     expect(popupHtml).toContain('aria-live="polite"')
   })
+
+  it('keeps profile sync available alongside selected-story download', () => {
+    const storyAction = popupHtml.indexOf('id="targetButton"')
+    const syncAction = popupHtml.indexOf('id="syncButton"')
+    const importAction = popupHtml.indexOf('id="importAccountButton"')
+
+    expect(storyAction).toBeGreaterThan(-1)
+    expect(syncAction).toBeGreaterThan(storyAction)
+    expect(importAction).toBeGreaterThan(syncAction)
+    expect(popupHtml).toContain('Sync profile')
+  })
 })

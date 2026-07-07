@@ -162,7 +162,7 @@ function renderActiveLoading() {
   elements.targetButton?.classList.toggle('hidden', !state.target)
   elements.targetButton.disabled = true
   elements.singleVideoButton?.classList.toggle('hidden', !state.video)
-  elements.syncButton.classList.toggle('hidden', !state.detected || Boolean(state.target))
+  elements.syncButton.classList.toggle('hidden', !state.detected)
   elements.syncButton.disabled = true
   elements.addButton.classList.add('hidden')
   elements.importAccountButton?.classList.remove('hidden')
@@ -342,7 +342,7 @@ function renderContext() {
       ? `${existing.handle} · selected story ${target.storyId}`
       : `${existing.handle} · ${existing.lastSyncedAt ? `Last sync ${formatDate(existing.lastSyncedAt)}` : 'Never synced'}`
     elements.targetButton?.classList.toggle('hidden', !target)
-    elements.syncButton.classList.toggle('hidden', Boolean(target))
+    elements.syncButton.classList.remove('hidden')
     elements.addButton.classList.add('hidden')
   } else {
     setStatus('ready', 'Ready')
