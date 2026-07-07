@@ -1,0 +1,14 @@
+# Auto detect text files and perform LF normalization on commit
+* text=auto
+
+# Force LF line endings for Rust and Tauri project files
+*.toml text eol=lf
+*.rs text eol=lf
+*.json text eol=lf
+
+# Force LF line endings for Web Frontend files
+*.js text eol=lf
+*.ts text eol=lf
+*.tsx text eol=lf
+*.html text eol=lf
+*.css text eol=lf
