@@ -26,6 +26,11 @@
           "path": "src-tauri/tauri.conf.json",
           "jsonpath": "$.version"
         },
+        {
+          "type": "json",
+          "path": "NinjaCrawler.Companion/manifest.json",
+          "jsonpath": "$.version"
+        },
         "src-tauri/Cargo.toml"
       ]
     }
