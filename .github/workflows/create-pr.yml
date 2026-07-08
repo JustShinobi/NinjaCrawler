@@ -83,7 +83,6 @@ jobs:
           PR_HEAD_BRANCH: ${{ github.event_name == 'workflow_dispatch' && inputs.head_branch || github.event.pull_request.head.ref }}
           PR_MODEL_INPUT: ${{ github.event_name == 'workflow_dispatch' && inputs.model || '' }}
           PR_MODEL_LABEL: ${{ github.event_name == 'pull_request_target' && github.event.label.name || '' }}
-          PR_NUMBER: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.number || '' }}
           PR_VALIDATION_NOTES: ${{ github.event_name == 'workflow_dispatch' && inputs.validation_notes || '' }}
         run: node .github/scripts/build-pr-content.mjs
 

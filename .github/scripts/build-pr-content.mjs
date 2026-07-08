@@ -222,7 +222,6 @@ function collectContext(baseBranch, headBranch) {
 
 function buildPrompt(configuredPrompt, context) {
   const validationNotes = env("PR_VALIDATION_NOTES").trim();
-  const { title: existingTitle, body: existingBody } = readExistingPullRequest();
 
   return [
     "Follow the configured pull request instructions exactly.",
@@ -238,12 +237,6 @@ function buildPrompt(configuredPrompt, context) {
     "",
     "Validation notes supplied by the workflow caller:",
     validationNotes || "None supplied.",
-    "",
-    "Existing pull request title, when regenerating:",
-    existingTitle || "None.",
-    "",
-    "Existing pull request body, when regenerating:",
-    existingBody || "None.",
     "",
     "Commits:",
     context.commits || "None.",
@@ -307,37 +300,6 @@ function extractGeminiText(response) {
   }
 
   fail("Gemini response did not include text content.");
-}
-
-function readExistingPullRequest() {
-  const prNumber = env("PR_NUMBER").trim();
-  if (!prNumber) {
-    return { title: "", body: "" };
-  }
-
-  const repo = env("GITHUB_REPOSITORY").trim();
-  if (!repo) {
-    return { title: "", body: "" };
-  }
-
-  try {
-    const raw = execFileSync(
-      "gh",
-      ["pr", "view", prNumber, "--repo", repo, "--json", "title,body"],
-      {
-        encoding: "utf8",
-        maxBuffer: 2 * 1024 * 1024,
-        stdio: ["ignore", "pipe", "ignore"],
-      },
-    );
-    const parsed = JSON.parse(raw);
-    return {
-      title: String(parsed.title ?? ""),
-      body: String(parsed.body ?? ""),
-    };
-  } catch {
-    return { title: "", body: "" };
-  }
 }
 
 async function generateContent(model, prompt) {
