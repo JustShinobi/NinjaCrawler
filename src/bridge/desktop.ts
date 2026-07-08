@@ -2611,6 +2611,20 @@ export async function openSingleVideosWindow(): Promise<void> {
 
 function parseSingleVideo(raw: unknown): SingleVideo {
   const value = isRecord(raw) ? raw : {}
+  const relativePath = stringValue(value, ['relativePath', 'relative_path'], '')
+  const absolutePath = stringValue(value, ['absolutePath', 'absolute_path'], '')
+  const mediaType = stringValue(value, ['mediaType', 'media_type'], 'video')
+  const filesRaw = pick(value, 'files')
+  const files = Array.isArray(filesRaw)
+    ? filesRaw.map((file) => {
+        const fileValue = isRecord(file) ? file : {}
+        return {
+          relativePath: stringValue(fileValue, ['relativePath', 'relative_path'], ''),
+          absolutePath: stringValue(fileValue, ['absolutePath', 'absolute_path'], ''),
+          mediaType: stringValue(fileValue, ['mediaType', 'media_type'], mediaType === 'video' ? 'video' : 'image'),
+        }
+      }).filter((file) => file.absolutePath)
+    : []
   return {
     id: stringValue(value, ['id'], ''),
     provider: stringValue(value, ['provider'], ''),
@@ -2618,11 +2632,14 @@ function parseSingleVideo(raw: unknown): SingleVideo {
     providerVideoId: optionalStringValue(value, ['providerVideoId', 'provider_video_id']),
     uploader: optionalStringValue(value, ['uploader']),
     title: optionalStringValue(value, ['title']),
-    relativePath: stringValue(value, ['relativePath', 'relative_path'], ''),
-    absolutePath: stringValue(value, ['absolutePath', 'absolute_path'], ''),
-    mediaType: stringValue(value, ['mediaType', 'media_type'], 'video'),
+    relativePath,
+    absolutePath,
+    mediaType,
     capturedAt: optionalNumberValue(value, ['capturedAt', 'captured_at']),
     downloadedAt: stringValue(value, ['downloadedAt', 'downloaded_at'], ''),
+    files: files.length > 0 ? files : [{ relativePath, absolutePath, mediaType }],
+    audioRelativePath: optionalStringValue(value, ['audioRelativePath', 'audio_relative_path']),
+    audioAbsolutePath: optionalStringValue(value, ['audioAbsolutePath', 'audio_absolute_path']),
   }
 }
 

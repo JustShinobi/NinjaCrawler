@@ -16,6 +16,8 @@ export interface MediaLightboxProps {
   onClose: () => void
   /** Nome exibido acima da mídia (@autor do like ou handle do perfil). */
   title?: string
+  /** Faixa de áudio separada para slideshows. */
+  audioAbsPath?: string
   /** Ações abaixo do preview (Open online / Reveal / etc.). */
   actions?: ReactNode
 }
@@ -29,6 +31,7 @@ export function MediaLightbox({
   onNext,
   onClose,
   title,
+  audioAbsPath,
   actions,
 }: MediaLightboxProps) {
   return (
@@ -57,6 +60,9 @@ export function MediaLightbox({
         ) : (
           <img src={convertFileSrc(fileAbsPath)} alt="" />
         )}
+        {!isVideo && audioAbsPath ? (
+          <audio src={convertFileSrc(audioAbsPath)} controls autoPlay loop />
+        ) : null}
         {actions ? <div className="profile-view-lightbox-actions">{actions}</div> : null}
       </div>
       {hasNext ? (

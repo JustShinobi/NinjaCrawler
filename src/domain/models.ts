@@ -614,6 +614,15 @@ export interface SingleVideo {
   mediaType: string
   capturedAt?: number
   downloadedAt: string
+  files: SingleVideoFile[]
+  audioRelativePath?: string
+  audioAbsolutePath?: string
+}
+
+export interface SingleVideoFile {
+  relativePath: string
+  absolutePath: string
+  mediaType: string
 }
 
 export interface SingleVideoQueueItem {

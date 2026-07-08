@@ -77,6 +77,11 @@ interface DayGroup {
   videos: SingleVideo[]
 }
 
+interface SingleVideoPreviewItem {
+  video: SingleVideo
+  file: SingleVideo['files'][number]
+}
+
 export function SingleVideosPage() {
   const [videos, setVideos] = useState<SingleVideo[]>([])
   const [loading, setLoading] = useState(true)
@@ -181,7 +186,17 @@ export function SingleVideosPage() {
     return videos.filter((video) => {
       if (providerFilter !== 'all' && video.provider !== providerFilter) return false
       if (!needle) return true
-      const haystack = `${video.uploader ?? ''} ${video.title ?? ''}`.toLowerCase()
+      const haystack = [
+        video.uploader,
+        video.title,
+        video.sourceUrl,
+        video.providerVideoId,
+        video.relativePath,
+        video.mediaType,
+      ]
+        .filter(Boolean)
+        .join(' ')
+        .toLowerCase()
       return haystack.includes(needle)
     })
   }, [videos, providerFilter, query])
@@ -205,6 +220,15 @@ export function SingleVideosPage() {
     const map = new Map<string, number>()
     filtered.forEach((video, index) => map.set(video.id, index))
     return map
+  }, [filtered])
+
+  const previewItems = useMemo<SingleVideoPreviewItem[]>(() => {
+    return filtered.flatMap((video) => {
+      const files = video.files.length > 0
+        ? video.files
+        : [{ relativePath: video.relativePath, absolutePath: video.absolutePath, mediaType: video.mediaType }]
+      return files.map((file) => ({ video, file }))
+    })
   }, [filtered])
 
   // Sai/limpa a seleção ao trocar de filtro.
@@ -244,10 +268,14 @@ export function SingleVideosPage() {
 
   const openLightbox = useCallback(
     (video: SingleVideo) => {
-      const index = indexById.get(video.id)
-      if (index !== undefined) setLightboxIndex(index)
+      const index = previewItems.findIndex(
+        (item) => item.video.id === video.id && item.file.absolutePath === video.absolutePath,
+      )
+      const fallbackIndex = previewItems.findIndex((item) => item.video.id === video.id)
+      if (index >= 0) setLightboxIndex(index)
+      else if (fallbackIndex >= 0) setLightboxIndex(fallbackIndex)
     },
-    [indexById],
+    [previewItems],
   )
   const closeLightbox = useCallback(() => setLightboxIndex(undefined), [])
   const stepLightbox = useCallback(
@@ -255,11 +283,11 @@ export function SingleVideosPage() {
       setLightboxIndex((current) => {
         if (current === undefined) return current
         const next = current + delta
-        if (next < 0 || next >= filtered.length) return current
+        if (next < 0 || next >= previewItems.length) return current
         return next
       })
     },
-    [filtered.length],
+    [previewItems.length],
   )
 
   // Teclado no lightbox.
@@ -379,14 +407,31 @@ export function SingleVideosPage() {
   }, [contextMenu])
 
   const gridStyle = { '--pv-thumb-min': `${DENSITY_STEPS[densityIndex]}px` } as CSSProperties
-  const activeVideo = lightboxIndex !== undefined ? filtered[lightboxIndex] : undefined
+  const activeItem = lightboxIndex !== undefined ? previewItems[lightboxIndex] : undefined
+  const activeVideo = activeItem?.video
+  const activeFileIndex =
+    activeItem && activeVideo
+      ? activeVideo.files.findIndex((file) => file.absolutePath === activeItem.file.absolutePath)
+      : -1
+  const activeTitle =
+    activeVideo && activeVideo.files.length > 1 && activeFileIndex >= 0
+      ? `${activeVideo.uploader ? `@${activeVideo.uploader}` : providerLabel(activeVideo.provider)} · ${activeFileIndex + 1} / ${activeVideo.files.length}`
+      : activeVideo?.uploader
+        ? `@${activeVideo.uploader}`
+        : activeVideo
+          ? providerLabel(activeVideo.provider)
+          : undefined
   const selectedCount = selectedIds.size
+
+  const isSingleVideoVideo = (mediaType: string) => mediaType === 'video'
 
   const renderCard = (video: SingleVideo) => (
     <MediaCard
       key={video.id}
-      videoThumbAbsPath={video.absolutePath}
-      isVideo
+      posterAbsPath={isSingleVideoVideo(video.mediaType) ? undefined : video.absolutePath}
+      videoThumbAbsPath={isSingleVideoVideo(video.mediaType) ? video.absolutePath : undefined}
+      isVideo={isSingleVideoVideo(video.mediaType)}
+      slideshowCount={video.mediaType === 'slideshow' ? video.files.length : undefined}
       badge={providerLabel(video.provider)}
       overlayText={video.uploader ? `@${video.uploader}` : undefined}
       selected={selectedIds.has(video.id)}
@@ -626,15 +671,17 @@ export function SingleVideosPage() {
         </div>
       ) : null}
 
-      {activeVideo ? (
+      {activeItem && activeVideo ? (
         <MediaLightbox
-          fileAbsPath={activeVideo.absolutePath}
-          isVideo
+          fileAbsPath={activeItem.file.absolutePath}
+          isVideo={isSingleVideoVideo(activeItem.file.mediaType)}
           hasPrev={lightboxIndex! > 0}
-          hasNext={lightboxIndex! < filtered.length - 1}
+          hasNext={lightboxIndex! < previewItems.length - 1}
           onPrev={() => stepLightbox(-1)}
           onNext={() => stepLightbox(1)}
           onClose={closeLightbox}
+          title={activeTitle}
+          audioAbsPath={activeVideo.mediaType === 'slideshow' ? activeVideo.audioAbsolutePath : undefined}
           actions={
             <>
               {activeVideo.sourceUrl ? (
@@ -642,7 +689,7 @@ export function SingleVideosPage() {
                   Open online
                 </button>
               ) : null}
-              <button className="ghost-button" onClick={() => safeReveal(activeVideo.absolutePath)} type="button">
+              <button className="ghost-button" onClick={() => safeReveal(activeItem.file.absolutePath)} type="button">
                 Reveal in folder
               </button>
             </>

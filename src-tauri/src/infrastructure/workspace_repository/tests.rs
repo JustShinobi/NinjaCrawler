@@ -172,6 +172,155 @@ fn build_post_url_twitter_uses_status_id() {
 }
 
 #[test]
+fn single_video_url_kind_routes_tiktok_photo_posts() {
+    assert_eq!(
+        single_video_url_kind(
+            "tiktok",
+            "https://www.tiktok.com/@rar1dade_/photo/7658099397019831573?lang=en"
+        ),
+        SingleVideoUrlKind::TikTokPhoto {
+            handle: "rar1dade_".to_string(),
+            post_id: "7658099397019831573".to_string(),
+        }
+    );
+    assert_eq!(
+        single_video_url_kind(
+            "tiktok",
+            "https://www.tiktok.com/@rar1dade_/video/7658099397019831573"
+        ),
+        SingleVideoUrlKind::Video
+    );
+}
+
+#[test]
+fn extract_tiktok_rehydration_json_reads_photo_post_images() {
+    let html = r#"
+        <script id="__UNIVERSAL_DATA_FOR_REHYDRATION__" type="application/json">
+        {
+          "__DEFAULT_SCOPE__": {
+            "webapp.video-detail": {
+              "itemInfo": {
+                "itemStruct": {
+                  "id": "7658099397019831573",
+                  "desc": "photo post",
+                  "createTime": "1783546503",
+                  "author": { "uniqueId": "rar1dade_" },
+                  "imagePost": {
+                    "images": [
+                      { "imageURL": { "urlList": ["https://example.test/one.jpeg"] } },
+                      { "imageURL": { "urlList": ["https://example.test/two.jpeg"] } }
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        }
+        </script>
+    "#;
+
+    let value = extract_tiktok_rehydration_json(html).expect("rehydration json");
+    let item = tiktok_item_from_rehydration(&value).expect("item struct");
+    let images = item
+        .get("imagePost")
+        .and_then(|image_post| image_post.get("images"))
+        .and_then(serde_json::Value::as_array)
+        .expect("images");
+
+    assert_eq!(
+        json_string_field(item, "desc").as_deref(),
+        Some("photo post")
+    );
+    assert_eq!(
+        item.get("createTime").and_then(parse_json_unix_timestamp),
+        Some(1_783_546_503)
+    );
+    assert_eq!(images.len(), 2);
+    assert_eq!(
+        tiktok_photo_file_name("7658099397019831573", 0, 2),
+        "7658099397019831573_001.jpg"
+    );
+}
+
+#[test]
+fn requested_tiktok_image_index_is_one_based_and_bounded() {
+    assert_eq!(
+        requested_tiktok_image_index(
+            "https://www.tiktok.com/@rar1dade_/photo/7658099397019831573?image_index=2",
+            8
+        ),
+        1
+    );
+    assert_eq!(
+        requested_tiktok_image_index(
+            "https://www.tiktok.com/@rar1dade_/photo/7658099397019831573?image_index=999",
+            8
+        ),
+        0
+    );
+    assert_eq!(
+        requested_tiktok_image_index(
+            "https://www.tiktok.com/@rar1dade_/photo/7658099397019831573",
+            8
+        ),
+        0
+    );
+}
+
+#[test]
+fn single_video_display_path_uses_requested_tiktok_photo_index() {
+    let temp_dir = tempfile::tempdir().expect("temp dir");
+    let root = temp_dir.path();
+    fs::write(root.join("7658099397019831573_001.jpg"), b"one").expect("first image");
+    fs::write(root.join("7658099397019831573_002.jpg"), b"two").expect("second image");
+
+    assert_eq!(
+        single_video_display_relative_path(
+            root,
+            "7658099397019831573_001.jpg",
+            "slideshow",
+            "https://www.tiktok.com/@rar1dade_/photo/7658099397019831573?image_index=2",
+            Some("7658099397019831573"),
+        ),
+        "7658099397019831573_002.jpg"
+    );
+}
+
+#[test]
+fn single_video_slideshow_paths_exclude_audio_but_audio_is_discovered() {
+    let temp_dir = tempfile::tempdir().expect("temp dir");
+    let root = temp_dir.path();
+    fs::write(root.join("7658099397019831573_001.jpg"), b"one").expect("first image");
+    fs::write(root.join("7658099397019831573_002.jpg"), b"two").expect("second image");
+    fs::write(root.join("7658099397019831573_audio.m4a"), b"audio").expect("audio");
+
+    let image_names: Vec<String> = single_video_slideshow_paths(root, "7658099397019831573")
+        .into_iter()
+        .filter_map(|path| {
+            path.file_name()
+                .and_then(|value| value.to_str())
+                .map(str::to_string)
+        })
+        .collect();
+    assert_eq!(
+        image_names,
+        vec![
+            "7658099397019831573_001.jpg".to_string(),
+            "7658099397019831573_002.jpg".to_string(),
+        ]
+    );
+
+    assert_eq!(
+        single_video_audio_relative_path(
+            root,
+            single_video_audio_path(root, Some("7658099397019831573")).as_deref(),
+        )
+        .as_deref(),
+        Some("7658099397019831573_audio.m4a")
+    );
+}
+
+#[test]
 fn backfill_twitter_post_keys_fills_only_missing() {
     let conn = rusqlite::Connection::open_in_memory().expect("db");
     conn.execute_batch(

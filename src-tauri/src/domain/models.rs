@@ -548,6 +548,17 @@ pub struct SingleVideo {
     pub media_type: String,
     pub captured_at: Option<i64>,
     pub downloaded_at: String,
+    pub files: Vec<SingleVideoFile>,
+    pub audio_relative_path: Option<String>,
+    pub audio_absolute_path: Option<String>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SingleVideoFile {
+    pub relative_path: String,
+    pub absolute_path: String,
+    pub media_type: String,
 }
 
 /// Item da fila leve de downloads de single video (um worker sequencial). Sem
