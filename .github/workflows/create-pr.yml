@@ -18,9 +18,8 @@ on:
         default: gemini-3.5-flash
         options:
           - gemini-3.5-flash
-          - gemini-3.1-flash
+          - gemini-3.1-pro-preview
           - gemini-3.1-flash-lite
-          - gemini-3-flash
           - custom
       custom_model:
         description: Model name to use when model is custom
@@ -72,6 +71,9 @@ jobs:
         with:
           fetch-depth: 0
           ref: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.base.ref || github.ref }}
+
+      - name: Sync Gemini model labels
+        run: node .github/scripts/sync-gemini-pr-models.mjs
 
       - name: Generate pull request content
         id: content
@@ -140,4 +142,4 @@ jobs:
         run: |
           set -euo pipefail
           gh pr comment "$PR_NUMBER" \
-            --body "PR generation for label \`$LABEL\` failed. The label was left in place so the request can be retried. Workflow run: $RUN_URL"
+            --body "PR generation for label \`$LABEL\` failed. If the label still exists, it was left in place so the request can be retried. Workflow run: $RUN_URL"

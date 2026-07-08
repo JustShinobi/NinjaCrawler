@@ -1,0 +1,48 @@
+name: sync-gemini-pr-models
+
+on:
+  workflow_dispatch:
+    inputs:
+      include_pattern:
+        description: Regex for model IDs to include
+        required: false
+        type: string
+      exclude_pattern:
+        description: Regex for model IDs to exclude
+        required: false
+        type: string
+      pinned_models:
+        description: Optional newline-separated model IDs to keep even if models.list omits aliases
+        required: false
+        type: string
+  schedule:
+    - cron: "17 9 * * 1"
+
+permissions:
+  contents: read
+  issues: write
+  actions: read
+
+concurrency:
+  group: sync-gemini-pr-models
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: Sync Gemini PR model labels
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    env:
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      GH_TOKEN: ${{ secrets.GH_TOKEN }}
+      PR_MODEL_SYNC_EXCLUDE_PATTERN: ${{ inputs.exclude_pattern }}
+      PR_MODEL_SYNC_INCLUDE_PATTERN: ${{ inputs.include_pattern }}
+      PR_MODEL_SYNC_PINNED_MODELS: ${{ inputs.pinned_models }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Sync allowed models and labels
+        run: node .github/scripts/sync-gemini-pr-models.mjs
