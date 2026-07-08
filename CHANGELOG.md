@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.12.0](https://github.com/MetalDevOps/NinjaCrawler/compare/v0.11.0...v0.12.0) (2026-07-08)
+
+
+### Features
+
+* **profile-view:** improve multi-window player UX ([#87](https://github.com/MetalDevOps/NinjaCrawler/issues/87)) ([ec48a86](https://github.com/MetalDevOps/NinjaCrawler/commit/ec48a861b2fc6c38b40cf5479e37bda8b587099a))
+* **single-videos:** support TikTok photo slideshow downloads ([#86](https://github.com/MetalDevOps/NinjaCrawler/issues/86)) ([b7445be](https://github.com/MetalDevOps/NinjaCrawler/commit/b7445bedf45c9fe76b567b0ec2f1d81c408f1535))
+
 ## [0.11.0](https://github.com/MetalDevOps/NinjaCrawler/compare/v0.10.0...v0.11.0) (2026-07-07)
 
 
