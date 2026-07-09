@@ -80,8 +80,11 @@ fn registered_app() -> Option<AppHandle> {
 }
 
 fn build_status(state: &SingleVideoQueueState) -> SingleVideoQueueStatus {
-    let queued_items: Vec<SingleVideoQueueItem> =
-        state.queue.iter().map(|job| job.to_item("queued")).collect();
+    let queued_items: Vec<SingleVideoQueueItem> = state
+        .queue
+        .iter()
+        .map(|job| job.to_item("queued"))
+        .collect();
     let active = state.active.as_ref().map(|job| job.to_item("running"));
     SingleVideoQueueStatus {
         queued_count: state.queue.len() as u32,
@@ -119,7 +122,10 @@ fn publish_catalog_changed() {
 /// Enfileira o download de um single video e garante que o worker esteja vivo.
 /// Retorna o status atual da fila. Duplicatas (mesma URL já em fila ou ativa)
 /// são ignoradas silenciosamente.
-pub fn enqueue_single_video(app: &AppHandle, url: String) -> Result<SingleVideoQueueStatus, String> {
+pub fn enqueue_single_video(
+    app: &AppHandle,
+    url: String,
+) -> Result<SingleVideoQueueStatus, String> {
     let url = url.trim().to_string();
     if url.is_empty() {
         return Err("A video URL is required.".to_string());
@@ -131,10 +137,7 @@ pub fn enqueue_single_video(app: &AppHandle, url: String) -> Result<SingleVideoQ
             .lock()
             .map_err(|_| "Single video queue lock is poisoned.".to_string())?;
 
-        let already_active = state
-            .active
-            .as_ref()
-            .is_some_and(|job| job.url == url);
+        let already_active = state.active.as_ref().is_some_and(|job| job.url == url);
         if already_active || state.queued_urls.contains(&url) {
             return build_status_locked(&state);
         }
@@ -201,7 +204,10 @@ fn spawn_worker(app: AppHandle) {
     });
 }
 
-fn record_result(job: &SingleVideoJob, result: &Result<crate::domain::models::SingleVideo, String>) {
+fn record_result(
+    job: &SingleVideoJob,
+    result: &Result<crate::domain::models::SingleVideo, String>,
+) {
     if let Ok(mut state) = queue_state().lock() {
         state.active = None;
         let recent = match result {

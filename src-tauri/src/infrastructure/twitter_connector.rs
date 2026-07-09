@@ -278,15 +278,14 @@ where
         let _ = fs::remove_dir_all(&pages_dir);
         fs::create_dir_all(&pages_dir).map_err(|error| error.to_string())?;
 
-        let parse_outcome =
-            run_gallery_dl_parser(
-                request,
-                &config_path,
-                &run.url,
-                &run.extra_args,
-                &pages_dir,
-                &is_cancelled,
-            );
+        let parse_outcome = run_gallery_dl_parser(
+            request,
+            &config_path,
+            &run.url,
+            &run.extra_args,
+            &pages_dir,
+            &is_cancelled,
+        );
         let page_output = match parse_outcome {
             Ok(output) => output,
             Err(error) => {
@@ -397,7 +396,9 @@ where
                 if !seen_media_keys.insert(asset.provider_media_key.clone()) {
                     continue;
                 }
-                if request.ledger_media_keys.contains(&asset.provider_media_key)
+                if request
+                    .ledger_media_keys
+                    .contains(&asset.provider_media_key)
                     || request.existing_relative_paths.contains(&asset.file_name)
                 {
                     summary.skipped_existing_asset_count += 1;
@@ -500,12 +501,9 @@ where
             .map(str::trim)
             .filter(|value| !value.is_empty())
         {
-            if let Some(current) = resolve_handle_via_user_id(
-                request,
-                &config_path,
-                hint,
-                &is_cancelled,
-            ) {
+            if let Some(current) =
+                resolve_handle_via_user_id(request, &config_path, hint, &is_cancelled)
+            {
                 if !current.eq_ignore_ascii_case(&handle) {
                     resolved_handle = Some(current);
                 }
@@ -648,8 +646,7 @@ fn write_gallery_dl_config(request: &TwitterConnectorRequest) -> Result<PathBuf,
             .into_iter()
             .collect(),
     );
-    let serialized =
-        serde_json::to_string_pretty(&config).map_err(|error| error.to_string())?;
+    let serialized = serde_json::to_string_pretty(&config).map_err(|error| error.to_string())?;
     let mut file = fs::File::create(&config_path).map_err(|error| error.to_string())?;
     file.write_all(serialized.as_bytes())
         .map_err(|error| error.to_string())?;
@@ -712,26 +709,18 @@ where
     command.creation_flags(CREATE_NO_WINDOW);
 
     let command_line = std::iter::once(command.get_program().to_string_lossy().to_string())
-        .chain(command.get_args().map(|arg| arg.to_string_lossy().to_string()))
+        .chain(
+            command
+                .get_args()
+                .map(|arg| arg.to_string_lossy().to_string()),
+        )
         .collect::<Vec<_>>()
         .join(" ");
-    connector_debug::append_current(
-        "gallery-dl",
-        "call",
-        "parser.spawn",
-        command_line,
-    );
-    let mut child = command
-        .spawn()
-        .map_err(|error| {
-            connector_debug::append_current(
-                "gallery-dl",
-                "error",
-                "parser.spawn",
-                error.to_string(),
-            );
-            format!("Failed to start gallery-dl: {}", error)
-        })?;
+    connector_debug::append_current("gallery-dl", "call", "parser.spawn", command_line);
+    let mut child = command.spawn().map_err(|error| {
+        connector_debug::append_current("gallery-dl", "error", "parser.spawn", error.to_string());
+        format!("Failed to start gallery-dl: {}", error)
+    })?;
 
     let started = std::time::Instant::now();
     let mut stdout_offset = 0usize;
@@ -881,7 +870,11 @@ fn extract_tweet_from_object(map: &serde_json::Map<String, Value>) -> Option<Par
             result
                 .get("legacy")
                 .and_then(|user_legacy| user_legacy.get("profile_image_url_https"))
-                .or_else(|| result.get("avatar").and_then(|avatar| avatar.get("image_url")))
+                .or_else(|| {
+                    result
+                        .get("avatar")
+                        .and_then(|avatar| avatar.get("image_url"))
+                })
         })
         .and_then(Value::as_str)
         .map(str::to_string);
@@ -950,10 +943,7 @@ fn extract_asset_from_media(media: &Value) -> Option<ParsedTweetAsset> {
                         .is_some_and(|value| value.eq_ignore_ascii_case("video/mp4"))
                 })
                 .max_by_key(|variant| {
-                    variant
-                        .get("bitrate")
-                        .and_then(Value::as_i64)
-                        .unwrap_or(0)
+                    variant.get("bitrate").and_then(Value::as_i64).unwrap_or(0)
                 })?;
             let url = best.get("url").and_then(Value::as_str)?;
             let file_name = url_file_name(url)?;
@@ -1022,7 +1012,9 @@ fn download_asset(
     // configurada), vídeos na subpasta `Video` (se separate_video_folder),
     // imagens e demais na raiz do perfil.
     let target_dir = if is_gif && !request.gifs_special_folder.trim().is_empty() {
-        request.profile_root.join(request.gifs_special_folder.trim())
+        request
+            .profile_root
+            .join(request.gifs_special_folder.trim())
     } else if entry.asset.media_type == "video" && request.separate_video_folder {
         request.profile_root.join("Video")
     } else {
@@ -1040,12 +1032,7 @@ fn download_asset(
         format!("GET {}", entry.asset.file_url),
     );
     let response = client.get(&entry.asset.file_url).send().map_err(|error| {
-        connector_debug::append_current(
-            "twitter-http",
-            "error",
-            "GET media",
-            error.to_string(),
-        );
+        connector_debug::append_current("twitter-http", "error", "GET media", error.to_string());
         error.to_string()
     })?;
     connector_debug::append_current(
@@ -1084,7 +1071,11 @@ fn download_asset(
 fn timestamped_file_name(captured_at_timestamp: Option<i64>, raw_file_name: &str) -> String {
     match captured_at_timestamp.and_then(|value| Local.timestamp_opt(value, 0).single()) {
         Some(local_time) => {
-            format!("{} {}", local_time.format("%Y-%m-%d %H.%M.%S"), raw_file_name)
+            format!(
+                "{} {}",
+                local_time.format("%Y-%m-%d %H.%M.%S"),
+                raw_file_name
+            )
         }
         None => raw_file_name.to_string(),
     }
@@ -1096,7 +1087,8 @@ fn file_sha256(path: &Path) -> Result<String, String> {
     let mut hasher = Sha256::new();
     let mut buffer = [0u8; 8192];
     loop {
-        let read = std::io::Read::read(&mut file, &mut buffer).map_err(|error| error.to_string())?;
+        let read =
+            std::io::Read::read(&mut file, &mut buffer).map_err(|error| error.to_string())?;
         if read == 0 {
             break;
         }

@@ -335,10 +335,7 @@ pub fn open_source_sync_queue_window(app: &tauri::AppHandle) -> Result<(), Strin
     Ok(())
 }
 
-pub fn open_profile_view_window(
-    app: &tauri::AppHandle,
-    source_id: String,
-) -> Result<(), String> {
+pub fn open_profile_view_window(app: &tauri::AppHandle, source_id: String) -> Result<(), String> {
     let label = profile_view_window_label(&source_id);
     // Uma janela por perfil: reabrir o mesmo sourceId foca a janela existente,
     // enquanto perfis diferentes ficam lado a lado.
@@ -1808,10 +1805,7 @@ mod tests {
             super::profile_view_window_label(" same source "),
             "profile-view-same_20source"
         );
-        assert_eq!(
-            super::profile_view_window_label(""),
-            "profile-view-unknown"
-        );
+        assert_eq!(super::profile_view_window_label(""), "profile-view-unknown");
         assert_eq!(
             super::profile_view_window_label("src-1"),
             super::profile_view_window_label("src-1")

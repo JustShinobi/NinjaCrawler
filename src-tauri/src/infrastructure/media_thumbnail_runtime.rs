@@ -96,7 +96,9 @@ pub fn enqueue(source_ids: Vec<String>) -> Result<MediaThumbnailQueueStatus, Str
 fn run_worker() {
     loop {
         let job = {
-            let Ok(mut queue) = state().lock() else { return };
+            let Ok(mut queue) = state().lock() else {
+                return;
+            };
             let Some(mut job) = queue.queued.pop_front() else {
                 queue.worker_running = false;
                 return;
@@ -162,7 +164,11 @@ fn update_active(job: &MediaThumbnailQueueItem) {
 
 fn set_current_file(source_id: &str, path: &str) {
     if let Ok(mut queue) = state().lock() {
-        if let Some(active) = queue.active.as_mut().filter(|job| job.source_id == source_id) {
+        if let Some(active) = queue
+            .active
+            .as_mut()
+            .filter(|job| job.source_id == source_id)
+        {
             active.current_file = Path::new(path)
                 .file_name()
                 .map(|name| name.to_string_lossy().to_string());
@@ -172,16 +178,19 @@ fn set_current_file(source_id: &str, path: &str) {
 
 fn record_file_result(source_id: &str, generated: bool) {
     if let Ok(mut queue) = state().lock() {
-        if let Some(active) = queue.active.as_mut().filter(|job| job.source_id == source_id) {
+        if let Some(active) = queue
+            .active
+            .as_mut()
+            .filter(|job| job.source_id == source_id)
+        {
             if generated {
                 active.generated += 1;
             } else {
                 active.failed += 1;
             }
             active.files_processed += 1;
-            active.progress_percent = Some(
-                active.files_processed.saturating_mul(100) / active.files_total.max(1),
-            );
+            active.progress_percent =
+                Some(active.files_processed.saturating_mul(100) / active.files_total.max(1));
         }
     }
 }

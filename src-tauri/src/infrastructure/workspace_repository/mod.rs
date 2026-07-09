@@ -1745,7 +1745,11 @@ pub(super) fn format_already_up_to_date_suffix(already_up_to_date: u32) -> Strin
     if already_up_to_date == 0 {
         return String::new();
     }
-    let post_word = if already_up_to_date == 1 { "post" } else { "posts" };
+    let post_word = if already_up_to_date == 1 {
+        "post"
+    } else {
+        "posts"
+    };
     format!(" {already_up_to_date} {post_word} already up to date.")
 }
 

@@ -112,8 +112,7 @@ fn run() -> Result<(), String> {
         source_ids.push(source_id);
     }
 
-    let availability =
-        workspace_repository::check_source_availability(source_ids.clone(), None)?;
+    let availability = workspace_repository::check_source_availability(source_ids.clone(), None)?;
     let provider_results = source_ids
         .iter()
         .zip(handles.iter())

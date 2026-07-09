@@ -2717,8 +2717,7 @@ impl<'a> IncrementalDiscoveryStop<'a> {
             || !request.ledger_media_keys.is_empty()
             || !request.existing_relative_paths.is_empty()
             || !request.ledger_relative_paths.is_empty();
-        let active =
-            !request.full_scan && !request.missing_only && has_prior_evidence;
+        let active = !request.full_scan && !request.missing_only && has_prior_evidence;
         Self {
             active,
             known_page_threshold: INSTAGRAM_INCREMENTAL_KNOWN_PAGE_THRESHOLD,
@@ -4461,14 +4460,13 @@ mod tests {
         append_single_asset, best_image_url, build_graphql_body, build_manifest_section,
         build_media_file_name, classify_section_error, collect_media_assets, compute_jazoest,
         cookie_value, execute_manifest_section, extract_reels_payload_items, interruptible_sleep,
-        manifest_observed_posts, normalize_profile_sync_manifest, SectionErrorDisposition,
-        SYNC_CANCELLED_MESSAGE,
-        parse_profile_description, parse_profile_description_from_user,
-        provider_media_identity_from_url, public_identity_headers, resolve_destination_path,
-        should_ignore_media_download_error, DownloadedInstagramMedia, IncrementalDiscoveryStop,
-        InstagramAuthHeaders, InstagramClient, InstagramConnectorRequest, InstagramManifestPost,
-        InstagramMediaFileNamingMode, InstagramPacing, InstagramSectionSelection,
-        InstagramSyncManifest, MediaAsset, PlannedMediaAsset,
+        manifest_observed_posts, normalize_profile_sync_manifest, parse_profile_description,
+        parse_profile_description_from_user, provider_media_identity_from_url,
+        public_identity_headers, resolve_destination_path, should_ignore_media_download_error,
+        DownloadedInstagramMedia, IncrementalDiscoveryStop, InstagramAuthHeaders, InstagramClient,
+        InstagramConnectorRequest, InstagramManifestPost, InstagramMediaFileNamingMode,
+        InstagramPacing, InstagramSectionSelection, InstagramSyncManifest, MediaAsset,
+        PlannedMediaAsset, SectionErrorDisposition, SYNC_CANCELLED_MESSAGE,
     };
 
     #[test]
@@ -4622,7 +4620,10 @@ mod tests {
     #[test]
     fn incremental_stop_flags_page_fully_known_only_when_every_item_is_known() {
         let mut request = sample_request();
-        request.ledger_post_keys = ["100", "200", "abc"].iter().map(|v| v.to_string()).collect();
+        request.ledger_post_keys = ["100", "200", "abc"]
+            .iter()
+            .map(|v| v.to_string())
+            .collect();
         let root = request.profile_root.clone();
 
         let stop = IncrementalDiscoveryStop::new(&request, "timeline", &root, None);
