@@ -92,6 +92,7 @@ export interface InstagramSourceSyncOptions {
   downloadVideos?: boolean
   getUserMediaOnly?: boolean
   missingOnly?: boolean
+  fullScan?: boolean
   dateFrom?: string
   dateTo?: string
   verifiedProfile?: boolean

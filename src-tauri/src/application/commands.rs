@@ -1,15 +1,15 @@
 use crate::domain::models::{
     AccountsWindowIntent, AppSettingUpsert, BatchSourceProfilePatch, CheckSourceAvailabilityInput,
-    CloneSyncPlanInput, ConnectorDebugEntry, ConnectorDebugQuery, DesktopRuntimeState, ImportMethodDescriptor, ImportPreview,
-    ImportPreviewOptions, ImportProviderDescriptor, ImportQueueStatus, ImportRootDescriptor,
-    ImportRunRequest, ImportRunResult, MoveSyncPlanInput, PlanEditorWindowIntent,
-    ProviderAccountCookie, ProviderAccountCookieImport, ProviderAccountEditor,
-    ProviderAccountSettingValue, ProviderAccountUpsert, RunSourceSyncInput, RunSyncPlanNowInput,
-    RuntimeLogContext, RuntimeLogEntry, RuntimeLogQuery, RuntimeLogWindowStatus,
-    SchedulerGroupUpsert, SchedulerSetUpsert, SetSyncPlanPauseInput, SkipSyncPlanInput,
-    SourceAvailabilityCheckResult, SourceDeleteQueueStatus, SourceEditorWindowIntent,
-    SourceProfileDeleteInput, SourceProfileUpsert, SourceSyncQueueStatus, SyncPlanTargetPreview,
-    SyncPlanTargetPreviewInput, SyncPlanUpsert, WorkspaceSnapshot,
+    CloneSyncPlanInput, ConnectorDebugEntry, ConnectorDebugQuery, DesktopRuntimeState,
+    ImportMethodDescriptor, ImportPreview, ImportPreviewOptions, ImportProviderDescriptor,
+    ImportQueueStatus, ImportRootDescriptor, ImportRunRequest, ImportRunResult, MoveSyncPlanInput,
+    PlanEditorWindowIntent, ProviderAccountCookie, ProviderAccountCookieImport,
+    ProviderAccountEditor, ProviderAccountSettingValue, ProviderAccountUpsert, RunSourceSyncInput,
+    RunSyncPlanNowInput, RuntimeLogContext, RuntimeLogEntry, RuntimeLogQuery,
+    RuntimeLogWindowStatus, SchedulerGroupUpsert, SchedulerSetUpsert, SetSyncPlanPauseInput,
+    SkipSyncPlanInput, SourceAvailabilityCheckResult, SourceDeleteQueueStatus,
+    SourceEditorWindowIntent, SourceProfileDeleteInput, SourceProfileUpsert, SourceSyncQueueStatus,
+    SyncPlanTargetPreview, SyncPlanTargetPreviewInput, SyncPlanUpsert, WorkspaceSnapshot,
 };
 use crate::infrastructure::{
     connector_debug, connector_runtime, desktop_runtime, import_runtime, media_thumbnail_runtime,
@@ -389,7 +389,11 @@ pub fn reorder_source_sync_provider_queue(
 ) -> Result<WorkspaceSnapshot, String> {
     publish_snapshot(
         &app,
-        source_sync_runtime::reorder_source_sync_provider_queue(&app, provider, ordered_source_ids)?,
+        source_sync_runtime::reorder_source_sync_provider_queue(
+            &app,
+            provider,
+            ordered_source_ids,
+        )?,
     )
 }
 
@@ -600,8 +604,8 @@ pub fn enqueue_single_video_download(
 }
 
 #[tauri::command]
-pub fn single_video_queue_status(
-) -> Result<crate::domain::models::SingleVideoQueueStatus, String> {
+pub fn single_video_queue_status() -> Result<crate::domain::models::SingleVideoQueueStatus, String>
+{
     single_video_runtime::single_video_queue_status()
 }
 
@@ -722,10 +726,7 @@ pub fn open_source_sync_queue_window(app: tauri::AppHandle) -> Result<(), String
 }
 
 #[tauri::command]
-pub fn open_profile_view_window(
-    app: tauri::AppHandle,
-    source_id: String,
-) -> Result<(), String> {
+pub fn open_profile_view_window(app: tauri::AppHandle, source_id: String) -> Result<(), String> {
     desktop_runtime::open_profile_view_window(&app, source_id)
 }
 

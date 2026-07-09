@@ -810,6 +810,10 @@ pub struct InstagramSourceSyncOptions {
     pub get_user_media_only: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub missing_only: Option<bool>,
+    /// Quando `true`, o sync deste source ignora a parada incremental e
+    /// re-percorre o feed inteiro (útil quando o perfil reexpõe mídias antigas).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub full_scan: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub date_from: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -866,6 +870,7 @@ impl Default for InstagramSourceSyncOptions {
             download_videos: Some(true),
             get_user_media_only: Some(false),
             missing_only: Some(false),
+            full_scan: Some(false),
             date_from: Some(String::new()),
             date_to: Some(String::new()),
             verified_profile: Some(true),
@@ -1159,6 +1164,7 @@ pub struct InstagramSyncOptionsPatch {
     pub extract_image_from_video: Option<InstagramExtractImageFromVideoPatch>,
     pub get_user_media_only: Option<bool>,
     pub missing_only: Option<bool>,
+    pub full_scan: Option<bool>,
     pub verified_profile: Option<bool>,
     pub force_update_user_name: Option<bool>,
     pub force_update_user_information: Option<bool>,

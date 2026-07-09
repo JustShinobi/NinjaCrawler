@@ -113,11 +113,8 @@ static TWITTER_RUNTIME: StaticProviderRuntime = StaticProviderRuntime {
     }),
 };
 
-static PROVIDER_REGISTRY: [&dyn ProviderRuntime; 3] = [
-    &INSTAGRAM_RUNTIME,
-    &TIKTOK_RUNTIME,
-    &TWITTER_RUNTIME,
-];
+static PROVIDER_REGISTRY: [&dyn ProviderRuntime; 3] =
+    [&INSTAGRAM_RUNTIME, &TIKTOK_RUNTIME, &TWITTER_RUNTIME];
 
 pub fn provider_runtime(provider: &str) -> Option<&'static dyn ProviderRuntime> {
     PROVIDER_REGISTRY

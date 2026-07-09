@@ -1738,6 +1738,24 @@ fn format_connector_sync_success_summary(
     }
 }
 
+/// Sufixo curto e amigável comum aos providers: "N posts already up to date."
+/// (vazio quando nada estava sincronizado). Os contadores técnicos ficam no
+/// realtime debugger, não no resumo mostrado ao usuário.
+pub(super) fn format_already_up_to_date_suffix(already_up_to_date: u32) -> String {
+    if already_up_to_date == 0 {
+        return String::new();
+    }
+    let post_word = if already_up_to_date == 1 {
+        "post"
+    } else {
+        "posts"
+    };
+    format!(" {already_up_to_date} {post_word} already up to date.")
+}
+
+/// Sufixo amigável do Instagram para o resumo mostrado ao usuário. O
+/// detalhamento técnico (posts/assets pulados por seção) vai para o realtime
+/// debugger — aqui só dizemos, em linguagem simples, o que já estava em dia.
 fn format_instagram_manifest_suffix(
     manifest_summary: Option<&instagram_connector::InstagramManifestSummary>,
     include_in_summary: bool,
@@ -1748,54 +1766,11 @@ fn format_instagram_manifest_suffix(
 
     manifest_summary
         .map(|summary| {
-            let mut filtered_reasons = Vec::new();
-            if summary.skipped_existing_post_count > 0 {
-                filtered_reasons.push(format!(
-                    "{} existing posts",
-                    summary.skipped_existing_post_count
-                ));
-            }
-            if summary.skipped_duplicate_post_count > 0 {
-                filtered_reasons.push(format!(
-                    "{} duplicate posts",
-                    summary.skipped_duplicate_post_count
-                ));
-            }
-            if summary.skipped_unavailable_post_count > 0 {
-                filtered_reasons.push(format!(
-                    "{} posts without downloadable media",
-                    summary.skipped_unavailable_post_count
-                ));
-            }
-            if summary.skipped_existing_asset_count > 0 {
-                filtered_reasons.push(format!(
-                    "{} existing assets",
-                    summary.skipped_existing_asset_count
-                ));
-            }
-            if summary.skipped_duplicate_asset_count > 0 {
-                filtered_reasons.push(format!(
-                    "{} duplicate assets",
-                    summary.skipped_duplicate_asset_count
-                ));
-            }
-
-            if filtered_reasons.is_empty() {
-                format!(
-                    " Manifest retained {} posts and queued {} assets across {} sections.",
-                    summary.normalized_post_count,
-                    summary.queued_asset_count,
-                    summary.section_count
-                )
-            } else {
-                format!(
-                    " Manifest retained {} posts and queued {} assets across {} sections after filtering {}.",
-                    summary.normalized_post_count,
-                    summary.queued_asset_count,
-                    summary.section_count,
-                    filtered_reasons.join(", ")
-                )
-            }
+            // "Já em dia" = posts reconhecidos como sincronizados (no ledger ou
+            // com a mídia já em disco) + duplicados colapsados.
+            format_already_up_to_date_suffix(
+                summary.skipped_existing_post_count + summary.skipped_duplicate_post_count,
+            )
         })
         .unwrap_or_default()
 }
@@ -1975,6 +1950,7 @@ fn build_instagram_identity_probe_request(
         text_special_folder: false,
         get_user_media_only: false,
         missing_only: false,
+        full_scan: false,
         date_from_timestamp: None,
         date_to_timestamp: None,
         media_file_naming_mode: instagram_connector::InstagramMediaFileNamingMode::PresetNewDefault,
@@ -2028,6 +2004,7 @@ fn build_instagram_authenticated_identity_probe_request(
         text_special_folder: false,
         get_user_media_only: false,
         missing_only: false,
+        full_scan: false,
         date_from_timestamp: None,
         date_to_timestamp: None,
         media_file_naming_mode: instagram_connector::InstagramMediaFileNamingMode::PresetNewDefault,
@@ -2211,6 +2188,7 @@ fn build_instagram_saved_posts_request(
         text_special_folder,
         get_user_media_only: false,
         missing_only: false,
+        full_scan: false,
         date_from_timestamp: None,
         date_to_timestamp: None,
         media_file_naming_mode,

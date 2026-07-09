@@ -44,6 +44,139 @@ pub(super) fn instagram_error_policy_settings(
     (exclude, log_skipped, tagged_limit)
 }
 
+pub(super) fn reconcile_tiktok_provider_ledgers_from_disk(
+    connection: &Connection,
+    profile_root: &Path,
+    account_id: &str,
+    source_id: &str,
+    source_handle: &str,
+    timestamp: &str,
+) -> Result<usize, String> {
+    let files = collect_media_file_paths(profile_root)?;
+    let mut observed_by_post: HashMap<String, twitter_connector::ObservedTwitterPost> =
+        HashMap::new();
+    let mut recovered_media = Vec::new();
+    let mut seen_media_keys = HashSet::new();
+
+    for file_path in files {
+        let Some(file_name) = file_path.file_name().and_then(|value| value.to_str()) else {
+            continue;
+        };
+        let file_name = file_name.to_string();
+        if !is_recoverable_tiktok_media_path(profile_root, &file_path, &file_name) {
+            continue;
+        }
+        let Some(post_id) = tiktok_post_id_from_media_file_name(&file_name) else {
+            continue;
+        };
+        let Some(media_type) = tiktok_media_type_from_file_name(&file_name) else {
+            continue;
+        };
+        let provider_media_key = file_name.to_ascii_lowercase();
+        if !seen_media_keys.insert((provider_media_key.clone(), media_type.clone())) {
+            continue;
+        }
+
+        observed_by_post.entry(post_id.clone()).or_insert_with(|| {
+            twitter_connector::ObservedTwitterPost {
+                provider_post_key: post_id.clone(),
+                media_section: "timeline".to_string(),
+            }
+        });
+        recovered_media.push(twitter_connector::DownloadedTwitterMedia {
+            file_path,
+            media_type,
+            media_section: "timeline".to_string(),
+            provider_media_key,
+            provider_post_key: post_id.clone(),
+            captured_at_timestamp: tiktok_timestamp_from_post_id(&post_id),
+            final_file_name: file_name,
+        });
+    }
+
+    if recovered_media.is_empty() {
+        return Ok(0);
+    }
+
+    let mut observed_posts = observed_by_post.into_values().collect::<Vec<_>>();
+    observed_posts.sort_by(|left, right| left.provider_post_key.cmp(&right.provider_post_key));
+    upsert_provider_sync_post_ledger_entries(
+        connection,
+        "tiktok",
+        source_id,
+        account_id,
+        source_handle,
+        &observed_posts,
+        timestamp,
+    )?;
+    upsert_provider_sync_media_ledger_entries(
+        connection,
+        &ProviderSyncMediaScope {
+            provider: "tiktok",
+            source_id,
+            account_id,
+            source_handle,
+            profile_root,
+            timestamp,
+        },
+        &recovered_media,
+    )?;
+    Ok(recovered_media.len())
+}
+
+fn is_recoverable_tiktok_media_path(profile_root: &Path, path: &Path, file_name: &str) -> bool {
+    if is_profile_image_file(file_name) {
+        return false;
+    }
+    let relative = path.strip_prefix(profile_root).unwrap_or(path);
+    if relative.components().any(|component| {
+        let segment = component.as_os_str().to_string_lossy();
+        segment.eq_ignore_ascii_case(".thumbs")
+            || segment.eq_ignore_ascii_case("cover")
+            || segment.eq_ignore_ascii_case("settings")
+    }) {
+        return false;
+    }
+    tiktok_media_type_from_file_name(file_name).is_some()
+}
+
+fn tiktok_media_type_from_file_name(file_name: &str) -> Option<String> {
+    let extension = Path::new(file_name)
+        .extension()
+        .and_then(|value| value.to_str())?
+        .to_ascii_lowercase();
+    match extension.as_str() {
+        "mp4" | "webm" | "mkv" | "mov" | "m4v" => Some("video".to_string()),
+        "jpg" | "jpeg" | "png" | "webp" | "heic" | "gif" => Some("image".to_string()),
+        _ => None,
+    }
+}
+
+pub(super) fn tiktok_post_id_from_media_file_name(file_name: &str) -> Option<String> {
+    let mut current = String::new();
+    for character in file_name.chars() {
+        if character.is_ascii_digit() {
+            current.push(character);
+            continue;
+        }
+        if is_plausible_tiktok_post_id(&current) {
+            return Some(current);
+        }
+        current.clear();
+    }
+    is_plausible_tiktok_post_id(&current).then_some(current)
+}
+
+fn is_plausible_tiktok_post_id(value: &str) -> bool {
+    (18..=20).contains(&value.len()) && value.chars().all(|character| character.is_ascii_digit())
+}
+
+fn tiktok_timestamp_from_post_id(post_id: &str) -> Option<i64> {
+    let parsed = post_id.parse::<u64>().ok()?;
+    let timestamp = (parsed >> 32) as i64;
+    (timestamp > 0).then_some(timestamp)
+}
+
 /// Monta o pacing de requests do Instagram a partir das settings da conta
 /// (timers espelhados do SCrawler; defaults idem).
 pub(super) fn instagram_request_pacing(
@@ -1318,12 +1451,25 @@ pub(super) fn execute_twitter_source_sync_with_connection(
             }
 
             let downloaded = result.downloaded_media.len();
-            let mut summary = format!(
-                "Twitter sync succeeded. Downloaded {} media items. Manifest parsed {} pages and queued {} assets.",
-                downloaded,
-                result.manifest_summary.parsed_page_count,
-                result.manifest_summary.queued_asset_count
+            // Detalhamento técnico → realtime debugger (o resumo fica amigável).
+            connector_debug::append_current(
+                "internal.twitter",
+                "summary",
+                "manifest",
+                format!(
+                    "parsed_pages={} queued_assets={} downloaded_assets={} skipped_existing_posts={} skipped_existing_assets={}",
+                    result.manifest_summary.parsed_page_count,
+                    result.manifest_summary.queued_asset_count,
+                    downloaded,
+                    result.manifest_summary.skipped_existing_post_count,
+                    result.manifest_summary.skipped_existing_asset_count,
+                ),
             );
+            let mut summary =
+                format_download_success_summary("Twitter sync succeeded.", downloaded);
+            summary.push_str(&format_already_up_to_date_suffix(
+                result.manifest_summary.skipped_existing_post_count,
+            ));
             if result.limit_aborted {
                 summary.push_str(" Rate limit reached; remaining models were skipped.");
             }
@@ -1485,6 +1631,32 @@ pub(super) fn execute_tiktok_source_sync_with_connection(
     } else {
         String::new()
     };
+
+    let recovered_from_disk = reconcile_tiktok_provider_ledgers_from_disk(
+        connection,
+        &profile_root,
+        &context.account.id,
+        &context.source.id,
+        &handle,
+        &started_at,
+    )?;
+    if recovered_from_disk > 0 {
+        log_runtime_event(
+            layout,
+            "sync.ledger",
+            "info",
+            RuntimeLogAnchor {
+                account_id: Some(&context.account.id),
+                provider: Some(&context.source.provider),
+                source_id: Some(&context.source.id),
+                source_handle: Some(&context.source.handle),
+            },
+            format!(
+                "Recovered {recovered_from_disk} TikTok media ledger item(s) from existing files before sync."
+            ),
+            None,
+        );
+    }
 
     let ledger_post_keys =
         load_provider_sync_post_ledger_keys(connection, "tiktok", &context.source.id)?;
@@ -1828,12 +2000,7 @@ pub(super) fn execute_tiktok_source_sync_with_connection(
                     &started_at,
                     &finished_at,
                 )?;
-                propagate_source_sync_account_health(
-                    connection,
-                    context,
-                    &outcome,
-                    &finished_at,
-                )?;
+                propagate_source_sync_account_health(connection, context, &outcome, &finished_at)?;
                 source_sync_runtime::report_source_sync_progress(
                     &context.source.id,
                     Some(100),
@@ -1902,12 +2069,7 @@ pub(super) fn execute_tiktok_source_sync_with_connection(
                     &started_at,
                     &finished_at,
                 )?;
-                propagate_source_sync_account_health(
-                    connection,
-                    context,
-                    &outcome,
-                    &finished_at,
-                )?;
+                propagate_source_sync_account_health(connection, context, &outcome, &finished_at)?;
                 source_sync_runtime::report_source_sync_progress(
                     &context.source.id,
                     Some(100),
@@ -2029,36 +2191,41 @@ pub(super) fn execute_tiktok_source_sync_with_connection(
                             || post.share_count.is_some()
                     })
                     .count();
-            let mut summary = format!(
-                "TikTok sync succeeded. Scanned {} post(s), found {} new post(s), downloaded {} media item(s).",
-                result.manifest_summary.normalized_post_count,
-                result.manifest_summary.queued_asset_count,
-                downloaded,
-            );
-            if collect_media_stats {
-                summary.push_str(&format!(
-                    " Stats: updated {} post(s){}.",
+            // Detalhamento técnico (scan, páginas, liked videos) → realtime
+            // debugger; o resumo mostrado ao usuário fica curto e amigável.
+            connector_debug::append_current(
+                "internal.tiktok",
+                "summary",
+                "manifest",
+                format!(
+                    "scanned_posts={} parsed_pages={} discovered_assets={} queued_assets={} downloaded_assets={} skipped_existing_posts={} skipped_existing_assets={} stats_updated={} liked(pages={}, discovered={}, downloaded={}, skipped_existing={}, failed={}, stopped_incrementally={})",
+                    result.manifest_summary.normalized_post_count,
+                    result.manifest_summary.parsed_page_count,
+                    result.manifest_summary.discovered_asset_count,
+                    result.manifest_summary.queued_asset_count,
+                    downloaded,
+                    result.manifest_summary.skipped_existing_post_count,
+                    result.manifest_summary.skipped_existing_asset_count,
                     stats_updated,
-                    if refresh_existing_media_stats {
-                        " including existing media"
-                    } else {
-                        ""
-                    }
-                ));
-            }
-            if liked_videos_enabled {
-                summary.push_str(&format!(
-                    " Liked videos: read {} pages, discovered {}, downloaded {}, skipped {} existing, failed {}{}.",
                     likes.pages_read,
                     likes.discovered,
                     likes.downloaded,
                     likes.skipped_existing,
                     likes.failed,
-                    if likes.stopped_incrementally {
-                        ", stopped at the configured known-page threshold"
-                    } else {
-                        ""
-                    }
+                    likes.stopped_incrementally,
+                ),
+            );
+            let mut summary = format_download_success_summary("TikTok sync succeeded.", downloaded);
+            summary.push_str(&format_already_up_to_date_suffix(
+                result.manifest_summary.skipped_existing_post_count,
+            ));
+            if collect_media_stats && stats_updated > 0 {
+                summary.push_str(&format!(" Stats updated for {stats_updated} post(s)."));
+            }
+            if liked_videos_enabled && likes.failed > 0 {
+                summary.push_str(&format!(
+                    " {} liked video(s) could not be downloaded.",
+                    likes.failed
                 ));
             }
             if result.limit_aborted {
@@ -3652,7 +3819,11 @@ pub(super) fn execute_instagram_source_sync_with_connection(
                         log_runtime_event(
                             layout,
                             "sync.profile",
-                            if status == "skipped" { "info" } else { "warning" },
+                            if status == "skipped" {
+                                "info"
+                            } else {
+                                "warning"
+                            },
                             RuntimeLogAnchor {
                                 account_id: Some(&context.account.id),
                                 provider: Some(&context.source.provider),
@@ -3938,6 +4109,7 @@ pub(super) fn build_instagram_profile_sync_request(
         text_special_folder: source_options.text_special_folder.unwrap_or(true),
         get_user_media_only: source_options.get_user_media_only.unwrap_or(false),
         missing_only: instagram_missing_only_enabled(&source_options),
+        full_scan: instagram_full_scan_enabled(&source_options),
         date_from_timestamp: explicit_date_from_timestamp
             .or_else(|| implicit_instagram_imported_cutoff_timestamp(&context.source, run_mode)),
         date_to_timestamp: instagram_date_to_timestamp(&source_options),
@@ -4242,15 +4414,26 @@ pub(super) fn persist_source_sync_run(
         )
         .map_err(|error| error.to_string())?;
 
-    connection
-        .execute(
-            "UPDATE source_profiles
-             SET last_synced_at = ?2,
-                 updated_at = ?2
-             WHERE id = ?1",
-            params![&context.source.id, finished_at],
-        )
-        .map_err(|error| error.to_string())?;
+    if outcome.status == "succeeded" {
+        connection
+            .execute(
+                "UPDATE source_profiles
+                 SET last_synced_at = ?2,
+                     updated_at = ?2
+                 WHERE id = ?1",
+                params![&context.source.id, finished_at],
+            )
+            .map_err(|error| error.to_string())?;
+    } else {
+        connection
+            .execute(
+                "UPDATE source_profiles
+                 SET updated_at = ?2
+                 WHERE id = ?1",
+                params![&context.source.id, finished_at],
+            )
+            .map_err(|error| error.to_string())?;
+    }
 
     Ok(())
 }

@@ -1443,6 +1443,11 @@ function normalizeInstagramSourceSyncOptions(value: unknown): InstagramSourceSyn
       ['missingOnly', 'missing_only'],
       DEFAULT_INSTAGRAM_SOURCE_SYNC_OPTIONS.missingOnly,
     ),
+    fullScan: booleanValue(
+      value,
+      ['fullScan', 'full_scan'],
+      DEFAULT_INSTAGRAM_SOURCE_SYNC_OPTIONS.fullScan,
+    ),
     dateFrom,
     dateTo,
     verifiedProfile: booleanValue(

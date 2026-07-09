@@ -543,6 +543,94 @@ fn is_profile_image_file_excludes_avatar_and_profile_picture() {
     ));
 }
 
+#[test]
+fn reconcile_tiktok_provider_ledgers_from_disk_seeds_existing_files() {
+    let (_temp_dir, layout) = create_test_layout();
+
+    let (recovered, post_count, media_count, thumbnail_count) =
+        with_workspace_layout(layout, |connection, test_layout| {
+            upsert_provider_account_with_connection(
+                connection,
+                test_layout,
+                sample_account("account-1", "tiktok"),
+            )?;
+            let mut source = sample_source("source-1", "tiktok", Some("account-1"));
+            source.handle = "@archangelszxx".to_string();
+            upsert_source_profile_with_connection(connection, test_layout, source)?;
+
+            let profile_root = test_layout.media_root.join("tiktok").join("@archangelszxx");
+            fs::create_dir_all(profile_root.join(".thumbs")).map_err(|error| error.to_string())?;
+            fs::create_dir_all(profile_root.join("Settings")).map_err(|error| error.to_string())?;
+            fs::write(
+                profile_root.join("2026-07-07 12.04.09 7659802061789302034_001.jpg"),
+                b"image",
+            )
+            .map_err(|error| error.to_string())?;
+            fs::write(
+                profile_root.join("archangelszxx_1775147243_7624199329925958920.mp4"),
+                b"video",
+            )
+            .map_err(|error| error.to_string())?;
+            fs::write(profile_root.join("ProfilePicture.jpg"), b"avatar")
+                .map_err(|error| error.to_string())?;
+            fs::write(
+                profile_root
+                    .join(".thumbs")
+                    .join("2026-07-07 12.04.09 7659802061789302034_001.jpg"),
+                b"thumb",
+            )
+            .map_err(|error| error.to_string())?;
+            fs::write(
+                profile_root
+                    .join("Settings")
+                    .join("7659802061789302034_001.jpg"),
+                b"settings",
+            )
+            .map_err(|error| error.to_string())?;
+
+            let recovered = reconcile_tiktok_provider_ledgers_from_disk(
+                connection,
+                &profile_root,
+                "account-1",
+                "source-1",
+                "@archangelszxx",
+                "2026-07-08T00:00:00Z",
+            )?;
+            let post_count: i64 = connection
+                .query_row(
+                    "SELECT COUNT(*) FROM provider_sync_post_ledger
+                     WHERE provider = 'tiktok' AND source_id = 'source-1'",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(|error| error.to_string())?;
+            let media_count: i64 = connection
+                .query_row(
+                    "SELECT COUNT(*) FROM provider_sync_media_ledger
+                     WHERE provider = 'tiktok' AND source_id = 'source-1'",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(|error| error.to_string())?;
+            let thumbnail_count: i64 = connection
+                .query_row(
+                    "SELECT COUNT(*) FROM provider_sync_media_ledger
+                     WHERE provider = 'tiktok' AND source_id = 'source-1'
+                       AND relative_path LIKE '%.thumbs%'",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(|error| error.to_string())?;
+            Ok((recovered, post_count, media_count, thumbnail_count))
+        })
+        .expect("existing TikTok files should seed provider ledgers");
+
+    assert_eq!(recovered, 2);
+    assert_eq!(post_count, 2);
+    assert_eq!(media_count, 2);
+    assert_eq!(thumbnail_count, 0);
+}
+
 fn create_test_layout() -> (TempDir, StorageLayout) {
     // Layout montado na mão para o suite ser HERMÉTICO: workspace_layout_from_roots
     // usa preferred_media_root, que aponta para F:\SCrawler\Data quando essa
@@ -1418,6 +1506,7 @@ fn batch_update_source_profiles_applies_group_and_sync_patch_when_inputs_are_val
                     extract_image_from_video: None,
                     get_user_media_only: Some(true),
                     missing_only: None,
+                    full_scan: None,
                     verified_profile: None,
                     force_update_user_name: None,
                     force_update_user_information: None,
@@ -1478,6 +1567,7 @@ fn apply_instagram_patch_updates_media_agnostic_fields() {
         }),
         get_user_media_only: None,
         missing_only: None,
+        full_scan: None,
         verified_profile: None,
         force_update_user_name: None,
         force_update_user_information: None,
@@ -1537,12 +1627,14 @@ fn instagram_manifest_suffix_is_omitted_for_zero_download_success() {
     );
     assert_eq!(
         format_instagram_manifest_suffix(Some(&manifest_summary), true),
-        " Manifest retained 0 posts and queued 0 assets across 4 sections after filtering 4 existing posts."
+        " 4 posts already up to date."
     );
 }
 
 #[test]
-fn instagram_manifest_suffix_omits_zero_value_filter_counts() {
+fn instagram_manifest_suffix_is_empty_when_nothing_was_already_synced() {
+    // Tudo novo (nenhum post reconhecido como já sincronizado) → sem sufixo; o
+    // resumo base ("Downloaded N media items.") já basta.
     let manifest_summary = instagram_connector::InstagramManifestSummary {
         section_count: 4,
         discovered_item_count: 0,
@@ -1561,8 +1653,101 @@ fn instagram_manifest_suffix_omits_zero_value_filter_counts() {
 
     assert_eq!(
         format_instagram_manifest_suffix(Some(&manifest_summary), true),
-        " Manifest retained 12 posts and queued 13 assets across 4 sections."
+        ""
     );
+
+    // Singular quando só 1 post já estava em dia.
+    let single = instagram_connector::InstagramManifestSummary {
+        skipped_existing_post_count: 1,
+        ..manifest_summary
+    };
+    assert_eq!(
+        format_instagram_manifest_suffix(Some(&single), true),
+        " 1 post already up to date."
+    );
+}
+
+#[test]
+fn failed_source_sync_run_does_not_advance_last_synced_at() {
+    let (_temp_dir, layout) = create_test_layout();
+
+    let (after_failed, after_success) = with_workspace_layout(layout, |connection, test_layout| {
+        upsert_provider_account_with_connection(
+            connection,
+            test_layout,
+            sample_account("account-1", "tiktok"),
+        )?;
+        upsert_source_profile_with_connection(
+            connection,
+            test_layout,
+            sample_source("source-1", "tiktok", Some("account-1")),
+        )?;
+        let source = load_source_profile_by_id(connection, "source-1")?;
+        let context = SourceSyncContext {
+            source,
+            account: ProviderAccount {
+                id: "account-1".to_string(),
+                provider: "tiktok".to_string(),
+                display_name: "tiktok-account".to_string(),
+                auth_mode: "imported_session".to_string(),
+                auth_state: "ready".to_string(),
+                capabilities: vec!["posts".to_string()],
+                last_validated_at: "2026-03-10T00:00:00Z".to_string(),
+            },
+            session_payload: "{}".to_string(),
+        };
+        let failed = SourceSyncOutcome {
+            tool: "internal.tiktok".to_string(),
+            status: "failed".to_string(),
+            summary: "TikTok sync failed: transient listing failure".to_string(),
+            command_preview: "internal.tiktok profile @source-1".to_string(),
+            manifest_summary_json: None,
+            degraded_capabilities: Vec::new(),
+            validation_error: Some("transient listing failure".to_string()),
+        };
+        persist_source_sync_run(
+            connection,
+            &context,
+            &failed,
+            "manual",
+            "2026-07-08T00:00:00Z",
+            "2026-07-08T00:00:01Z",
+        )?;
+        let after_failed: Option<String> = connection
+            .query_row(
+                "SELECT last_synced_at FROM source_profiles WHERE id = 'source-1'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())?;
+
+        let succeeded = SourceSyncOutcome {
+            status: "succeeded".to_string(),
+            summary: "TikTok sync succeeded.".to_string(),
+            validation_error: None,
+            ..failed
+        };
+        persist_source_sync_run(
+            connection,
+            &context,
+            &succeeded,
+            "manual",
+            "2026-07-08T00:01:00Z",
+            "2026-07-08T00:01:01Z",
+        )?;
+        let after_success: Option<String> = connection
+            .query_row(
+                "SELECT last_synced_at FROM source_profiles WHERE id = 'source-1'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())?;
+        Ok((after_failed, after_success))
+    })
+    .expect("source sync run persistence should work");
+
+    assert_eq!(after_failed, None);
+    assert_eq!(after_success.as_deref(), Some("2026-07-08T00:01:01Z"));
 }
 
 fn seed_instagram_auth_settings(

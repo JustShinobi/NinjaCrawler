@@ -183,6 +183,7 @@ pub struct TikTokProgress {
 struct EnumeratedPost {
     post_id: String,
     webpage_url: String,
+    likely_photo_post: bool,
     view_count: Option<i64>,
     like_count: Option<i64>,
     comment_count: Option<i64>,
@@ -225,7 +226,8 @@ where
             progress_percent: None,
             indeterminate: true,
         });
-        let downloaded = download_target_story_video(request, target_url, &stories_dir, &is_cancelled)?;
+        let downloaded =
+            download_target_story_video(request, target_url, &stories_dir, &is_cancelled)?;
         let mut observed_posts = Vec::new();
         let mut downloaded_media = Vec::new();
         if let Some(media) = downloaded {
@@ -330,13 +332,14 @@ where
     {
         if let Some(known_post_id) = newest_known_timeline_post_id(&request.ledger_post_keys) {
             if let Some(author) = fetch_post_author(request, &known_post_id, &is_cancelled) {
-                let identity_ok = match (request.user_id_hint.as_deref(), author.author_id.as_deref()) {
-                    (Some(hint), Some(found)) => hint == found,
-                    // Sem hint salvo, confiamos no post (já pertencia a este perfil).
-                    (None, _) => true,
-                    // Temos hint mas a página não trouxe o id: não arrisca renomear.
-                    (Some(_), None) => false,
-                };
+                let identity_ok =
+                    match (request.user_id_hint.as_deref(), author.author_id.as_deref()) {
+                        (Some(hint), Some(found)) => hint == found,
+                        // Sem hint salvo, confiamos no post (já pertencia a este perfil).
+                        (None, _) => true,
+                        // Temos hint mas a página não trouxe o id: não arrisca renomear.
+                        (Some(_), None) => false,
+                    };
                 if let Some(current) = author.unique_id.as_deref() {
                     if identity_ok && !current.eq_ignore_ascii_case(&handle) {
                         resolved_handle = Some(current.to_string());
@@ -364,17 +367,20 @@ where
         if is_cancelled() {
             return Err("source sync cancelled by user".to_string());
         }
-        match probe_profile_status(request, &handle) {
-            // Listing falhou por motivo transiente; o perfil é público válido.
-            ProfileProbeStatus::Available => {}
-            ProfileProbeStatus::Private => profile_private = true,
-            ProfileProbeStatus::Unavailable => profile_unavailable = true,
-        }
+        let (probed_private, probed_unavailable) = empty_listing_profile_probe_outcome(
+            request,
+            &handle,
+            probe_profile_status(request, &handle),
+        )?;
+        profile_private = probed_private;
+        profile_unavailable = probed_unavailable;
         connector_debug::append_current(
             "internal.tiktok",
             "system",
             "profile.probe",
-            format!("handle={handle}\nprivate={profile_private}\nunavailable={profile_unavailable}"),
+            format!(
+                "handle={handle}\nprivate={profile_private}\nunavailable={profile_unavailable}"
+            ),
         );
     }
 
@@ -390,247 +396,253 @@ where
 
     if duplicate_user_id.is_none() && resolved_handle.is_none() {
         if request.sections.timeline {
-        // Seleciona os posts novos (dedup por ledger). O tipo (vídeo/foto) só é
-        // conhecido no download: o yt-dlp baixa o vídeo; posts de foto rendem
-        // áudio-only e são roteados para o gallery-dl. Por isso a filtragem por
-        // download_videos/download_photos acontece no download, não aqui.
-        let from_date = request.download_from_date.filter(|value| *value > 0);
-        let to_date = request.download_to_date.filter(|value| *value > 0);
-        let mut seen: HashSet<String> = HashSet::new();
-        let mut selected: Vec<EnumeratedPost> = Vec::new();
-        for post in listed
-            .take()
-            .map(|value| value.posts)
-            .unwrap_or_default()
-        {
-            summary.normalized_post_count += 1;
-            if !seen.insert(post.post_id.clone()) {
-                continue;
-            }
-            // Range de data (4K Tokkit): a data de criação vem do id do post.
-            // Posts sem timestamp legível não são filtrados (fail-open).
-            if from_date.is_some() || to_date.is_some() {
-                if let Some(created) = timestamp_from_tiktok_id(&post.post_id) {
-                    if from_date.is_some_and(|from| created < from)
-                        || to_date.is_some_and(|to| created > to)
-                    {
-                        continue;
+            // Seleciona os posts novos (dedup por ledger). O tipo (vídeo/foto) só é
+            // conhecido no download: o yt-dlp baixa o vídeo; posts de foto rendem
+            // áudio-only e são roteados para o gallery-dl. Por isso a filtragem por
+            // download_videos/download_photos acontece no download, não aqui.
+            let from_date = request.download_from_date.filter(|value| *value > 0);
+            let to_date = request.download_to_date.filter(|value| *value > 0);
+            let mut seen: HashSet<String> = HashSet::new();
+            let mut selected: Vec<EnumeratedPost> = Vec::new();
+            for post in listed.take().map(|value| value.posts).unwrap_or_default() {
+                summary.normalized_post_count += 1;
+                if !seen.insert(post.post_id.clone()) {
+                    continue;
+                }
+                // Range de data (4K Tokkit): a data de criação vem do id do post.
+                // Posts sem timestamp legível não são filtrados (fail-open).
+                if from_date.is_some() || to_date.is_some() {
+                    if let Some(created) = timestamp_from_tiktok_id(&post.post_id) {
+                        if from_date.is_some_and(|from| created < from)
+                            || to_date.is_some_and(|to| created > to)
+                        {
+                            continue;
+                        }
                     }
                 }
-            }
-            if request.ledger_post_keys.contains(&post.post_id) {
-                summary.skipped_existing_post_count += 1;
-                if request.collect_media_stats && request.refresh_existing_media_stats {
-                    observed_posts.push(observed_from_enumerated_post(&post));
+                if request.ledger_post_keys.contains(&post.post_id) {
+                    summary.skipped_existing_post_count += 1;
+                    if request.collect_media_stats && request.refresh_existing_media_stats {
+                        observed_posts.push(observed_from_enumerated_post(&post));
+                    }
+                    continue;
                 }
-                continue;
+                summary.discovered_asset_count += 1;
+                selected.push(post);
             }
-            summary.discovered_asset_count += 1;
-            selected.push(post);
-        }
-        summary.queued_asset_count = selected.len() as u32;
-        if request.collect_media_stats && request.refresh_existing_media_stats {
-            let refreshed = observed_posts
-                .iter()
-                .filter(|post| {
-                    post.view_count.is_some()
-                        || post.like_count.is_some()
-                        || post.comment_count.is_some()
-                        || post.share_count.is_some()
-                })
-                .count();
-            report_progress(TikTokProgress {
-                label: "Refreshing media stats".to_string(),
-                detail: format!(
-                    "Collected fresh stats for {refreshed} existing post(s) out of {} scanned.",
-                    summary.normalized_post_count
-                ),
-                downloaded_items: Some(summary.downloaded_asset_count),
-                progress_percent: Some(50),
-                indeterminate: false,
-            });
+            summary.queued_asset_count = selected.len() as u32;
+            if request.collect_media_stats && request.refresh_existing_media_stats {
+                let refreshed = observed_posts
+                    .iter()
+                    .filter(|post| {
+                        post.view_count.is_some()
+                            || post.like_count.is_some()
+                            || post.comment_count.is_some()
+                            || post.share_count.is_some()
+                    })
+                    .count();
+                report_progress(TikTokProgress {
+                    label: "Refreshing media stats".to_string(),
+                    detail: format!(
+                        "Collected fresh stats for {refreshed} existing post(s) out of {} scanned.",
+                        summary.normalized_post_count
+                    ),
+                    downloaded_items: Some(summary.downloaded_asset_count),
+                    progress_percent: Some(50),
+                    indeterminate: false,
+                });
+                connector_debug::append_current(
+                    "internal.tiktok",
+                    "system",
+                    "stats.refresh.complete",
+                    format!(
+                        "posts_scanned={}\nstats_refreshed={refreshed}\nstats_missing={}",
+                        summary.normalized_post_count,
+                        summary
+                            .normalized_post_count
+                            .saturating_sub(refreshed as u32)
+                    ),
+                );
+            }
             connector_debug::append_current(
                 "internal.tiktok",
                 "system",
-                "stats.refresh.complete",
+                "selection.complete",
                 format!(
-                    "posts_scanned={}\nstats_refreshed={refreshed}\nstats_missing={}",
+                    "normalized_posts={}\nselected_posts={}\nskipped_existing_posts={}\ndownload_batch_size={DOWNLOAD_BATCH_SIZE}",
                     summary.normalized_post_count,
-                    summary.normalized_post_count.saturating_sub(refreshed as u32)
+                    selected.len(),
+                    summary.skipped_existing_post_count
                 ),
             );
-        }
-        connector_debug::append_current(
-            "internal.tiktok",
-            "system",
-            "selection.complete",
-            format!(
-                "normalized_posts={}\nselected_posts={}\nskipped_existing_posts={}\ndownload_batch_size={DOWNLOAD_BATCH_SIZE}",
-                summary.normalized_post_count,
-                selected.len(),
-                summary.skipped_existing_post_count
-            ),
-        );
 
-        let total = selected.len();
-        let mut processed = 0_usize;
-        let mut downloaded_post_ids: HashSet<String> = HashSet::new();
-        for batch in selected.chunks(DOWNLOAD_BATCH_SIZE) {
-            if is_cancelled() {
-                return Err("source sync cancelled by user".to_string());
-            }
-            let batch_base = processed;
-            processed += batch.len();
-            let done = processed.min(total);
-            let percent_for = |completed: usize| -> u32 {
-                if total > 0 {
-                    (((completed.min(total)) as f64 / total as f64) * 100.0).round() as u32
-                } else {
-                    0
+            let total = selected.len();
+            let mut processed = 0_usize;
+            let mut downloaded_post_ids: HashSet<String> = HashSet::new();
+            for batch in selected.chunks(DOWNLOAD_BATCH_SIZE) {
+                if is_cancelled() {
+                    return Err("source sync cancelled by user".to_string());
                 }
-            };
-            report_progress(TikTokProgress {
-                label: "Downloading posts".to_string(),
-                detail: format!(
-                    "Post {} of {total}",
-                    (batch_base + 1).min(total.max(1))
-                ),
-                downloaded_items: Some(summary.downloaded_asset_count),
-                progress_percent: Some(percent_for(batch_base).min(100)),
-                indeterminate: false,
-            });
-
-            let batch_started = Instant::now();
-            connector_debug::append_current(
-                "internal.tiktok",
-                "call",
-                "batch.download",
-                format!(
-                    "batch_start={}\nbatch_end={done}\nbatch_size={}\ntotal_posts={total}\npost_ids={}",
-                    done.saturating_sub(batch.len()).saturating_add(1),
-                    batch.len(),
-                    batch
-                        .iter()
-                        .map(|post| post.post_id.as_str())
-                        .collect::<Vec<_>>()
-                        .join(",")
-                ),
-            );
-            // Cada linha `after_move` do yt-dlp é um post concluído: reporta o
-            // avanço real dentro do lote em vez de saltar por batch inteiro.
-            let downloaded_before_batch = summary.downloaded_asset_count;
-            let mut batch_completed = 0_usize;
-            let batch_result = download_batch(request, batch, &is_cancelled, &mut |line| {
-                if line.trim().is_empty() {
-                    return;
-                }
-                batch_completed = (batch_completed + 1).min(batch.len());
-                let done_overall = batch_base + batch_completed;
+                let batch_base = processed;
+                processed += batch.len();
+                let done = processed.min(total);
+                let percent_for = |completed: usize| -> u32 {
+                    if total > 0 {
+                        (((completed.min(total)) as f64 / total as f64) * 100.0).round() as u32
+                    } else {
+                        0
+                    }
+                };
                 report_progress(TikTokProgress {
                     label: "Downloading posts".to_string(),
-                    detail: format!("Post {done_overall} of {total}"),
-                    downloaded_items: Some(
-                        downloaded_before_batch + batch_completed as u32,
-                    ),
-                    progress_percent: Some(percent_for(done_overall).min(100)),
+                    detail: format!("Post {} of {total}", (batch_base + 1).min(total.max(1))),
+                    downloaded_items: Some(summary.downloaded_asset_count),
+                    progress_percent: Some(percent_for(batch_base).min(100)),
                     indeterminate: false,
                 });
-            });
-            match batch_result {
-                Ok(outcome) => {
-                    connector_debug::append_current(
-                        "internal.tiktok",
-                        "response",
-                        "batch.download",
-                        format!(
-                            "elapsed_ms={}\nmedia_produced={}\nerrors={}\nrate_limited={}",
-                            batch_started.elapsed().as_millis(),
-                            outcome.media.len(),
-                            outcome.errors.len(),
-                            outcome.rate_limited
-                        ),
-                    );
-                    if outcome.rate_limited {
-                        rate_limited = true;
+
+                let batch_started = Instant::now();
+                connector_debug::append_current(
+                    "internal.tiktok",
+                    "call",
+                    "batch.download",
+                    format!(
+                        "batch_start={}\nbatch_end={done}\nbatch_size={}\ntotal_posts={total}\npost_ids={}",
+                        done.saturating_sub(batch.len()).saturating_add(1),
+                        batch.len(),
+                        batch
+                            .iter()
+                            .map(|post| post.post_id.as_str())
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    ),
+                );
+                // Cada linha `after_move` do yt-dlp é um post concluído: reporta o
+                // avanço real dentro do lote em vez de saltar por batch inteiro.
+                let downloaded_before_batch = summary.downloaded_asset_count;
+                let mut batch_completed = 0_usize;
+                let batch_result = download_batch(request, batch, &is_cancelled, &mut |line| {
+                    if line.trim().is_empty() {
+                        return;
                     }
-                    section_errors.extend(outcome.errors);
-                    for media in outcome.media {
-                        if request.ledger_media_keys.contains(&media.provider_media_key)
-                            || request
-                                .existing_relative_paths
-                                .contains(&media.final_file_name)
-                        {
-                            summary.skipped_existing_asset_count += 1;
-                            continue;
-                        }
-                        downloaded_post_ids.insert(media.provider_post_key.clone());
-                        summary.downloaded_asset_count += 1;
-                        downloaded_media.push(media);
-                    }
-                    // Consolida o lote com os contadores reais (dedup do ledger
-                    // pode reduzir o total efetivamente novo).
+                    batch_completed = (batch_completed + 1).min(batch.len());
+                    let done_overall = batch_base + batch_completed;
                     report_progress(TikTokProgress {
                         label: "Downloading posts".to_string(),
-                        detail: format!(
-                            "Post {done} of {total} — {} new media item(s) so far",
-                            summary.downloaded_asset_count
-                        ),
-                        downloaded_items: Some(summary.downloaded_asset_count),
-                        progress_percent: Some(percent_for(done).min(100)),
+                        detail: format!("Post {done_overall} of {total}"),
+                        downloaded_items: Some(downloaded_before_batch + batch_completed as u32),
+                        progress_percent: Some(percent_for(done_overall).min(100)),
                         indeterminate: false,
                     });
-                    if outcome.rate_limited && request.abort_on_limit {
-                        limit_aborted = processed < total;
-                        if limit_aborted {
-                            section_errors.push(
-                                "TikTok rate limit reached; remaining posts were skipped."
-                                    .to_string(),
-                            );
-                            break;
+                });
+                match batch_result {
+                    Ok(outcome) => {
+                        connector_debug::append_current(
+                            "internal.tiktok",
+                            "response",
+                            "batch.download",
+                            format!(
+                                "elapsed_ms={}\nmedia_produced={}\nerrors={}\nrate_limited={}",
+                                batch_started.elapsed().as_millis(),
+                                outcome.media.len(),
+                                outcome.errors.len(),
+                                outcome.rate_limited
+                            ),
+                        );
+                        if outcome.rate_limited {
+                            rate_limited = true;
+                        }
+                        section_errors.extend(outcome.errors);
+                        for media in outcome.media {
+                            if request
+                                .ledger_media_keys
+                                .contains(&media.provider_media_key)
+                                || request
+                                    .existing_relative_paths
+                                    .contains(&media.final_file_name)
+                            {
+                                summary.skipped_existing_asset_count += 1;
+                                continue;
+                            }
+                            downloaded_post_ids.insert(media.provider_post_key.clone());
+                            summary.downloaded_asset_count += 1;
+                            downloaded_media.push(media);
+                        }
+                        // Consolida o lote com os contadores reais (dedup do ledger
+                        // pode reduzir o total efetivamente novo).
+                        report_progress(TikTokProgress {
+                            label: "Downloading posts".to_string(),
+                            detail: format!(
+                                "Post {done} of {total} — {} new media item(s) so far",
+                                summary.downloaded_asset_count
+                            ),
+                            downloaded_items: Some(summary.downloaded_asset_count),
+                            progress_percent: Some(percent_for(done).min(100)),
+                            indeterminate: false,
+                        });
+                        if outcome.rate_limited && request.abort_on_limit {
+                            limit_aborted = processed < total;
+                            if limit_aborted {
+                                section_errors.push(
+                                    "TikTok rate limit reached; remaining posts were skipped."
+                                        .to_string(),
+                                );
+                                break;
+                            }
                         }
                     }
-                }
-                Err(error) => {
-                    connector_debug::append_current(
-                        "internal.tiktok",
-                        "error",
-                        "batch.download",
-                        format!(
-                            "elapsed_ms={}\nerror={error}",
-                            batch_started.elapsed().as_millis()
-                        ),
-                    );
-                    let lowered = error.to_ascii_lowercase();
-                    if lowered.contains("cancelled by user") {
-                        return Err(error);
+                    Err(error) => {
+                        connector_debug::append_current(
+                            "internal.tiktok",
+                            "error",
+                            "batch.download",
+                            format!(
+                                "elapsed_ms={}\nerror={error}",
+                                batch_started.elapsed().as_millis()
+                            ),
+                        );
+                        let lowered = error.to_ascii_lowercase();
+                        if lowered.contains("cancelled by user") {
+                            return Err(error);
+                        }
+                        section_errors.push(format!("download batch failed: {error}"));
                     }
-                    section_errors.push(format!("download batch failed: {error}"));
+                }
+
+                if request.sleep_timer_secs > 0 && processed < total {
+                    interruptible_sleep(
+                        Duration::from_secs(request.sleep_timer_secs as u64),
+                        &is_cancelled,
+                    );
                 }
             }
 
-            if request.sleep_timer_secs > 0 && processed < total {
-                thread::sleep(Duration::from_secs(request.sleep_timer_secs as u64));
-            }
-        }
-
-        for post in &selected {
-            if downloaded_post_ids.contains(&post.post_id) {
-                let mut observed = observed_from_enumerated_post(post);
-                if !request.collect_media_stats {
-                    observed.view_count = None;
-                    observed.like_count = None;
-                    observed.comment_count = None;
-                    observed.share_count = None;
+            for post in &selected {
+                if downloaded_post_ids.contains(&post.post_id) {
+                    let mut observed = observed_from_enumerated_post(post);
+                    if !request.collect_media_stats {
+                        observed.view_count = None;
+                        observed.like_count = None;
+                        observed.comment_count = None;
+                        observed.share_count = None;
+                    }
+                    observed_posts.push(observed);
                 }
-                observed_posts.push(observed);
             }
-        }
         }
 
         // Stories (efêmeros, 24h) e Reposts: via gallery-dl.
         let extra_sections = [
-            (request.sections.stories, GalleryDlSection::Stories, "stories"),
-            (request.sections.reposts, GalleryDlSection::Reposts, "reposts"),
+            (
+                request.sections.stories,
+                GalleryDlSection::Stories,
+                "stories",
+            ),
+            (
+                request.sections.reposts,
+                GalleryDlSection::Reposts,
+                "reposts",
+            ),
         ];
         for (enabled, section, label) in extra_sections {
             if !enabled {
@@ -721,7 +733,11 @@ struct PostAuthor {
 }
 
 /// Conveniência: só a URL do avatar do autor de um post.
-fn fetch_avatar<C>(request: &TikTokConnectorRequest, post_id: &str, is_cancelled: &C) -> Option<String>
+fn fetch_avatar<C>(
+    request: &TikTokConnectorRequest,
+    post_id: &str,
+    is_cancelled: &C,
+) -> Option<String>
 where
     C: Fn() -> bool,
 {
@@ -772,7 +788,12 @@ where
     #[cfg(windows)]
     command.creation_flags(CREATE_NO_WINDOW);
 
-    let _ = run_capturing(command, PHOTO_PAGE_TIMEOUT_SECS, is_cancelled, "yt-dlp (author page)");
+    let _ = run_capturing(
+        command,
+        PHOTO_PAGE_TIMEOUT_SECS,
+        is_cancelled,
+        "yt-dlp (author page)",
+    );
 
     let author = fs::read_dir(&dir)
         .ok()
@@ -899,7 +920,7 @@ where
         .arg(YT_DLP_IMPERSONATE)
         .arg("--flat-playlist")
         .arg("--print")
-        .arg("%(id)s\t%(webpage_url)s\t%(uploader_id)s\t%(view_count)s\t%(like_count)s\t%(comment_count)s\t%(repost_count)s")
+        .arg("%(id)s\t%(webpage_url)s\t%(uploader_id)s\t%(view_count)s\t%(like_count)s\t%(comment_count)s\t%(repost_count)s\t%(thumbnails.0.url)s\t%(thumbnails.1.url)s\t%(thumbnails.2.url)s")
         .arg("--no-cookies-from-browser")
         .arg("--cookies")
         .arg(&request.cookie_file);
@@ -936,6 +957,11 @@ where
         let like_count = parse_optional_count(parts.next());
         let comment_count = parse_optional_count(parts.next());
         let share_count = parse_optional_count(parts.next());
+        let thumbnail_urls: Vec<String> = parts
+            .map(str::trim)
+            .filter(|value| !value.is_empty() && *value != "NA")
+            .map(str::to_string)
+            .collect();
         if post_id.is_empty() || post_id == "NA" {
             continue;
         }
@@ -943,12 +969,16 @@ where
             uploader_id = Some(uploader.to_string());
         }
         let url = if webpage_url.is_empty() || webpage_url == "NA" {
-            format!("https://www.tiktok.com/@{}/video/{post_id}", request.handle.trim_start_matches('@'))
+            format!(
+                "https://www.tiktok.com/@{}/video/{post_id}",
+                request.handle.trim_start_matches('@')
+            )
         } else {
             webpage_url.to_string()
         };
         posts.push(EnumeratedPost {
             post_id: post_id.to_string(),
+            likely_photo_post: is_likely_tiktok_photo_post(&url, &thumbnail_urls),
             webpage_url: url,
             view_count,
             like_count,
@@ -969,6 +999,16 @@ fn parse_optional_count(value: Option<&str>) -> Option<i64> {
         .map(str::trim)
         .filter(|value| !value.is_empty() && *value != "NA")
         .and_then(|value| value.parse::<i64>().ok())
+}
+
+fn is_likely_tiktok_photo_post(webpage_url: &str, thumbnail_urls: &[String]) -> bool {
+    webpage_url.contains("/photo/")
+        || thumbnail_urls.iter().any(|url| {
+            let value = url.to_ascii_lowercase();
+            value.contains("photomode")
+                || value.contains("tplv-photomode-image")
+                || value.contains("ftpl=1")
+        })
 }
 
 fn observed_from_enumerated_post(post: &EnumeratedPost) -> ObservedTikTokPost {
@@ -1038,8 +1078,12 @@ where
     #[cfg(windows)]
     command.creation_flags(CREATE_NO_WINDOW);
 
-    let (stdout, _stderr) =
-        run_capturing(command, STORIES_TIMEOUT_SECS, is_cancelled, "yt-dlp (story)")?;
+    let (stdout, _stderr) = run_capturing(
+        command,
+        STORIES_TIMEOUT_SECS,
+        is_cancelled,
+        "yt-dlp (story)",
+    )?;
 
     // Extrai o vídeo baixado (metadados via --print) para registrá-lo no ledger,
     // fazendo o story aparecer na seção Stories do perfil e contar no resumo.
@@ -1238,6 +1282,18 @@ where
             if produced.contains(&post.post_id) || !seen_photo.insert(post.post_id.clone()) {
                 continue;
             }
+            if !post.likely_photo_post {
+                connector_debug::append_current(
+                    "internal.tiktok",
+                    "system",
+                    "video.missing_after_download",
+                    format!(
+                        "post_id={}\nurl={}\nreason=yt-dlp did not produce media; skipped slideshow fallback because the listing does not look like photomode",
+                        post.post_id, post.webpage_url
+                    ),
+                );
+                continue;
+            }
             if is_cancelled() {
                 return Err("source sync cancelled by user".to_string());
             }
@@ -1297,11 +1353,16 @@ where
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    apply_user_agent(&mut command, request);
     #[cfg(windows)]
     command.creation_flags(CREATE_NO_WINDOW);
 
-    let (_stdout, stderr) =
-        run_capturing(command, PHOTO_PAGE_TIMEOUT_SECS, is_cancelled, "yt-dlp (photo page)")?;
+    let (_stdout, stderr) = run_capturing(
+        command,
+        PHOTO_PAGE_TIMEOUT_SECS,
+        is_cancelled,
+        "yt-dlp (photo page)",
+    )?;
 
     let dump_path = fs::read_dir(&photo_dir)
         .map_err(|error| error.to_string())?
@@ -1326,8 +1387,18 @@ where
         return Err(format!("page not fetched ({detail})"));
     };
     let html = fs::read_to_string(&dump_path).map_err(|error| error.to_string())?;
-    let json = extract_rehydration_json(&html)
-        .ok_or_else(|| "rehydration data not found in page".to_string())?;
+    let json = match extract_rehydration_json(&html) {
+        Some(json) => json,
+        None => {
+            let _ = fs::remove_dir_all(&photo_dir);
+            let detail = if html.contains("data-downgrade=\"1\"") {
+                "TikTok returned a downgraded page without post data"
+            } else {
+                "rehydration data not found in page"
+            };
+            return Err(detail.to_string());
+        }
+    };
     let item = json
         .get("__DEFAULT_SCOPE__")
         .and_then(|scope| scope.get("webapp.video-detail"))
@@ -1426,7 +1497,9 @@ where
                 continue;
             }
         };
-        let Ok(bytes) = response.bytes() else { continue };
+        let Ok(bytes) = response.bytes() else {
+            continue;
+        };
         if bytes.is_empty() {
             continue;
         }
@@ -1503,7 +1576,12 @@ where
     #[cfg(windows)]
     command.creation_flags(CREATE_NO_WINDOW);
 
-    run_capturing(command, STORIES_TIMEOUT_SECS, is_cancelled, "gallery-dl (section)")?;
+    run_capturing(
+        command,
+        STORIES_TIMEOUT_SECS,
+        is_cancelled,
+        "gallery-dl (section)",
+    )?;
 
     let stories_dir = work_dir;
     let target_dir = request.profile_root.join(subfolder);
@@ -1529,7 +1607,10 @@ where
             .and_then(|value| value.to_str())
             .unwrap_or_default();
         // gallery-dl nomeia "<id> TikTok video #<id>.mp4"; o id é o token inicial.
-        let post_id: String = file_name.chars().take_while(|c| c.is_ascii_digit()).collect();
+        let post_id: String = file_name
+            .chars()
+            .take_while(|c| c.is_ascii_digit())
+            .collect();
         if post_id.is_empty() {
             continue;
         }
@@ -1608,7 +1689,10 @@ fn finalize_media_file(
             "internal.tiktok",
             "error",
             "media.finalize",
-            format!("source={}\npost_id={post_id}\nerror={error}", source_path.display()),
+            format!(
+                "source={}\npost_id={post_id}\nerror={error}",
+                source_path.display()
+            ),
         );
         return Err(error);
     }
@@ -1663,7 +1747,9 @@ fn finalize_media_file(
     } else {
         "rename"
     };
-    let file_size = fs::metadata(&destination).map(|value| value.len()).unwrap_or(0);
+    let file_size = fs::metadata(&destination)
+        .map(|value| value.len())
+        .unwrap_or(0);
     connector_debug::append_current(
         "internal.tiktok",
         "response",
@@ -1699,6 +1785,21 @@ fn apply_user_agent(command: &mut Command, request: &TikTokConnectorRequest) {
 /// Roda um processo capturando stdout/stderr, com polling de cancel/timeout.
 /// As saídas são drenadas em threads concorrentes para evitar deadlock quando o
 /// yt-dlp produz muita saída.
+/// Dorme em passos curtos, abortando assim que o cancelamento é solicitado —
+/// evita ficar preso no sleep timer (potencialmente longo) entre batches.
+fn interruptible_sleep(total: Duration, is_cancelled: &dyn Fn() -> bool) {
+    const STEP: Duration = Duration::from_millis(200);
+    let mut remaining = total;
+    while !remaining.is_zero() {
+        if is_cancelled() {
+            return;
+        }
+        let chunk = STEP.min(remaining);
+        thread::sleep(chunk);
+        remaining -= chunk;
+    }
+}
+
 fn run_capturing<C>(
     command: Command,
     timeout_secs: u64,
@@ -1727,7 +1828,11 @@ where
     let (line_sender, line_receiver) = std::sync::mpsc::channel::<String>();
     let context = connector_debug::current_context();
     let command_line = std::iter::once(command.get_program().to_string_lossy().to_string())
-        .chain(command.get_args().map(|arg| arg.to_string_lossy().to_string()))
+        .chain(
+            command
+                .get_args()
+                .map(|arg| arg.to_string_lossy().to_string()),
+        )
         .collect::<Vec<_>>()
         .join(" ");
     connector_debug::append_with_context(
@@ -1737,18 +1842,16 @@ where
         "process.spawn",
         command_line,
     );
-    let mut child = command
-        .spawn()
-        .map_err(|error| {
-            connector_debug::append_with_context(
-                context.clone(),
-                label,
-                "error",
-                "process.spawn",
-                error.to_string(),
-            );
-            format!("Failed to start {label}: {error}")
-        })?;
+    let mut child = command.spawn().map_err(|error| {
+        connector_debug::append_with_context(
+            context.clone(),
+            label,
+            "error",
+            "process.spawn",
+            error.to_string(),
+        );
+        format!("Failed to start {label}: {error}")
+    })?;
     connector_debug::append_with_context(
         context.clone(),
         label,
@@ -1896,12 +1999,7 @@ fn probe_profile_status(request: &TikTokConnectorRequest, handle: &str) -> Profi
     let body = match client.get(&url).send().and_then(|response| response.text()) {
         Ok(body) => body,
         Err(error) => {
-            connector_debug::append_current(
-                "tiktok-http",
-                "error",
-                "GET embed",
-                error.to_string(),
-            );
+            connector_debug::append_current("tiktok-http", "error", "GET embed", error.to_string());
             return ProfileProbeStatus::Unavailable;
         }
     };
@@ -1929,10 +2027,67 @@ fn classify_embed_profile_status(body: &str) -> ProfileProbeStatus {
     ProfileProbeStatus::Unavailable
 }
 
+fn empty_listing_profile_probe_outcome(
+    request: &TikTokConnectorRequest,
+    handle: &str,
+    status: ProfileProbeStatus,
+) -> Result<(bool, bool), String> {
+    match status {
+        // Listing falhou por motivo transiente; o perfil é público válido.
+        ProfileProbeStatus::Available => {
+            if has_known_tiktok_timeline_history(request) {
+                return Err(format!(
+                    "TikTok listing returned zero posts for '@{handle}', but this profile already has local TikTok history. Treating it as a transient provider listing failure instead of a successful empty sync."
+                ));
+            }
+            Ok((false, false))
+        }
+        // A embed page é pública e não sabe se a conta logada segue o perfil.
+        // "Private" só prova que o probe público não vê a timeline; não prova
+        // que devemos pausar a fonte como não seguida ou falhar o sync. Se a
+        // conta autenticada segue o perfil e ele apagou tudo, zero posts é o
+        // resultado correto.
+        ProfileProbeStatus::Private => Ok((false, false)),
+        ProfileProbeStatus::Unavailable => Ok((false, true)),
+    }
+}
+
+fn has_known_tiktok_timeline_history(request: &TikTokConnectorRequest) -> bool {
+    !request.ledger_post_keys.is_empty()
+        || !request.ledger_media_keys.is_empty()
+        || request
+            .existing_relative_paths
+            .iter()
+            .any(|path| tiktok_post_id_from_media_file_name(path).is_some())
+}
+
+fn tiktok_post_id_from_media_file_name(file_name: &str) -> Option<String> {
+    let mut current = String::new();
+    for character in file_name.chars() {
+        if character.is_ascii_digit() {
+            current.push(character);
+            continue;
+        }
+        if is_plausible_tiktok_post_id(&current) {
+            return Some(current);
+        }
+        current.clear();
+    }
+    is_plausible_tiktok_post_id(&current).then_some(current)
+}
+
+fn is_plausible_tiktok_post_id(value: &str) -> bool {
+    (18..=20).contains(&value.len()) && value.chars().all(|character| character.is_ascii_digit())
+}
+
 fn timestamped_file_name(captured_at_timestamp: Option<i64>, raw_file_name: &str) -> String {
     match captured_at_timestamp.and_then(|value| Local.timestamp_opt(value, 0).single()) {
         Some(local_time) => {
-            format!("{} {}", local_time.format("%Y-%m-%d %H.%M.%S"), raw_file_name)
+            format!(
+                "{} {}",
+                local_time.format("%Y-%m-%d %H.%M.%S"),
+                raw_file_name
+            )
         }
         None => raw_file_name.to_string(),
     }
@@ -1951,6 +2106,46 @@ fn parse_unix_timestamp(value: &Value) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_request_with_history(
+        ledger_post_keys: HashSet<String>,
+        ledger_media_keys: HashSet<String>,
+        existing_relative_paths: HashSet<String>,
+    ) -> TikTokConnectorRequest {
+        TikTokConnectorRequest {
+            handle: "dalilahoo".to_string(),
+            yt_dlp_executable: PathBuf::from("yt-dlp"),
+            gallery_dl_executable: PathBuf::from("gallery-dl"),
+            cookie_file: PathBuf::from("cookies.txt"),
+            user_agent: None,
+            profile_root: PathBuf::from("profile"),
+            cache_root: PathBuf::from("cache"),
+            sections: TikTokSectionSelection {
+                timeline: true,
+                stories: false,
+                reposts: false,
+            },
+            target_video_url: None,
+            download_videos: true,
+            download_photos: true,
+            separate_video_folder: false,
+            use_parsed_video_date: true,
+            use_native_title: false,
+            add_video_id_to_title: true,
+            remove_tags_from_title: false,
+            download_from_date: None,
+            download_to_date: None,
+            tokkit_naming: false,
+            abort_on_limit: true,
+            sleep_timer_secs: -1,
+            collect_media_stats: true,
+            refresh_existing_media_stats: false,
+            ledger_post_keys,
+            ledger_media_keys,
+            existing_relative_paths,
+            user_id_hint: None,
+        }
+    }
 
     #[test]
     fn timestamped_file_name_prefixes_local_date() {
@@ -1972,14 +2167,34 @@ mod tests {
     }
 
     #[test]
+    fn photo_post_detection_uses_url_and_photomode_thumbnails() {
+        assert!(is_likely_tiktok_photo_post(
+            "https://www.tiktok.com/@archangelszxx/photo/7659802061789302034",
+            &[]
+        ));
+        assert!(is_likely_tiktok_photo_post(
+            "https://www.tiktok.com/@archangelszxx/video/7659802061789302034",
+            &[String::from(
+                "https://p16-common-sign.tiktokcdn.com/tos-alisg-i-photomode-sg/photo~tplv-photomode-image.jpeg?ftpl=1"
+            )]
+        ));
+        assert!(!is_likely_tiktok_photo_post(
+            "https://www.tiktok.com/@archangelszxx/video/7598331269931470087",
+            &[
+                String::from("https://p16-common-sign.tiktokcdn.com/tos-alisg-p-0037/cover.image"),
+                String::from(
+                    "https://p16-common-sign.tiktokcdn.com/tos-alisg-p-0037/dynamic.image"
+                ),
+            ]
+        ));
+    }
+
+    #[test]
     fn classify_embed_profile_status_distinguishes_cases() {
         // Trechos reais do `__FRONTITY_CONNECT_STATE__` da embed page.
-        let private_body =
-            r#"...,"errorCode":10222,"errorStatus":400,"isError":true,"pageName":"error","userInfo":{"uniqueId":"y.yral"}}..."#;
-        let unavailable_body =
-            r#"...,"errorCode":10221,"errorStatus":400,"isError":true,"pageName":"error","userInfo":{"uniqueId":"renataa.sts"}}..."#;
-        let public_body =
-            r#"...,"uniqueId":"tiktok","verified":true,"followerCount":94700000,"privateAccount":false,..."#;
+        let private_body = r#"...,"errorCode":10222,"errorStatus":400,"isError":true,"pageName":"error","userInfo":{"uniqueId":"y.yral"}}..."#;
+        let unavailable_body = r#"...,"errorCode":10221,"errorStatus":400,"isError":true,"pageName":"error","userInfo":{"uniqueId":"renataa.sts"}}..."#;
+        let public_body = r#"...,"uniqueId":"tiktok","verified":true,"followerCount":94700000,"privateAccount":false,..."#;
         assert!(matches!(
             classify_embed_profile_status(private_body),
             ProfileProbeStatus::Private
@@ -1997,6 +2212,99 @@ mod tests {
             classify_embed_profile_status("<html>Please wait...</html>"),
             ProfileProbeStatus::Unavailable
         ));
+    }
+
+    #[test]
+    fn empty_listing_private_probe_allows_empty_sync_with_known_history() {
+        let request = test_request_with_history(
+            HashSet::from(["7598331269931470087".to_string()]),
+            HashSet::new(),
+            HashSet::new(),
+        );
+
+        assert_eq!(
+            empty_listing_profile_probe_outcome(&request, "dalilahoo", ProfileProbeStatus::Private)
+                .expect("private profile with zero posts should be a valid empty sync"),
+            (false, false)
+        );
+    }
+
+    #[test]
+    fn empty_listing_private_probe_allows_empty_sync_without_known_history() {
+        let request = test_request_with_history(HashSet::new(), HashSet::new(), HashSet::new());
+
+        assert_eq!(
+            empty_listing_profile_probe_outcome(
+                &request,
+                "brand_new_private",
+                ProfileProbeStatus::Private,
+            )
+            .expect("public private probe cannot prove the signed-in account lacks access"),
+            (false, false)
+        );
+    }
+
+    #[test]
+    fn empty_listing_unavailable_probe_marks_unavailable() {
+        let request = test_request_with_history(HashSet::new(), HashSet::new(), HashSet::new());
+
+        assert_eq!(
+            empty_listing_profile_probe_outcome(
+                &request,
+                "missing_profile",
+                ProfileProbeStatus::Unavailable
+            )
+            .expect("unavailable probe should classify"),
+            (false, true)
+        );
+    }
+
+    #[test]
+    fn known_tiktok_history_recognizes_existing_post_ids_on_disk() {
+        let request = TikTokConnectorRequest {
+            handle: "archangelszxx".to_string(),
+            yt_dlp_executable: PathBuf::from("yt-dlp"),
+            gallery_dl_executable: PathBuf::from("gallery-dl"),
+            cookie_file: PathBuf::from("cookies.txt"),
+            user_agent: None,
+            profile_root: PathBuf::from("profile"),
+            cache_root: PathBuf::from("cache"),
+            sections: TikTokSectionSelection {
+                timeline: true,
+                stories: false,
+                reposts: false,
+            },
+            target_video_url: None,
+            download_videos: true,
+            download_photos: true,
+            separate_video_folder: false,
+            use_parsed_video_date: true,
+            use_native_title: false,
+            add_video_id_to_title: true,
+            remove_tags_from_title: false,
+            download_from_date: None,
+            download_to_date: None,
+            tokkit_naming: false,
+            abort_on_limit: true,
+            sleep_timer_secs: -1,
+            collect_media_stats: true,
+            refresh_existing_media_stats: false,
+            ledger_post_keys: HashSet::new(),
+            ledger_media_keys: HashSet::new(),
+            existing_relative_paths: HashSet::from([
+                "2026-07-07 12.04.09 7659802061789302034_001.jpg".to_string(),
+            ]),
+            user_id_hint: None,
+        };
+
+        assert!(has_known_tiktok_timeline_history(&request));
+        assert_eq!(
+            tiktok_post_id_from_media_file_name(
+                "reeh_dmris_1703197051_7315175620856581381_index_0_2.jpeg"
+            )
+            .as_deref(),
+            Some("7315175620856581381")
+        );
     }
 
     #[test]
@@ -2030,7 +2338,9 @@ mod tests {
         let json = extract_rehydration_json(body).expect("json");
         assert_eq!(json.get("a").and_then(|v| v.as_str()), Some("x{y}z"));
         assert_eq!(
-            json.get("b").and_then(|b| b.get("c")).and_then(|v| v.as_i64()),
+            json.get("b")
+                .and_then(|b| b.get("c"))
+                .and_then(|v| v.as_i64()),
             Some(1)
         );
     }

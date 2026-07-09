@@ -112,8 +112,7 @@ fn run() -> Result<(), String> {
         source_ids.push(source_id);
     }
 
-    let availability =
-        workspace_repository::check_source_availability(source_ids.clone(), None)?;
+    let availability = workspace_repository::check_source_availability(source_ids.clone(), None)?;
     let provider_results = source_ids
         .iter()
         .zip(handles.iter())
@@ -319,6 +318,7 @@ fn build_instagram_identity_probe_request(
         text_special_folder: false,
         get_user_media_only: false,
         missing_only: false,
+        full_scan: false,
         date_from_timestamp: None,
         date_to_timestamp: None,
         media_file_naming_mode: instagram_connector::InstagramMediaFileNamingMode::PresetNewDefault,

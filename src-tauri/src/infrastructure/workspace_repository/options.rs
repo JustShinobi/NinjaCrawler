@@ -13,6 +13,7 @@ pub(super) fn normalize_instagram_source_sync_options(
     normalized.download_videos = Some(normalized.download_videos.unwrap_or(true));
     normalized.get_user_media_only = Some(normalized.get_user_media_only.unwrap_or(false));
     normalized.missing_only = Some(normalized.missing_only.unwrap_or(false));
+    normalized.full_scan = Some(normalized.full_scan.unwrap_or(false));
     normalized.date_from = Some(
         normalized
             .date_from
@@ -562,6 +563,9 @@ pub(super) fn instagram_username_override(options: &InstagramSourceSyncOptions) 
 pub(super) fn instagram_missing_only_enabled(options: &InstagramSourceSyncOptions) -> bool {
     options.missing_only.unwrap_or(false)
 }
+pub(super) fn instagram_full_scan_enabled(options: &InstagramSourceSyncOptions) -> bool {
+    options.full_scan.unwrap_or(false)
+}
 pub(super) fn parse_instagram_sync_date_boundary(
     raw: Option<&str>,
     end_of_day: bool,
@@ -677,6 +681,9 @@ pub(super) fn apply_instagram_patch(
     }
     if let Some(v) = patch.missing_only {
         options.missing_only = Some(v);
+    }
+    if let Some(v) = patch.full_scan {
+        options.full_scan = Some(v);
     }
     if let Some(v) = patch.verified_profile {
         options.verified_profile = Some(v);

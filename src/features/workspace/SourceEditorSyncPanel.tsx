@@ -235,6 +235,12 @@ export function SourceEditorSyncPanel({
               onChange={(checked) => updateInstagramOption(onInstagramSyncOptionsChange, 'missingOnly', checked)}
               tooltip="Only download files still missing on disk."
             />
+            <ToggleRow
+              checked={Boolean(instagramSyncOptions.fullScan)}
+              label="Always full scan"
+              onChange={(checked) => updateInstagramOption(onInstagramSyncOptionsChange, 'fullScan', checked)}
+              tooltip="Disable incremental stop and re-walk the whole profile every sync. Slower; use when the profile re-exposes previously hidden media."
+            />
             <LocalizedDateFieldRow
               label="Date from"
               localDateFormat={localDateFormat}

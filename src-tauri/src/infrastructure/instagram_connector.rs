@@ -109,6 +109,10 @@ pub struct InstagramConnectorRequest {
     pub text_special_folder: bool,
     pub get_user_media_only: bool,
     pub missing_only: bool,
+    /// Quando `true`, desliga a parada incremental da descoberta (timeline/reels)
+    /// e re-percorre o perfil inteiro. Útil quando o perfil reexpõe mídias
+    /// antigas que estavam ocultas — cenário pontual, não o padrão.
+    pub full_scan: bool,
     pub date_from_timestamp: Option<i64>,
     pub date_to_timestamp: Option<i64>,
     pub media_file_naming_mode: InstagramMediaFileNamingMode,
@@ -284,6 +288,13 @@ struct InstagramManifestSection {
     /// álbum mesmo quando o asset é pulado por já existir em disco.
     highlight_media_keys: Vec<String>,
     posts: Vec<InstagramManifestPost>,
+    /// Posts cuja mídia já estava toda em disco (nada a baixar). Não entram em
+    /// `posts` (não há execução), mas são registrados como observados para que o
+    /// post-ledger vire um índice COMPLETO de "post já visto" — chaveado pelo
+    /// id/shortcode estável, imune às fragilidades de matching de mídia
+    /// (timezone no nome, candidatos de resolução, clips). Sem isso, esses posts
+    /// nunca entram no ledger e re-syncs os re-processam para sempre.
+    observed_existing_posts: Vec<InstagramPostIdentity>,
 }
 
 #[derive(Clone, Default)]
@@ -735,10 +746,14 @@ impl InstagramClient {
         }
     }
 
-    /// Pausa entre páginas na listagem de posts (`postsLimitMs`).
-    fn wait_between_post_pages(&self) {
+    /// Pausa entre páginas na listagem de posts (`postsLimitMs`). Interrompível:
+    /// aborta a espera assim que o cancelamento é solicitado.
+    fn wait_between_post_pages(&self, should_cancel: &dyn Fn() -> bool) {
         if self.pacing.page_delay_ms > 0 {
-            thread::sleep(Duration::from_millis(self.pacing.page_delay_ms));
+            interruptible_sleep(
+                Duration::from_millis(self.pacing.page_delay_ms),
+                should_cancel,
+            );
         }
     }
 }
@@ -841,12 +856,20 @@ where
             discovery_progress_percent(completed_discovery_sections, total_sections),
             true,
         );
+        let discovery_stop = IncrementalDiscoveryStop::new(
+            &effective_request,
+            "timeline",
+            &effective_request.profile_root,
+            Some(&profile.user_id),
+        );
         match load_timeline_items(
             &mut client,
             &profile.username,
             &profile,
             effective_request.post_page_size,
             effective_request.use_gql,
+            &discovery_stop,
+            &should_cancel,
         ) {
             Ok(timeline_items) => {
                 completed_discovery_sections += 1;
@@ -906,11 +929,19 @@ where
             discovery_progress_percent(completed_discovery_sections, total_sections),
             true,
         );
+        let discovery_stop = IncrementalDiscoveryStop::new(
+            &effective_request,
+            "reels",
+            &effective_request.profile_root,
+            Some(&profile.user_id),
+        );
         match load_reel_items(
             &mut client,
             &profile,
             effective_request.post_page_size,
             effective_request.use_gql,
+            &discovery_stop,
+            &should_cancel,
         ) {
             Ok(reel_items) => {
                 completed_discovery_sections += 1;
@@ -1068,6 +1099,7 @@ where
             &profile,
             effective_request.post_page_size,
             effective_request.use_gql,
+            &should_cancel,
         ) {
             Ok(tagged_items) => {
                 completed_discovery_sections += 1;
@@ -1180,6 +1212,16 @@ where
     }
 
     let downloaded_asset_count = downloaded_media.len() as u32;
+    let manifest_summary =
+        summarize_profile_sync_manifest(&manifest, downloaded_asset_count, Some(&profile.user_id));
+    // O detalhamento técnico (contadores por seção) vai para o realtime debugger;
+    // o resumo persistido/mostrado ao usuário fica curto e amigável.
+    connector_debug::append_current(
+        "internal.instagram",
+        "summary",
+        "manifest",
+        format_instagram_manifest_debug(&manifest_summary),
+    );
 
     Ok(InstagramConnectorResult {
         observed_posts: manifest_observed_posts(&manifest),
@@ -1189,15 +1231,49 @@ where
         auth_disabled_sections,
         resolved_username: Some(profile.username.clone()),
         profile_description,
-        manifest_summary: Some(summarize_profile_sync_manifest(
-            &manifest,
-            downloaded_asset_count,
-            Some(&profile.user_id),
-        )),
+        manifest_summary: Some(manifest_summary),
         highlight_memberships: collect_highlight_memberships(&manifest),
         updated_headers: client.headers.clone(),
         rate_limited,
     })
+}
+
+/// Bloco técnico legível (contadores globais + por seção) para o realtime
+/// debugger. O resumo mostrado ao usuário não repete esses números.
+fn format_instagram_manifest_debug(summary: &InstagramManifestSummary) -> String {
+    let mut lines = vec![format!(
+        "sections={} discovered_items={} normalized_posts={} discovered_assets={} queued_assets={} downloaded_assets={}",
+        summary.section_count,
+        summary.discovered_item_count,
+        summary.normalized_post_count,
+        summary.discovered_asset_count,
+        summary.queued_asset_count,
+        summary.downloaded_asset_count,
+    )];
+    lines.push(format!(
+        "skipped: existing_posts={} duplicate_posts={} unavailable_posts={} existing_assets={} duplicate_assets={}",
+        summary.skipped_existing_post_count,
+        summary.skipped_duplicate_post_count,
+        summary.skipped_unavailable_post_count,
+        summary.skipped_existing_asset_count,
+        summary.skipped_duplicate_asset_count,
+    ));
+    for section in &summary.sections {
+        lines.push(format!(
+            "[{}] items={} posts={} queued={} skipped(existing_post={}, dup_post={}, unavail_post={}, existing_asset={}, dup_asset={}, out_of_range={})",
+            section.section,
+            section.item_count,
+            section.normalized_post_count,
+            section.queued_asset_count,
+            section.skipped_existing_post_count,
+            section.skipped_duplicate_post_count,
+            section.skipped_unavailable_post_count,
+            section.skipped_existing_asset_count,
+            section.skipped_duplicate_asset_count,
+            section.skipped_out_of_range_item_count,
+        ));
+    }
+    lines.join("\n")
 }
 
 pub fn run_saved_posts_sync<F, C>(
@@ -1231,7 +1307,7 @@ where
         request.timeout_secs,
         request.pacing,
     )?;
-    let items = load_saved_posts_items(&mut client, request.post_page_size)?;
+    let items = load_saved_posts_items(&mut client, request.post_page_size, &should_cancel)?;
     let mut downloaded_media = Vec::new();
     let mut section_errors = Vec::new();
     let mut validation_error = None;
@@ -1312,6 +1388,7 @@ fn build_manifest_section(
         skipped_duplicate_asset_count: 0,
         highlight_media_keys: Vec::new(),
         posts: Vec::new(),
+        observed_existing_posts: Vec::new(),
     }
 }
 
@@ -1355,6 +1432,7 @@ fn report_profile_phase_progress<F>(
     });
 }
 
+#[derive(Clone)]
 struct InstagramPostIdentity {
     provider_post_key: String,
     provider_post_code: Option<String>,
@@ -1551,7 +1629,17 @@ where
                 && (!planned_assets.is_empty() || discovered_asset_count == 0);
 
             if planned_assets.is_empty() && !write_text_sidecar {
-                section.skipped_unavailable_post_count += 1;
+                if discovered_asset_count > 0 {
+                    // Mídia toda já presente (disco/ledger): post completo, nada
+                    // a baixar. Registra como observado para o post-ledger virar
+                    // um índice completo de posts vistos — re-syncs o reconhecem
+                    // pela chave estável em vez de re-processar sempre.
+                    section.skipped_existing_post_count += 1;
+                    section.observed_existing_posts.push(identity);
+                } else {
+                    // Nenhuma mídia baixável resolvida — realmente indisponível.
+                    section.skipped_unavailable_post_count += 1;
+                }
                 continue;
             }
 
@@ -1628,11 +1716,23 @@ fn manifest_observed_posts(manifest: &InstagramSyncManifest) -> Vec<ObservedInst
         .sections
         .iter()
         .flat_map(|section| {
-            section.posts.iter().map(|post| ObservedInstagramPost {
+            let from_posts = section.posts.iter().map(|post| ObservedInstagramPost {
                 provider_post_key: post.provider_post_key.clone(),
                 provider_post_code: post.provider_post_code.clone(),
                 media_section: section.media_section.clone(),
-            })
+            });
+            // Posts já completos em disco também são "vistos" e precisam entrar
+            // no post-ledger (senão re-syncs nunca os reconhecem).
+            let from_existing =
+                section
+                    .observed_existing_posts
+                    .iter()
+                    .map(|identity| ObservedInstagramPost {
+                        provider_post_key: identity.provider_post_key.clone(),
+                        provider_post_code: identity.provider_post_code.clone(),
+                        media_section: section.media_section.clone(),
+                    });
+            from_posts.chain(from_existing)
         })
         .collect()
 }
@@ -1999,11 +2099,33 @@ where
     Ok(())
 }
 
+const SYNC_CANCELLED_MESSAGE: &str = "source sync cancelled by user";
+
 fn ensure_sync_not_cancelled(should_cancel: &impl Fn() -> bool) -> Result<(), String> {
     if should_cancel() {
-        Err("source sync cancelled by user".to_string())
+        Err(SYNC_CANCELLED_MESSAGE.to_string())
     } else {
         Ok(())
+    }
+}
+
+fn is_sync_cancelled_error(error: &str) -> bool {
+    error.contains(SYNC_CANCELLED_MESSAGE)
+}
+
+/// Dorme em passos curtos, abortando assim que o cancelamento é solicitado.
+/// Evita ficar preso num `thread::sleep` longo (ex.: 30s entre páginas) enquanto
+/// o usuário já pediu para cancelar.
+fn interruptible_sleep(total: Duration, should_cancel: &dyn Fn() -> bool) {
+    const STEP: Duration = Duration::from_millis(200);
+    let mut remaining = total;
+    while !remaining.is_zero() {
+        if should_cancel() {
+            return;
+        }
+        let chunk = STEP.min(remaining);
+        thread::sleep(chunk);
+        remaining -= chunk;
     }
 }
 
@@ -2554,18 +2676,201 @@ fn collect_profile_link_values(value: Option<&Value>) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// Limite (em páginas totalmente conhecidas consecutivas) para encerrar a
+/// descoberta incremental do feed. Tolera até 3 páginas de posts fixados ou já
+/// vistos no topo antes de parar, espelhando o `known_page_threshold` do TikTok.
+const INSTAGRAM_INCREMENTAL_KNOWN_PAGE_THRESHOLD: usize = 3;
+
+/// Contexto de parada incremental da descoberta. O feed do Instagram vem em
+/// ordem cronológica reversa, então quando encontramos páginas cheias de posts
+/// já sincronizados, tudo o que vem depois também já está e podemos parar de
+/// paginar em vez de re-descer o perfil inteiro.
+///
+/// Um post conta como "conhecido" pelo MESMO critério que a fase de download usa
+/// para pular: post no post-ledger/tombstone OU toda a sua mídia já presente
+/// (em disco ou no media-ledger). Ancorar só no post-ledger não basta — ele só
+/// registra posts que baixaram algo, então posts com mídia já em disco (import
+/// antigo, sync anterior) nunca entram nele e apareceriam como "novos" para
+/// sempre.
+struct IncrementalDiscoveryStop<'a> {
+    active: bool,
+    known_page_threshold: usize,
+    request: &'a InstagramConnectorRequest,
+    media_section: &'a str,
+    section_root: &'a Path,
+    profile_user_id: Option<&'a str>,
+}
+
+impl<'a> IncrementalDiscoveryStop<'a> {
+    fn new(
+        request: &'a InstagramConnectorRequest,
+        media_section: &'a str,
+        section_root: &'a Path,
+        profile_user_id: Option<&'a str>,
+    ) -> Self {
+        // Full scan explícito ou `missing_only` (que re-desce o perfil para
+        // preencher lacunas) desligam a parada. Sem nenhuma evidência de sync
+        // anterior (1º sync) não há o que reconhecer — mantém desligado para
+        // evitar trabalho inútil por item.
+        let has_prior_evidence = !request.ledger_post_keys.is_empty()
+            || !request.existing_media_keys.is_empty()
+            || !request.ledger_media_keys.is_empty()
+            || !request.existing_relative_paths.is_empty()
+            || !request.ledger_relative_paths.is_empty();
+        let active = !request.full_scan && !request.missing_only && has_prior_evidence;
+        Self {
+            active,
+            known_page_threshold: INSTAGRAM_INCREMENTAL_KNOWN_PAGE_THRESHOLD,
+            request,
+            media_section,
+            section_root,
+            profile_user_id,
+        }
+    }
+
+    fn identity_known(&self, item: &Value) -> bool {
+        let Ok(identity) = media_item_post_identity(item) else {
+            return false;
+        };
+        let known_in = |set: &HashSet<String>| {
+            set.contains(&identity.provider_post_key)
+                || identity
+                    .provider_post_code
+                    .as_ref()
+                    .is_some_and(|code| set.contains(code))
+        };
+        known_in(&self.request.ledger_post_keys) || known_in(&self.request.deleted_post_keys)
+    }
+
+    /// Espelha o skip do download (caminho não-`missing_only`): a mídia já está
+    /// resolvida se a chave OU o caminho relativo estão em disco ou no ledger.
+    fn all_media_present(&self, item: &Value) -> bool {
+        let assets = match collect_media_assets(
+            std::slice::from_ref(item),
+            self.request,
+            self.media_section,
+            self.profile_user_id,
+        ) {
+            Ok(assets) => assets,
+            Err(_) => return false,
+        };
+        if assets.is_empty() {
+            return false;
+        }
+        assets.iter().all(|asset| {
+            if self
+                .request
+                .existing_media_keys
+                .contains(&asset.provider_media_key)
+                || self
+                    .request
+                    .ledger_media_keys
+                    .contains(&asset.provider_media_key)
+            {
+                return true;
+            }
+            let base = build_destination_base_path(self.section_root, asset, self.request);
+            let key = profile_relative_path_key(&self.request.profile_root, &base);
+            self.request.existing_relative_paths.contains(&key)
+                || self.request.ledger_relative_paths.contains(&key)
+        })
+    }
+
+    /// Um item só conta para a parada da seção que de fato o processa. A
+    /// timeline descarta clips (`load_timeline_items` os filtra no fim; são
+    /// baixados na seção reels) e a seção reels só olha clips. Assim, clips
+    /// misturados no feed de timeline não impedem a página de ser reconhecida.
+    fn item_relevant(&self, item: &Value) -> bool {
+        match self.media_section {
+            "timeline" => !is_clip_product(item),
+            "reels" => is_clip_product(item),
+            _ => true,
+        }
+    }
+
+    /// Diagnóstico por página (só itens relevantes à seção): conhecidos via
+    /// post-ledger, via mídia em disco, desconhecidos, e amostra do 1º
+    /// desconhecido (id/code/product_type).
+    fn page_known_breakdown(
+        &self,
+        page_items: &[Value],
+    ) -> (usize, usize, usize, usize, Option<String>) {
+        let mut relevant = 0;
+        let mut via_ledger = 0;
+        let mut via_disk = 0;
+        let mut unknown = 0;
+        let mut first_unknown = None;
+        for item in page_items {
+            if !self.item_relevant(item) {
+                continue;
+            }
+            relevant += 1;
+            if self.identity_known(item) {
+                via_ledger += 1;
+            } else if self.all_media_present(item) {
+                via_disk += 1;
+            } else {
+                unknown += 1;
+                if first_unknown.is_none() {
+                    let id = string_from_value(item.get("id"))
+                        .or_else(|| string_from_value(item.get("pk")))
+                        .unwrap_or_default();
+                    let code = string_from_value(item.get("code")).unwrap_or_default();
+                    let product_type =
+                        string_from_value(item.get("product_type")).unwrap_or_default();
+                    first_unknown =
+                        Some(format!("id={id} code={code} product_type={product_type}"));
+                }
+            }
+        }
+        (relevant, via_ledger, via_disk, unknown, first_unknown)
+    }
+
+    /// Avalia a página E registra o diagnóstico no realtime debugger. "Totalmente
+    /// conhecida" = há ≥1 item relevante à seção e todos já estão sincronizados.
+    /// Página sem itens relevantes (ex.: só clips na timeline) não conta como
+    /// conhecida — conservador de propósito.
+    fn page_fully_known(&self, page_items: &[Value], consecutive_known_pages: usize) -> bool {
+        let (relevant, via_ledger, via_disk, unknown, first_unknown) =
+            self.page_known_breakdown(page_items);
+        let fully_known = self.active && relevant > 0 && unknown == 0;
+        connector_debug::append_current(
+            "internal.instagram",
+            "discovery",
+            format!("{}.page", self.media_section),
+            format!(
+                "active={} items={} relevant={} known_ledger={} known_disk={} unknown={} fully_known={} consecutive_known={} first_unknown=[{}]",
+                self.active,
+                page_items.len(),
+                relevant,
+                via_ledger,
+                via_disk,
+                unknown,
+                fully_known,
+                consecutive_known_pages,
+                first_unknown.unwrap_or_default(),
+            ),
+        );
+        fully_known
+    }
+}
+
 fn load_timeline_items(
     client: &mut InstagramClient,
     username: &str,
     profile: &UserProfile,
     page_size: u32,
     use_gql: bool,
+    stop: &IncrementalDiscoveryStop<'_>,
+    should_cancel: &impl Fn() -> bool,
 ) -> Result<Vec<Value>, String> {
     if use_gql {
         if let Some((lsd, dtsg)) = gql_tokens(&client.headers) {
             let mut items = Vec::new();
             let mut cursor = None::<String>;
+            let mut consecutive_known_pages = 0usize;
             loop {
+                ensure_sync_not_cancelled(should_cancel)?;
                 let (doc_id, friendly_name) = if cursor.is_none() {
                     ("7268577773270422", "PolarisProfilePostsQuery")
                 } else {
@@ -2609,7 +2914,18 @@ fn load_timeline_items(
                     return Ok(items);
                 }
 
+                let page_fully_known = stop.page_fully_known(&page_items, consecutive_known_pages);
                 items.extend(page_items);
+                if stop.active {
+                    if page_fully_known {
+                        consecutive_known_pages += 1;
+                        if consecutive_known_pages >= stop.known_page_threshold {
+                            return Ok(items);
+                        }
+                    } else {
+                        consecutive_known_pages = 0;
+                    }
+                }
                 let has_next_page = payload
                     .pointer(
                         "/data/xdt_api__v1__feed__user_timeline_graphql_connection/page_info/has_next_page",
@@ -2632,8 +2948,10 @@ fn load_timeline_items(
 
     let mut items = profile.timeline_items.clone();
     let mut max_id = profile.timeline_next_max_id.clone();
+    let mut consecutive_known_pages = 0usize;
     if items.is_empty() || max_id.is_some() {
         loop {
+            ensure_sync_not_cancelled(should_cancel)?;
             let url = match max_id.as_deref() {
                 Some(cursor) => format!(
                     "https://www.instagram.com/api/v1/feed/user/{}/username/?count={}&max_id={}",
@@ -2666,12 +2984,23 @@ fn load_timeline_items(
                 break;
             }
 
+            let page_fully_known = stop.page_fully_known(&page_items, consecutive_known_pages);
             items.extend(page_items);
+            if stop.active {
+                if page_fully_known {
+                    consecutive_known_pages += 1;
+                    if consecutive_known_pages >= stop.known_page_threshold {
+                        break;
+                    }
+                } else {
+                    consecutive_known_pages = 0;
+                }
+            }
             let next = next_max_id(&payload);
             if next.is_none() {
                 break;
             }
-            client.wait_between_post_pages();
+            client.wait_between_post_pages(should_cancel);
             max_id = next;
         }
     }
@@ -2719,6 +3048,8 @@ fn load_reel_items(
     profile: &UserProfile,
     page_size: u32,
     use_gql: bool,
+    stop: &IncrementalDiscoveryStop<'_>,
+    should_cancel: &impl Fn() -> bool,
 ) -> Result<Vec<Value>, String> {
     let mut items = profile
         .reel_items
@@ -2727,11 +3058,13 @@ fn load_reel_items(
         .filter(is_clip_product)
         .collect::<Vec<_>>();
     let mut max_id = None;
+    let mut consecutive_known_pages = 0usize;
 
     if use_gql {
         if let Some((lsd, dtsg)) = gql_tokens(&client.headers) {
             let mut gql_cursor = None::<String>;
             loop {
+                ensure_sync_not_cancelled(should_cancel)?;
                 let variables = build_reels_gql_variables(
                     profile.user_id.as_str(),
                     page_size,
@@ -2773,7 +3106,18 @@ fn load_reel_items(
                     return Ok(items);
                 }
 
+                let page_fully_known = stop.page_fully_known(&page_items, consecutive_known_pages);
                 items.extend(page_items);
+                if stop.active {
+                    if page_fully_known {
+                        consecutive_known_pages += 1;
+                        if consecutive_known_pages >= stop.known_page_threshold {
+                            return Ok(items);
+                        }
+                    } else {
+                        consecutive_known_pages = 0;
+                    }
+                }
                 let has_next_page = payload
                     .pointer(
                         "/data/xdt_api__v1__clips__user__connection_v2/page_info/has_next_page",
@@ -2793,6 +3137,7 @@ fn load_reel_items(
     }
 
     loop {
+        ensure_sync_not_cancelled(should_cancel)?;
         let url = match max_id.as_deref() {
             Some(cursor) => format!(
                 "https://i.instagram.com/api/v1/clips/user/?target_user_id={}&page_size={}&max_id={}",
@@ -2819,12 +3164,23 @@ fn load_reel_items(
             break;
         }
 
+        let page_fully_known = stop.page_fully_known(&page_items, consecutive_known_pages);
         items.extend(page_items);
+        if stop.active {
+            if page_fully_known {
+                consecutive_known_pages += 1;
+                if consecutive_known_pages >= stop.known_page_threshold {
+                    break;
+                }
+            } else {
+                consecutive_known_pages = 0;
+            }
+        }
         let next = next_max_id(&payload);
         if next.is_none() {
             break;
         }
-        client.wait_between_post_pages();
+        client.wait_between_post_pages(should_cancel);
         max_id = next;
     }
 
@@ -2836,6 +3192,7 @@ fn load_tagged_items(
     profile: &UserProfile,
     page_size: u32,
     use_gql: bool,
+    should_cancel: &impl Fn() -> bool,
 ) -> Result<Vec<Value>, String> {
     let mut items = profile.tagged_items.clone();
     let mut max_id = None;
@@ -2844,6 +3201,7 @@ fn load_tagged_items(
         if let Some((lsd, dtsg)) = gql_tokens(&client.headers) {
             let mut gql_cursor = None::<String>;
             loop {
+                ensure_sync_not_cancelled(should_cancel)?;
                 let variables = build_tagged_gql_variables(
                     profile.user_id.as_str(),
                     page_size,
@@ -2906,6 +3264,7 @@ fn load_tagged_items(
     }
 
     loop {
+        ensure_sync_not_cancelled(should_cancel)?;
         let url = match max_id.as_deref() {
             Some(cursor) => format!(
                 "https://i.instagram.com/api/v1/usertags/{}/feed/?count={}&max_id={}",
@@ -2940,7 +3299,7 @@ fn load_tagged_items(
         if next.is_none() {
             break;
         }
-        client.wait_between_post_pages();
+        client.wait_between_post_pages(should_cancel);
         max_id = next;
     }
 
@@ -2950,11 +3309,13 @@ fn load_tagged_items(
 fn load_saved_posts_items(
     client: &mut InstagramClient,
     page_size: u32,
+    should_cancel: &impl Fn() -> bool,
 ) -> Result<Vec<Value>, String> {
     let mut items = Vec::new();
     let mut max_id = None;
 
     loop {
+        ensure_sync_not_cancelled(should_cancel)?;
         let url = match max_id.as_deref() {
             Some(cursor) => format!(
                 "https://i.instagram.com/api/v1/feed/saved/posts/?count={}&max_id={}",
@@ -2981,7 +3342,7 @@ fn load_saved_posts_items(
         if next.is_none() {
             break;
         }
-        client.wait_between_post_pages();
+        client.wait_between_post_pages(should_cancel);
         max_id = next;
     }
 
@@ -3636,6 +3997,12 @@ fn classify_section_error(
     error: &str,
     ignore_stories_560_errors: bool,
 ) -> SectionErrorDisposition {
+    // Cancelamento nunca é "erro de seção" a ser engolido por skip_errors —
+    // precisa abortar o sync inteiro imediatamente.
+    if is_sync_cancelled_error(error) {
+        return SectionErrorDisposition::ForceFail;
+    }
+
     let status = extract_http_status_code(error);
     if is_auth_error_status(status, section) {
         return SectionErrorDisposition::AuthInvalid;
@@ -4091,14 +4458,15 @@ fn is_clip_product(item: &Value) -> bool {
 mod tests {
     use super::{
         append_single_asset, best_image_url, build_graphql_body, build_manifest_section,
-        build_media_file_name, collect_media_assets, compute_jazoest, cookie_value,
-        execute_manifest_section, extract_reels_payload_items, normalize_profile_sync_manifest,
-        parse_profile_description, parse_profile_description_from_user,
-        provider_media_identity_from_url, public_identity_headers, resolve_destination_path,
-        should_ignore_media_download_error, DownloadedInstagramMedia, InstagramAuthHeaders,
-        InstagramClient, InstagramConnectorRequest, InstagramManifestPost,
-        InstagramMediaFileNamingMode, InstagramPacing, InstagramSectionSelection,
-        InstagramSyncManifest, MediaAsset, PlannedMediaAsset,
+        build_media_file_name, classify_section_error, collect_media_assets, compute_jazoest,
+        cookie_value, execute_manifest_section, extract_reels_payload_items, interruptible_sleep,
+        manifest_observed_posts, normalize_profile_sync_manifest, parse_profile_description,
+        parse_profile_description_from_user, provider_media_identity_from_url,
+        public_identity_headers, resolve_destination_path, should_ignore_media_download_error,
+        DownloadedInstagramMedia, IncrementalDiscoveryStop, InstagramAuthHeaders, InstagramClient,
+        InstagramConnectorRequest, InstagramManifestPost, InstagramMediaFileNamingMode,
+        InstagramPacing, InstagramSectionSelection, InstagramSyncManifest, MediaAsset,
+        PlannedMediaAsset, SectionErrorDisposition, SYNC_CANCELLED_MESSAGE,
     };
 
     #[test]
@@ -4217,6 +4585,7 @@ mod tests {
             text_special_folder: false,
             get_user_media_only: false,
             missing_only: false,
+            full_scan: false,
             date_from_timestamp: None,
             date_to_timestamp: None,
             media_file_naming_mode: InstagramMediaFileNamingMode::PresetNewDefault,
@@ -4246,6 +4615,184 @@ mod tests {
             description,
             "Main biography\nhttps://example.com/alpha\nhttps://example.com/beta\nhttps://example.com/root"
         );
+    }
+
+    #[test]
+    fn incremental_stop_flags_page_fully_known_only_when_every_item_is_known() {
+        let mut request = sample_request();
+        request.ledger_post_keys = ["100", "200", "abc"]
+            .iter()
+            .map(|v| v.to_string())
+            .collect();
+        let root = request.profile_root.clone();
+
+        let stop = IncrementalDiscoveryStop::new(&request, "timeline", &root, None);
+        assert!(stop.active);
+
+        // Todos conhecidos pelo post-ledger → página totalmente conhecida.
+        let known_page = vec![json!({ "id": "100" }), json!({ "id": "200" })];
+        assert!(stop.page_fully_known(&known_page, 0));
+
+        // Um item novo (sem ledger e sem mídia em disco) derruba a condição.
+        let mixed_page = vec![json!({ "id": "100" }), json!({ "id": "999" })];
+        assert!(!stop.page_fully_known(&mixed_page, 0));
+
+        // Casa por shortcode também (code entra na comparação).
+        let code_page = vec![json!({ "id": "555", "code": "abc" })];
+        assert!(stop.page_fully_known(&code_page, 0));
+
+        // Página vazia nunca conta como conhecida (evita parada prematura).
+        assert!(!stop.page_fully_known(&[], 0));
+    }
+
+    #[test]
+    fn cancellation_error_always_force_fails_section_handling() {
+        // Cancelamento NUNCA pode ser tratado como erro genérico de seção
+        // (que skip_errors engoliria) — precisa abortar o sync inteiro.
+        assert!(matches!(
+            classify_section_error("timeline", SYNC_CANCELLED_MESSAGE, false),
+            SectionErrorDisposition::ForceFail
+        ));
+        assert!(matches!(
+            classify_section_error(
+                "stories",
+                &format!("Timeline pagination failed: {SYNC_CANCELLED_MESSAGE}"),
+                true,
+            ),
+            SectionErrorDisposition::ForceFail
+        ));
+    }
+
+    #[test]
+    fn interruptible_sleep_aborts_promptly_when_cancelled() {
+        let start = std::time::Instant::now();
+        interruptible_sleep(std::time::Duration::from_secs(30), &|| true);
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(1),
+            "sleep deveria abortar quase imediatamente ao cancelar"
+        );
+    }
+
+    #[test]
+    fn timeline_stop_ignores_clips_mixed_into_the_feed() {
+        let mut request = sample_request();
+        request.ledger_post_keys = ["100", "200"].iter().map(|v| v.to_string()).collect();
+        let root = request.profile_root.clone();
+        let stop = IncrementalDiscoveryStop::new(&request, "timeline", &root, None);
+
+        // Posts de timeline todos conhecidos + um clip (reel) desconhecido: o
+        // clip é processado na seção reels, não deve impedir a parada da timeline.
+        let page = vec![
+            json!({ "id": "100" }),
+            json!({ "id": "200" }),
+            json!({ "id": "999", "product_type": "clips" }),
+        ];
+        assert!(stop.page_fully_known(&page, 0));
+
+        // Já a seção reels só considera clips: o clip desconhecido derruba.
+        let reels_stop = IncrementalDiscoveryStop::new(&request, "reels", &root, None);
+        assert!(!reels_stop.page_fully_known(&page, 0));
+
+        // Página só de clips na timeline: 0 itens relevantes → não conta como
+        // conhecida (conservador).
+        let only_clips = vec![json!({ "id": "999", "product_type": "clips" })];
+        assert!(!stop.page_fully_known(&only_clips, 0));
+    }
+
+    #[test]
+    fn on_disk_posts_are_recorded_as_observed_for_the_post_ledger() {
+        let item = json!({
+            "id": "1001_2002",
+            "code": "AbCдEf1",
+            "image_versions2": {
+                "candidates": [
+                    { "url": "https://cdninstagram.example/path/already-here.jpg", "width": 720 }
+                ]
+            }
+        });
+
+        let mut request = sample_request();
+        // Descobre a media key real do item e finge que já está em disco.
+        let assets = collect_media_assets(std::slice::from_ref(&item), &request, "timeline", None)
+            .expect("assets should resolve");
+        assert_eq!(assets.len(), 1, "item deve resolver exatamente 1 asset");
+        request
+            .existing_media_keys
+            .insert(assets[0].provider_media_key.clone());
+
+        let mut manifest = InstagramSyncManifest {
+            sections: vec![build_manifest_section(
+                "timeline",
+                "Timeline".to_string(),
+                request.profile_root.clone(),
+                vec![item],
+                None,
+            )],
+        };
+        normalize_profile_sync_manifest(&request, &mut manifest, &mut |_| {}, &|| false)
+            .expect("normalize should succeed");
+
+        let section = &manifest.sections[0];
+        // Nada a baixar (mídia já em disco), mas o post foi registrado como visto.
+        assert!(section.posts.is_empty(), "não deve enfileirar download");
+        assert_eq!(section.observed_existing_posts.len(), 1);
+        assert_eq!(section.skipped_existing_post_count, 1);
+        assert_eq!(section.skipped_unavailable_post_count, 0);
+
+        // E entra em observed_posts (→ post-ledger) pela chave estável do post.
+        let observed = manifest_observed_posts(&manifest);
+        assert_eq!(observed.len(), 1);
+        assert_eq!(observed[0].provider_post_key, "1001_2002");
+    }
+
+    #[test]
+    fn genuinely_unavailable_posts_are_not_recorded_as_observed() {
+        // Item sem nenhuma mídia baixável (discovered_asset_count == 0).
+        let item = json!({ "id": "3003_4004", "code": "NoMedia" });
+
+        let request = sample_request();
+        let mut manifest = InstagramSyncManifest {
+            sections: vec![build_manifest_section(
+                "timeline",
+                "Timeline".to_string(),
+                request.profile_root.clone(),
+                vec![item],
+                None,
+            )],
+        };
+        normalize_profile_sync_manifest(&request, &mut manifest, &mut |_| {}, &|| false)
+            .expect("normalize should succeed");
+
+        let section = &manifest.sections[0];
+        assert!(section.observed_existing_posts.is_empty());
+        assert_eq!(section.skipped_unavailable_post_count, 1);
+        assert!(manifest_observed_posts(&manifest).is_empty());
+    }
+
+    #[test]
+    fn incremental_stop_is_inactive_for_full_scan_and_first_sync() {
+        // Full scan explícito desliga a parada mesmo com ledger populado.
+        let mut full = sample_request();
+        full.ledger_post_keys = ["100"].iter().map(|v| v.to_string()).collect();
+        full.full_scan = true;
+        let root = full.profile_root.clone();
+        let stop_full = IncrementalDiscoveryStop::new(&full, "timeline", &root, None);
+        assert!(!stop_full.active);
+        assert!(!stop_full.page_fully_known(&[json!({ "id": "100" })], 0));
+
+        // Primeiro sync (sem nenhuma evidência) também fica inativo.
+        let first = sample_request();
+        let first_root = first.profile_root.clone();
+        let stop_first = IncrementalDiscoveryStop::new(&first, "timeline", &first_root, None);
+        assert!(!stop_first.active);
+
+        // `missing_only` desliga (precisa re-descer para preencher lacunas).
+        let mut missing = sample_request();
+        missing.ledger_post_keys = ["100"].iter().map(|v| v.to_string()).collect();
+        missing.missing_only = true;
+        let missing_root = missing.profile_root.clone();
+        let stop_missing = IncrementalDiscoveryStop::new(&missing, "timeline", &missing_root, None);
+        assert!(!stop_missing.active);
     }
 
     #[test]
@@ -4500,12 +5047,18 @@ mod tests {
         )
         .expect("default normalization should succeed");
 
-        // Um post cujos assets caíram todos no ledger é dropado do manifest e
-        // contado como indisponível (não fica um post vazio para trás).
+        // Um post cujos assets caíram todos no ledger não enfileira download,
+        // mas conta como post existente e é registrado como observado para o
+        // post-ledger (não fica um post vazio em `posts`).
         assert_eq!(default_manifest.sections[0].posts.len(), 0);
         assert_eq!(default_manifest.sections[0].skipped_existing_asset_count, 1);
+        assert_eq!(default_manifest.sections[0].skipped_existing_post_count, 1);
         assert_eq!(
             default_manifest.sections[0].skipped_unavailable_post_count,
+            0
+        );
+        assert_eq!(
+            default_manifest.sections[0].observed_existing_posts.len(),
             1
         );
 
@@ -4592,7 +5145,11 @@ mod tests {
 
         assert_eq!(manifest.sections[0].posts.len(), 0);
         assert_eq!(manifest.sections[0].skipped_existing_asset_count, 1);
-        assert_eq!(manifest.sections[0].skipped_unavailable_post_count, 1);
+        // Post com mídia já em disco: registrado como existente/observado, não
+        // como indisponível.
+        assert_eq!(manifest.sections[0].skipped_existing_post_count, 1);
+        assert_eq!(manifest.sections[0].skipped_unavailable_post_count, 0);
+        assert_eq!(manifest.sections[0].observed_existing_posts.len(), 1);
 
         fs::remove_dir_all(&temp_root).expect("temp root should be removed");
     }
@@ -4830,6 +5387,7 @@ mod tests {
             skipped_existing_asset_count: 0,
             skipped_duplicate_asset_count: 0,
             highlight_media_keys: Vec::new(),
+            observed_existing_posts: Vec::new(),
             posts: vec![InstagramManifestPost {
                 item: json!({ "id": "media-1" }),
                 provider_post_key: "media-1".to_string(),

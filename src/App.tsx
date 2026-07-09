@@ -32,6 +32,7 @@ import type {
   ConnectorRuntimeStatus,
   InstagramPresetSlot,
   ProviderKey,
+  RunSourceSyncOptions,
   SourceDeleteQueueStatus,
   SourceAvailabilityCheckResult,
   SourceProfileDeleteMode,
@@ -696,6 +697,13 @@ function App() {
           disabled: contextMenuHasDeletingSelection,
           onSelect: () => void handleRunSelectedSync(contextMenuSource.id),
         },
+        ...(contextMenuSource.provider === 'instagram'
+          ? [{
+              label: contextSelectionCount > 1 ? `Full scan now (${contextSelectionCount})` : 'Full scan now',
+              disabled: contextMenuHasDeletingSelection,
+              onSelect: () => void handleRunFullScan(contextMenuSource.id),
+            }]
+          : []),
         ...contextMenuPresetActions.map((presetAction) => ({
           label: presetAction.label,
           disabled: contextMenuHasDeletingSelection,
@@ -981,6 +989,7 @@ function App() {
   async function runBatchSourceSync(
     sourceIds: string[],
     presetSlot?: InstagramPresetSlot,
+    runOptions?: { fullScan?: boolean },
   ): Promise<BatchSyncSummary> {
     const globalPreset = presetSlot
       ? resolveInstagramGlobalSyncPreset(snapshot?.appSettings, presetSlot)
@@ -1014,20 +1023,35 @@ function App() {
       }
 
       try {
-        await runSourceSync(sourceId, presetSlot && globalPreset
-          ? {
-              trigger: presetSlot === 'preset1' ? 'manual_preset_1' : 'manual_preset_2',
-              syncOptionsOverride: createSourceSyncOptions('instagram', {
-                instagram: {
-                  timeline: globalPreset.sections.timeline,
-                  reels: globalPreset.sections.reels,
-                  stories: globalPreset.sections.stories,
-                  storiesUser: globalPreset.sections.storiesUser,
-                  tagged: globalPreset.sections.tagged,
-                },
-              }),
-            }
-          : undefined)
+        let runInput: RunSourceSyncOptions | undefined
+        if (presetSlot && globalPreset) {
+          runInput = {
+            trigger: presetSlot === 'preset1' ? 'manual_preset_1' : 'manual_preset_2',
+            syncOptionsOverride: createSourceSyncOptions('instagram', {
+              instagram: {
+                timeline: globalPreset.sections.timeline,
+                reels: globalPreset.sections.reels,
+                stories: globalPreset.sections.stories,
+                storiesUser: globalPreset.sections.storiesUser,
+                tagged: globalPreset.sections.tagged,
+              },
+            }),
+          }
+        } else if (runOptions?.fullScan && source.provider === 'instagram') {
+          // Preserva as opções persistidas do source, apenas ligando o full
+          // scan para esta execução (o backend faz replace total das options do
+          // provider no override, então precisamos reenviar tudo).
+          runInput = {
+            trigger: 'manual_full_scan',
+            syncOptionsOverride: createSourceSyncOptions('instagram', {
+              instagram: {
+                ...(source.syncOptions?.instagram ?? {}),
+                fullScan: true,
+              },
+            }),
+          }
+        }
+        await runSourceSync(sourceId, runInput)
         summary.queued += 1
       } catch (syncError) {
         const reason = syncError instanceof Error ? syncError.message : String(syncError)
@@ -1079,6 +1103,22 @@ function App() {
     // Apenas enfileira; o andamento e eventuais falhas aparecem na fila (Queue
     // Status), sem modal de resumo.
     await runBatchSourceSync(actionSourceIds)
+  }
+
+  async function handleRunFullScan(sourceId?: string) {
+    const actionSourceIds = resolveActionSourceIds(sourceId ?? selectedSourceId)
+    if (actionSourceIds.length === 0 || actionSourceIds.some((id) => deletingSourceIds.has(id))) {
+      return
+    }
+
+    setOpenMenu(null)
+    setProfileContextMenu(undefined)
+    if (sourceId && !selectedSourceSet.has(sourceId)) {
+      setSelectedSourceIds([sourceId])
+      setSelectionAnchorId(sourceId)
+    }
+
+    await runBatchSourceSync(actionSourceIds, undefined, { fullScan: true })
   }
 
   async function handleRunPresetSync(slot: InstagramPresetSlot, sourceId?: string, sourceIdsOverride?: string[]) {
