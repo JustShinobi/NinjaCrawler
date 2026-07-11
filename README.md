@@ -157,20 +157,27 @@ Use `-PortableOnly` with the build wrapper when installers are not required.
 
 GitHub Actions runs lint, frontend tests, a production dependency audit, and a Windows Release build for pull requests and changes to `main` or `develop`.
 
-Releases are tag-driven:
+Releases are tag-driven. The desktop app and the Chrome Companion are versioned on **independent** Release Please tracks so a release that only touches one of them never bumps the other:
+
+- The **app** track bumps `package.json`, `src-tauri/tauri.conf.json`, and `src-tauri/Cargo.toml`, and tags `vX.Y.Z`.
+- The **Companion** track bumps `NinjaCrawler.Companion/manifest.json` — driven only by commits under `NinjaCrawler.Companion/` — and tags `companion-vX.Y.Z`.
 
 1. Merge Conventional Commit changes from `develop` into `main`.
-2. Release Please opens or updates the release PR, bumping `package.json`, `src-tauri/tauri.conf.json`, `src-tauri/Cargo.toml`, and `NinjaCrawler.Companion/manifest.json`.
-3. Merging the release PR creates the draft GitHub Release and dispatches the Windows release workflow.
+2. Release Please opens or updates the release PR, bumping whichever track(s) changed.
+3. Merging the release PR creates the draft GitHub Release(s) and dispatches the matching release workflow: the Windows build for the app, and the Companion packaging workflow for the extension.
 
-The release workflow validates that all release-tracked versions match the tag, performs the complete Release build and smoke test, and publishes:
+The app release workflow validates that the app versions match the tag, performs the complete Release build and smoke test, and publishes:
 
 - A generated changelog grouped from Conventional Commit messages since the previous version.
 - A portable Windows ZIP with the managed connector runtimes.
 - An MSI installer.
 - An NSIS setup executable.
-- A NinjaCrawler Companion ZIP named from `NinjaCrawler.Companion/manifest.json`.
 - SHA-256 checksums for every downloadable asset.
+
+The Companion release workflow packages and publishes, under the `companion-vX.Y.Z` tag:
+
+- A NinjaCrawler Companion ZIP named from `NinjaCrawler.Companion/manifest.json`.
+- SHA-256 checksums for the asset.
 
 The generated changelog becomes the GitHub Release description and is also attached as `CHANGELOG.md`. Versions below `1.0.0` are published as GitHub prereleases. An existing tag can be republished manually from the **Release** workflow; its notes and assets are updated in place.
 

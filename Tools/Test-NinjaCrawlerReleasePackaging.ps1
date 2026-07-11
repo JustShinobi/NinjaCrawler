@@ -9,6 +9,21 @@ $manifest = Get-Content -LiteralPath (Join-Path $repoRoot "NinjaCrawler.Companio
 $assetName = "NinjaCrawler-Companion-$($manifest.version).zip"
 
 try {
+    # -CompanionOnly and -SkipCompanion are contradictory and must be rejected.
+    $mutualExclusionRejected = $false
+    try {
+        & (Join-Path $PSScriptRoot "Package-NinjaCrawlerRelease.ps1") `
+            -Version "0.0.0" `
+            -OutputRoot $testOutputRoot `
+            -CompanionOnly `
+            -SkipCompanion
+    } catch {
+        $mutualExclusionRejected = $true
+    }
+    if (-not $mutualExclusionRejected) {
+        throw "Packaging must reject -CompanionOnly together with -SkipCompanion."
+    }
+
     & (Join-Path $PSScriptRoot "Package-NinjaCrawlerRelease.ps1") `
         -Version "0.0.0" `
         -OutputRoot $testOutputRoot `

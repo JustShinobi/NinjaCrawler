@@ -432,10 +432,12 @@ fn companion_compatibility(installed_version: Option<&str>) -> CompanionCompatib
         Some(version) if parse_version(version).is_some() => "current",
         _ => "unknown",
     };
-    let release_version = env!("CARGO_PKG_VERSION");
-    let release_page_url = format!("{GITHUB_RELEASES_URL}/tag/v{release_version}");
+    // The Companion has its own release-please track and tag (companion-vX.Y.Z),
+    // independent of the desktop app tag, so its download links are anchored to
+    // the Companion release rather than the app's CARGO_PKG_VERSION.
+    let release_page_url = format!("{GITHUB_RELEASES_URL}/tag/companion-v{available_version}");
     let download_url = format!(
-        "{GITHUB_RELEASES_URL}/download/v{release_version}/NinjaCrawler-Companion-{available_version}.zip"
+        "{GITHUB_RELEASES_URL}/download/companion-v{available_version}/NinjaCrawler-Companion-{available_version}.zip"
     );
 
     CompanionCompatibility {
@@ -1071,6 +1073,14 @@ mod tests {
         assert!(current
             .download_url
             .contains(&format!("NinjaCrawler-Companion-{available}.zip")));
+        // Links are anchored to the Companion's own release tag, not the app tag.
+        assert!(current
+            .download_url
+            .contains(&format!("/download/companion-v{available}/")));
+        assert_eq!(
+            current.release_page_url,
+            format!("{GITHUB_RELEASES_URL}/tag/companion-v{available}")
+        );
 
         assert_eq!(
             companion_compatibility(Some("0.2.9")).status,
