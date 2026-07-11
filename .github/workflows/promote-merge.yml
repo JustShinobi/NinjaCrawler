@@ -9,12 +9,18 @@ name: promote-merge
 # the method by hand is a foot-gun.
 #
 # Use this instead of clicking the green button:
-#   * add the `promote` label to the develop -> main PR, or
+#   * add the promote label to the develop -> main PR, or
 #   * run the workflow manually (workflow_dispatch).
-# It always merges with `--merge`, regardless of the repo's default method.
+# The label records promotion intent immediately. If CI is still running, the
+# workflow exits successfully and resumes from the CI workflow_run event. It
+# always merges with --merge, regardless of the repo's default method.
 on:
   pull_request:
     types: [labeled]
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+    branches: [develop]
   workflow_dispatch:
 
 permissions:
@@ -28,13 +34,17 @@ concurrency:
 jobs:
   promote-merge:
     name: Merge develop -> main as a merge commit
-    # For label events, only react to the `promote` label on a develop -> main
-    # PR; workflow_dispatch always runs and finds the open PR itself.
+    # Label events record promotion intent. CI completion events only resume
+    # promotion for the standing develop -> main PR. workflow_dispatch finds
+    # that PR and adds the label so a pending CI run can resume it later.
     if: >
       github.event_name == 'workflow_dispatch' ||
       (github.event.label.name == 'promote' &&
        github.event.pull_request.base.ref == 'main' &&
-       github.event.pull_request.head.ref == 'develop')
+       github.event.pull_request.head.ref == 'develop') ||
+      (github.event_name == 'workflow_run' &&
+       github.event.workflow_run.event == 'pull_request' &&
+       github.event.workflow_run.head_branch == 'develop')
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -44,15 +54,92 @@ jobs:
           # GITHUB_TOKEN is restricted on this repo.
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
           REPO: ${{ github.repository }}
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_HEAD_SHA: ${{ github.event.workflow_run.head_sha || '' }}
+          EVENT_CONCLUSION: ${{ github.event.workflow_run.conclusion || '' }}
         run: |
           set -euo pipefail
-          pr="$(gh pr list --repo "$REPO" --base main --head develop \
-            --state open --json number --jq '.[0].number' || true)"
+
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            pr="$(gh pr list --repo "$REPO" --base main --head develop \
+              --state open --json number --jq '.[0].number' || true)"
+          else
+            pr="$(gh pr list --repo "$REPO" --base main --head develop \
+              --label promote --state open --json number --jq '.[0].number' || true)"
+          fi
           if [ -z "$pr" ]; then
-            echo "No open develop -> main promotion PR to merge; nothing to do."
+            echo "No labeled develop -> main promotion PR to merge; nothing to do."
             exit 0
           fi
-          echo "Merging promotion PR #$pr as a merge commit."
+
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            gh pr edit "$pr" --repo "$REPO" --add-label promote
+          fi
+
+          pr_data="$(gh pr view "$pr" --repo "$REPO" \
+            --json headRefOid,statusCheckRollup)"
+          pr_head_sha="$(jq -r '.headRefOid' <<<"$pr_data")"
+          if [ "$EVENT_NAME" = "workflow_run" ] &&
+             [ "$EVENT_HEAD_SHA" != "$pr_head_sha" ]; then
+            echo "Ignoring CI completion for stale SHA $EVENT_HEAD_SHA; current PR head is $pr_head_sha."
+            exit 0
+          fi
+          if [ "$EVENT_NAME" = "workflow_run" ] &&
+             [ "$EVENT_CONCLUSION" != "success" ]; then
+            echo "::warning::Promotion remains pending because CI concluded with $EVENT_CONCLUSION."
+            exit 0
+          fi
+
+          checks="$(jq '[.statusCheckRollup[] |
+            select(.workflowName == "CI") |
+            {name, status, conclusion}]' <<<"$pr_data")"
+          failed="$(jq -r '[.[] |
+            select(.conclusion == "FAILURE" or
+                   .conclusion == "CANCELLED" or
+                   .conclusion == "TIMED_OUT" or
+                   .conclusion == "ACTION_REQUIRED" or
+                   .conclusion == "STARTUP_FAILURE" or
+                   .conclusion == "STALE") |
+            .name] | unique | join(", ")' <<<"$checks")"
+          if [ -n "$failed" ]; then
+            echo "::warning::Promotion remains pending because CI failed: $failed."
+            exit 0
+          fi
+
+          pending=()
+          for required in "Detect Rust changes" "Frontend quality" "Windows Release build"; do
+            result="$(jq -r --arg name "$required" \
+              '[.[] | select(.name == $name)] | last |
+               if . == null then "" else [.status, .conclusion] | @tsv end' \
+              <<<"$checks")"
+            if [ -z "$result" ]; then
+              pending+=("$required (not started)")
+              continue
+            fi
+
+            status="${result%%$'\t'*}"
+            conclusion="${result#*$'\t'}"
+            if [ "$status" != "COMPLETED" ]; then
+              pending+=("$required ($status)")
+              continue
+            fi
+            if [ "$required" = "Windows Release build" ]; then
+              if [ "$conclusion" != "SUCCESS" ] &&
+                 [ "$conclusion" != "SKIPPED" ]; then
+                pending+=("$required ($conclusion)")
+              fi
+            elif [ "$conclusion" != "SUCCESS" ]; then
+              pending+=("$required ($conclusion)")
+            fi
+          done
+
+          if [ "${#pending[@]}" -gt 0 ]; then
+            echo "::notice::Promotion requested; waiting for CI: ${pending[*]}."
+            exit 0
+          fi
+
+          echo "CI passed for $pr_head_sha; merging promotion PR #$pr as a merge commit."
           # --merge forces a merge commit even though the repo defaults to
-          # squash. Branch protection still gates this on required checks.
+          # squash. The explicit CI gate above also waits for the optional
+          # Windows build when backend files changed.
           gh pr merge "$pr" --repo "$REPO" --merge
