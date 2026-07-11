@@ -1,0 +1,119 @@
+name: Release Companion
+
+# Publishes the Chrome Companion extension on its own release-please track. The
+# Companion is versioned independently of the desktop app (tag companion-vX.Y.Z)
+# so a release that only touches the app never bumps the extension — which would
+# otherwise make the in-app update check nag users to reinstall an unchanged
+# extension.
+#
+# release-please.yml dispatches this workflow when the NinjaCrawler.Companion
+# package is released. release-please creates the release as a draft (draft: true
+# in the config), so the git tag does not exist yet; this workflow packages the
+# static extension ZIP, attaches it, and only then publishes — which finally
+# creates the tag. Mirrors the draft->attach->publish dance in release.yml.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Companion release tag to publish (for example, companion-v0.3.2)
+        required: true
+        type: string
+      sha:
+        description: Commit SHA to build. Used when the tag does not exist yet (draft release).
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-companion-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  release-companion:
+    name: Build and publish Companion extension
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out release commit
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+          # Prefer the commit SHA (the tag may not exist yet for a draft release),
+          # then the dispatch tag.
+          ref: ${{ inputs.sha || inputs.tag }}
+
+      - name: Validate Companion release version
+        id: version
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          if ($env:RELEASE_TAG -notmatch '^companion-v(?<version>\d+\.\d+\.\d+)$') {
+            throw "Companion release tag '$env:RELEASE_TAG' must use the companion-vX.Y.Z format."
+          }
+
+          $version = $Matches.version
+          $manifestVersion = (Get-Content NinjaCrawler.Companion/manifest.json -Raw | ConvertFrom-Json).version
+          if ($manifestVersion -ne $version) {
+            throw "NinjaCrawler.Companion/manifest.json has version '$manifestVersion', expected '$version'."
+          }
+
+          "tag=$env:RELEASE_TAG" >> $env:GITHUB_OUTPUT
+          "version=$version" >> $env:GITHUB_OUTPUT
+
+      - name: Package Companion asset
+        shell: pwsh
+        run: >
+          pwsh -File Tools/Package-NinjaCrawlerRelease.ps1
+          -Version ${{ steps.version.outputs.version }}
+          -CompanionOnly
+
+      - name: Publish GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+          RELEASE_SHA: ${{ inputs.sha || github.sha }}
+        run: |
+          $assets = @(Get-ChildItem release -File | ForEach-Object FullName)
+          if ($assets.Count -eq 0) {
+            throw "No Companion release assets were generated."
+          }
+
+          & gh release view $env:RELEASE_TAG *> $null
+          if ($LASTEXITCODE -eq 0) {
+            # A (draft) release already exists. Attach the ZIP first, then publish
+            # it last so the tag and the visible release only appear once the asset
+            # is in place.
+            & gh release upload $env:RELEASE_TAG @assets --clobber
+            if ($LASTEXITCODE -ne 0) {
+              throw "Companion release asset upload failed."
+            }
+
+            $publishArgs = @(
+              'release', 'edit', $env:RELEASE_TAG
+              '--title', "NinjaCrawler Companion $env:RELEASE_VERSION"
+              '--draft=false'
+              '--prerelease=false'
+            )
+            & gh @publishArgs
+          } else {
+            # Fallback (for example a manual tag push with no pre-created release):
+            # create it already published with the asset attached.
+            $arguments = @(
+              'release', 'create', $env:RELEASE_TAG
+              '--target', $env:RELEASE_SHA
+              '--title', "NinjaCrawler Companion $env:RELEASE_VERSION"
+              '--notes', "NinjaCrawler Companion $env:RELEASE_VERSION"
+            )
+            $arguments += $assets
+            & gh @arguments
+          }
+          if ($LASTEXITCODE -ne 0) {
+            throw "Companion GitHub Release publication failed."
+          }

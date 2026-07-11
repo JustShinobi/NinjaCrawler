@@ -3,11 +3,16 @@ param(
     [ValidatePattern("^\d+\.\d+\.\d+$")]
     [string]$Version,
     [string]$OutputRoot = "release",
-    [switch]$CompanionOnly
+    [switch]$CompanionOnly,
+    [switch]$SkipCompanion
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+
+if ($CompanionOnly -and $SkipCompanion) {
+    throw "-CompanionOnly and -SkipCompanion are mutually exclusive."
+}
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $releaseRoot = Join-Path $repoRoot "src-tauri\target\release"
@@ -73,6 +78,9 @@ if (-not $CompanionOnly) {
     $assets += @($portableZip, $msiDestination, $nsisDestination)
 }
 
+# The Companion ships in its own release; -SkipCompanion lets the app release
+# build only the app assets without packaging the extension ZIP.
+if (-not $SkipCompanion) {
 if (-not (Test-Path -LiteralPath $companionManifestPath -PathType Leaf)) {
     throw "Companion manifest not found: '$companionManifestPath'."
 }
@@ -121,6 +129,11 @@ $companionZip = Join-Path $outputPath "$companionName.zip"
 Compress-Archive -LiteralPath $companionStagingPath -DestinationPath $companionZip -CompressionLevel Optimal
 Remove-Item -LiteralPath $companionStagingPath -Recurse -Force
 $assets += $companionZip
+}
+
+if ($assets.Count -eq 0) {
+    throw "No release assets were produced."
+}
 
 $checksumLines = foreach ($asset in $assets) {
     $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $asset).Hash.ToLowerInvariant()
