@@ -19,9 +19,18 @@ use crate::providers;
 const SCHEDULER_TICK_EVENT: &str = "runtime://scheduler-tick";
 pub const SOURCE_SYNC_QUEUE_CHANGED_EVENT: &str = "runtime://source-sync-queue-changed";
 const RECENT_RESULTS_LIMIT: usize = 80;
+const ACCOUNT_HOLD_CHECK_INTERVAL_SECS: u64 = 15;
 
 fn is_force_imported_backfill(run_mode: Option<&str>) -> bool {
     run_mode.is_some_and(|value| value.eq_ignore_ascii_case("force_imported_backfill"))
+}
+
+fn is_queue_promotion_run_mode(run_mode: Option<&str>) -> bool {
+    is_force_imported_backfill(run_mode)
+        || run_mode.is_some_and(|value| {
+            value
+                .eq_ignore_ascii_case(workspace_repository::TWITTER_FULL_TIMELINE_BACKFILL_RUN_MODE)
+        })
 }
 
 fn source_sync_job_key(
@@ -66,6 +75,13 @@ struct SourceSyncQueueJob {
     progress_detail: Option<String>,
     progress_indeterminate: bool,
     downloaded_items: Option<u32>,
+    hold_until: Option<String>,
+}
+
+enum DequeueOutcome {
+    Job(SourceSyncQueueJob),
+    WaitingForAccount,
+    Finished,
 }
 
 #[derive(Clone)]
@@ -173,6 +189,7 @@ fn enqueue_job(state: &mut SourceSyncQueueState, job: SourceSyncQueueJob) -> Que
     let job_key = job.job_key.clone();
     let provider = job.provider.clone();
     let force_imported_backfill = is_force_imported_backfill(job.run_mode.as_deref());
+    let promote_existing = is_queue_promotion_run_mode(job.run_mode.as_deref());
     let already_active = state
         .active_jobs
         .get(&provider)
@@ -184,7 +201,7 @@ fn enqueue_job(state: &mut SourceSyncQueueState, job: SourceSyncQueueJob) -> Que
         .get_mut(&provider)
         .and_then(|queue| queue.iter_mut().find(|queued| queued.job_key == job_key))
     {
-        if force_imported_backfill {
+        if promote_existing {
             existing_job.trigger = job.trigger.clone();
             existing_job.run_mode = job.run_mode.clone();
             existing_job.sync_options_override = job.sync_options_override.clone();
@@ -264,6 +281,7 @@ pub fn enqueue_source_sync(
         progress_detail: None,
         progress_indeterminate: false,
         downloaded_items: None,
+        hold_until: None,
     };
 
     let queued_at = job.queued_at.clone();
@@ -306,6 +324,14 @@ pub fn enqueue_source_sync(
     }
 
     if queue_result.promoted_existing_job {
+        let promotion_label = if input.run_mode.as_deref().is_some_and(|value| {
+            value
+                .eq_ignore_ascii_case(workspace_repository::TWITTER_FULL_TIMELINE_BACKFILL_RUN_MODE)
+        }) {
+            "dedicated Twitter full-timeline backfill"
+        } else {
+            "force legacy backfill"
+        };
         log_source_sync_event(
             "sync.queue",
             "info",
@@ -316,10 +342,10 @@ pub fn enqueue_source_sync(
                 account_id: seed.account_id.as_deref(),
             },
             format!(
-                "Promoted queued source sync for '{}' to force legacy backfill.",
+                "Promoted queued source sync for '{}' to {promotion_label}.",
                 seed.handle
             ),
-            Some("The existing queued run will bypass the imported cutoff.".to_string()),
+            Some("The existing queued run was updated instead of duplicated.".to_string()),
         );
     }
 
@@ -379,6 +405,7 @@ pub fn restore_persisted_queue(app: &AppHandle) {
             progress_detail: None,
             progress_indeterminate: false,
             downloaded_items: None,
+            hold_until: None,
         };
 
         let queue_result = match queue_state().lock() {
@@ -431,8 +458,13 @@ fn provider_has_pending_jobs(provider: &str) -> bool {
 fn spawn_worker(app: AppHandle, provider: String) {
     thread::spawn(move || loop {
         let job = match dequeue_next(&provider) {
-            Ok(Some(job)) => job,
-            Ok(None) => {
+            Ok(DequeueOutcome::Job(job)) => job,
+            Ok(DequeueOutcome::WaitingForAccount) => {
+                publish_queue_status_event(&app);
+                thread::sleep(Duration::from_secs(ACCOUNT_HOLD_CHECK_INTERVAL_SECS));
+                continue;
+            }
+            Ok(DequeueOutcome::Finished) => {
                 publish_queue_status_event(&app);
                 break;
             }
@@ -452,6 +484,25 @@ fn spawn_worker(app: AppHandle, provider: String) {
         );
         if sync_result.is_ok() {
             let _ = media_thumbnail_runtime::enqueue(vec![job.source_id.clone()]);
+        }
+        let hold_until = job.account_id.as_deref().and_then(|account_id| {
+            workspace_repository::active_source_sync_account_hold_until(account_id, &job.provider)
+                .ok()
+                .flatten()
+        });
+        if let Some(hold_until) = hold_until {
+            let (_, summary) = summarize_sync_result(&job.source_id, &sync_result);
+            requeue_active_on_account_hold(&job, &hold_until.to_rfc3339(), &summary);
+            publish_queue_status_event(&app);
+            match sync_result {
+                Ok(snapshot) => emit_runtime_refresh(&app, &snapshot),
+                Err(_) => {
+                    if let Ok(snapshot) = workspace_repository::bootstrap_workspace() {
+                        emit_runtime_refresh(&app, &snapshot);
+                    }
+                }
+            }
+            continue;
         }
         let (final_status, final_summary) = summarize_sync_result(&job.source_id, &sync_result);
         finish_active(&job, &final_status, &final_summary);
@@ -512,7 +563,7 @@ fn spawn_worker(app: AppHandle, provider: String) {
     });
 }
 
-fn dequeue_next(provider: &str) -> Result<Option<SourceSyncQueueJob>, String> {
+fn dequeue_next(provider: &str) -> Result<DequeueOutcome, String> {
     let mut state = queue_state()
         .lock()
         .map_err(|_| "Source sync queue lock is poisoned.".to_string())?;
@@ -521,13 +572,42 @@ fn dequeue_next(provider: &str) -> Result<Option<SourceSyncQueueJob>, String> {
     if state.paused_providers.contains(provider) {
         state.active_jobs.remove(provider);
         state.workers_running.remove(provider);
-        return Ok(None);
+        return Ok(DequeueOutcome::Finished);
     }
 
-    let next = state
-        .queues
-        .get_mut(provider)
-        .and_then(|queue| queue.pop_front());
+    let queue_len = state.queues.get(provider).map(VecDeque::len).unwrap_or(0);
+    let mut next = None;
+    for _ in 0..queue_len {
+        let Some(mut candidate) = state
+            .queues
+            .get_mut(provider)
+            .and_then(|queue| queue.pop_front())
+        else {
+            break;
+        };
+        let hold_until = candidate.account_id.as_deref().and_then(|account_id| {
+            workspace_repository::active_source_sync_account_hold_until(account_id, provider)
+                .ok()
+                .flatten()
+        });
+        if let Some(until) = hold_until {
+            candidate.hold_until = Some(until.to_rfc3339());
+            candidate.progress_label = Some("On hold".to_string());
+            candidate.progress_detail = Some(format!(
+                "Twitter Account rate limit; automatic retry after {}.",
+                until.to_rfc3339()
+            ));
+            candidate.progress_indeterminate = false;
+            state
+                .queues
+                .entry(provider.to_string())
+                .or_default()
+                .push_back(candidate);
+            continue;
+        }
+        next = Some(candidate);
+        break;
+    }
     match next {
         Some(mut job) => {
             state.queued_keys.remove(&job.job_key);
@@ -537,6 +617,7 @@ fn dequeue_next(provider: &str) -> Result<Option<SourceSyncQueueJob>, String> {
             job.progress_indeterminate = true;
             job.progress_percent = Some(0);
             job.downloaded_items = Some(0);
+            job.hold_until = None;
             state.active_jobs.insert(provider.to_string(), job.clone());
             log_source_sync_event(
                 "sync.run",
@@ -552,8 +633,9 @@ fn dequeue_next(provider: &str) -> Result<Option<SourceSyncQueueJob>, String> {
                     .as_ref()
                     .map(|account_id| format!("Using provider account '{}'.", account_id)),
             );
-            Ok(Some(job))
+            Ok(DequeueOutcome::Job(job))
         }
+        None if queue_len > 0 => Ok(DequeueOutcome::WaitingForAccount),
         None => {
             state.active_jobs.remove(provider);
             state.workers_running.remove(provider);
@@ -562,9 +644,43 @@ fn dequeue_next(provider: &str) -> Result<Option<SourceSyncQueueJob>, String> {
                     state.queues.remove(provider);
                 }
             }
-            Ok(None)
+            Ok(DequeueOutcome::Finished)
         }
     }
+}
+
+fn requeue_active_on_account_hold(job: &SourceSyncQueueJob, hold_until: &str, summary: &str) {
+    if let Ok(mut state) = queue_state().lock() {
+        state.active_jobs.remove(&job.provider);
+        let mut held_job = job.clone();
+        held_job.started_at = None;
+        held_job.progress_percent = None;
+        held_job.progress_label = Some("On hold".to_string());
+        held_job.progress_detail = Some(format!(
+            "Twitter Account rate limit; automatic retry after {hold_until}."
+        ));
+        held_job.progress_indeterminate = false;
+        held_job.hold_until = Some(hold_until.to_string());
+        if state.queued_keys.insert(job.job_key.clone()) {
+            state
+                .queues
+                .entry(job.provider.clone())
+                .or_default()
+                .push_back(held_job);
+        }
+    }
+    log_source_sync_event(
+        "sync.queue",
+        "warning",
+        RuntimeLogAnchor {
+            source_id: Some(&job.source_id),
+            provider: Some(&job.provider),
+            source_handle: Some(&job.handle),
+            account_id: job.account_id.as_deref(),
+        },
+        format!("Source sync for '{}' is on Account hold.", job.handle),
+        Some(format!("{summary} Automatic retry after {hold_until}.")),
+    );
 }
 
 fn finish_active(job: &SourceSyncQueueJob, status: &str, summary: &str) {
@@ -1110,14 +1226,19 @@ fn build_queue_status(state: &SourceSyncQueueState) -> SourceSyncQueueStatus {
             provider: job.provider.clone(),
             handle: job.handle.clone(),
             account_id: job.account_id.clone(),
-            state: "queued".to_string(),
+            state: if job.hold_until.is_some() {
+                "held".to_string()
+            } else {
+                "queued".to_string()
+            },
             queued_at: job.queued_at.clone(),
             started_at: None,
-            progress_percent: None,
-            progress_label: None,
-            progress_detail: None,
-            progress_indeterminate: false,
-            downloaded_items: None,
+            progress_percent: job.progress_percent,
+            progress_label: job.progress_label.clone(),
+            progress_detail: job.progress_detail.clone(),
+            progress_indeterminate: job.progress_indeterminate,
+            downloaded_items: job.downloaded_items,
+            hold_until: job.hold_until.clone(),
         }));
     }
 
@@ -1138,6 +1259,7 @@ fn build_queue_status(state: &SourceSyncQueueState) -> SourceSyncQueueStatus {
             progress_detail: job.progress_detail.clone(),
             progress_indeterminate: job.progress_indeterminate,
             downloaded_items: job.downloaded_items,
+            hold_until: job.hold_until.clone(),
         })
         .collect::<Vec<_>>();
     running_items.sort_by(|a, b| a.provider.cmp(&b.provider));
@@ -1216,7 +1338,36 @@ mod tests {
             progress_detail: None,
             progress_indeterminate: false,
             downloaded_items: None,
+            hold_until: None,
         }
+    }
+
+    #[test]
+    fn queue_status_exposes_account_held_jobs_without_marking_them_running() {
+        let mut state = SourceSyncQueueState::default();
+        let mut job = sample_job(
+            "source-held",
+            "twitter",
+            "held-user",
+            "2026-07-11T00:00:00Z",
+        );
+        job.hold_until = Some("2026-07-11T00:15:30Z".to_string());
+        job.progress_label = Some("On hold".to_string());
+        state.queued_keys.insert(job.job_key.clone());
+        state
+            .queues
+            .entry("twitter".to_string())
+            .or_default()
+            .push_back(job);
+
+        let status = build_queue_status(&state);
+        assert_eq!(status.queued_count, 1);
+        assert_eq!(status.running_count, 0);
+        assert_eq!(status.queued_items[0].state, "held");
+        assert_eq!(
+            status.queued_items[0].hold_until.as_deref(),
+            Some("2026-07-11T00:15:30Z")
+        );
     }
 
     #[test]

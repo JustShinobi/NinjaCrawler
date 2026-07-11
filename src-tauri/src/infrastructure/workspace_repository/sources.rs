@@ -45,14 +45,15 @@ pub(super) fn batch_update_source_profiles_with_connection(
             for source_id in &patch.source_ids {
                 let row = connection
                     .query_row(
-                        "SELECT labels_json, ready_for_download, sync_options_json, group_id FROM source_profiles WHERE id = ?1 AND deleted_at IS NULL",
+                        "SELECT provider, labels_json, ready_for_download, sync_options_json, group_id FROM source_profiles WHERE id = ?1 AND deleted_at IS NULL",
                         params![source_id],
                         |row| {
-                            let labels_json: String = row.get(0)?;
-                            let ready_for_download: bool = row.get(1)?;
-                            let sync_options_json: String = row.get(2)?;
-                            let group_id: Option<String> = row.get(3)?;
-                            Ok((labels_json, ready_for_download, sync_options_json, group_id))
+                            let provider: String = row.get(0)?;
+                            let labels_json: String = row.get(1)?;
+                            let ready_for_download: bool = row.get(2)?;
+                            let sync_options_json: String = row.get(3)?;
+                            let group_id: Option<String> = row.get(4)?;
+                            Ok((provider, labels_json, ready_for_download, sync_options_json, group_id))
                         },
                     )
                     .map_err(|error| format!("Failed to load source {source_id}: {error}"))?;
@@ -66,8 +67,10 @@ pub(super) fn batch_update_source_profiles_with_connection(
                 .collect();
             let now = chrono::Utc::now().to_rfc3339();
 
-            for (source_id, (labels_json, current_ready, sync_options_json, current_group_id)) in
-                loaded_sources
+            for (
+                source_id,
+                (provider, labels_json, current_ready, sync_options_json, current_group_id),
+            ) in loaded_sources
             {
                 let mut labels: Vec<String> =
                     serde_json::from_str(&labels_json).unwrap_or_default();
@@ -90,11 +93,22 @@ pub(super) fn batch_update_source_profiles_with_connection(
                     None => current_group_id,
                 };
 
-                let mut sync_options: SourceSyncOptions =
-                    serde_json::from_str(&sync_options_json).unwrap_or_default();
-                if let Some(ref ig_patch) = patch.sync_options_patch {
-                    let ig = sync_options.instagram.get_or_insert_with(Default::default);
-                    apply_instagram_patch(ig, ig_patch);
+                let mut sync_options: serde_json::Value = serde_json::from_str(&sync_options_json)
+                    .unwrap_or_else(|_| serde_json::json!({}));
+                if !sync_options.is_object() {
+                    sync_options = serde_json::json!({});
+                }
+                if let Some(provider_patch) = patch
+                    .sync_options_patch
+                    .as_ref()
+                    .and_then(|sync_patch| sync_patch.for_provider(&provider))
+                {
+                    let provider_options = sync_options
+                        .as_object_mut()
+                        .expect("sync options were normalized to an object")
+                        .entry(provider.clone())
+                        .or_insert_with(|| serde_json::json!({}));
+                    merge_json_patch(provider_options, provider_patch);
                 }
 
                 let new_labels_json =
@@ -122,6 +136,20 @@ pub(super) fn batch_update_source_profiles_with_connection(
         }
 
         result
+    }
+}
+
+fn merge_json_patch(target: &mut serde_json::Value, patch: &serde_json::Value) {
+    match (target, patch) {
+        (serde_json::Value::Object(target), serde_json::Value::Object(patch)) => {
+            for (key, value) in patch {
+                merge_json_patch(
+                    target.entry(key.clone()).or_insert(serde_json::Value::Null),
+                    value,
+                );
+            }
+        }
+        (target, patch) => *target = patch.clone(),
     }
 }
 pub fn delete_source_profile(

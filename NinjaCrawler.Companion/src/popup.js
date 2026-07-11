@@ -50,6 +50,7 @@ const elements = {
   accountImportPanel: document.querySelector('#accountImportPanel'),
   accountImportSummary: document.querySelector('#accountImportSummary'),
   accountImportFields: document.querySelector('#accountImportFields'),
+  accountImportWarnings: document.querySelector('#accountImportWarnings'),
   accountDestination: document.querySelector('#accountDestination'),
   newAccountNameField: document.querySelector('#newAccountNameField'),
   newAccountName: document.querySelector('#newAccountName'),
@@ -62,6 +63,11 @@ const elements = {
   storyShortcut: document.querySelector('#storyShortcut'),
   configureShortcutsButton: document.querySelector('#configureShortcutsButton'),
 }
+
+// Folga acima do timeout interno da sonda (10s) para que o erro real do
+// background chegue primeiro. Este corte é a rede de segurança caso o service
+// worker morra sem responder e o `sendMessage` fique pendente para sempre.
+const ACCOUNT_CAPTURE_TIMEOUT_MS = 15_000
 
 const state = {
   tab: null,
@@ -399,11 +405,15 @@ async function startAccountImport() {
   setBusy(true)
   setMessage('Capturing the signed-in browser account…')
   try {
-    const response = await chrome.runtime.sendMessage({
-      type: 'captureAccount',
-      tabId: state.tab.id,
-      provider: state.provider,
-    })
+    const response = await withTimeout(
+      chrome.runtime.sendMessage({
+        type: 'captureAccount',
+        tabId: state.tab.id,
+        provider: state.provider,
+      }),
+      ACCOUNT_CAPTURE_TIMEOUT_MS,
+      'Account capture timed out. Reload the tab and try again.',
+    )
     if (!response?.ok) throw new Error(response?.error || 'Account capture failed.')
     state.accountCapture = response.capture
     state.accountPreview = await previewAccount(response.capture)
@@ -425,6 +435,14 @@ function renderAccountImportReview() {
   elements.accountImportFields.textContent = preview.authorizationFields.length
     ? `Authorization: ${preview.authorizationFields.join(', ')}`
     : 'No additional authorization parameters detected.'
+
+  const missing = preview.missingRequiredFields ?? []
+  elements.accountImportWarnings.classList.toggle('hidden', missing.length === 0)
+  elements.accountImportWarnings.textContent = missing.length
+    ? `Incomplete browser session — missing ${missing.map(formatMissingField).join(', ')}. `
+      + 'Sign in on this tab and capture again.'
+    : ''
+
   elements.accountDestination.replaceChildren()
 
   const createOption = document.createElement('option')
@@ -447,6 +465,19 @@ function renderAccountDestination() {
   const creating = elements.accountDestination.value === '__new__'
   elements.newAccountNameField.classList.toggle('hidden', !creating)
   elements.confirmAccountImport.textContent = creating ? 'Create and import' : 'Update account'
+  // A sessão incompleta é rejeitada pelo desktop de qualquer forma; bloqueamos
+  // o import aqui para não fazer o operador clicar só para ver o erro.
+  const incomplete = (state.accountPreview?.missingRequiredFields ?? []).length > 0
+  elements.confirmAccountImport.disabled = state.isBusy || incomplete
+}
+
+function formatMissingField(field) {
+  if (field === 'identity.username') return 'the account username'
+  const cookieMatch = field.match(/^cookie:(.+)$/)
+  if (cookieMatch) {
+    return `cookie ${cookieMatch[1].split('|').join(' or ')}`
+  }
+  return field
 }
 
 async function submitAccountImport() {
@@ -620,6 +651,10 @@ function setBusy(isBusy) {
       button.disabled = isBusy
     }
   }
+  // Uma sessão incompleta nunca deve reabilitar o import, mesmo quando o busy sai.
+  if (!isBusy && (state.accountPreview?.missingRequiredFields ?? []).length > 0) {
+    elements.confirmAccountImport.disabled = true
+  }
 }
 
 function setBatchMessage(text, kind = '') {
@@ -679,6 +714,14 @@ async function openChromeExtensions() {
   } catch (error) {
     setMessage(error?.message || 'Could not open Chrome Extensions.', 'error')
   }
+}
+
+function withTimeout(promise, timeoutMs, message) {
+  let timer
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(message)), timeoutMs)
+  })
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer))
 }
 
 function formatDate(value) {

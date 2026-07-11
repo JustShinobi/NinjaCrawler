@@ -19,13 +19,14 @@ use crate::domain::models::{
     default_tiktok_source_sync_options, default_twitter_source_sync_options,
 };
 use crate::domain::models::{
-    AccountSyncRun, AppSetting, AppSettingUpsert, BatchSourceProfilePatch, CloneSyncPlanInput,
+    AccountSyncRun, AppSetting, AppSettingUpsert, BatchSourceProfilePatch,
+    CloneSyncPlanInput,
     CompanionAccountCandidate, CompanionAccountCapture, CompanionAccountImportInput,
     CompanionAccountImportResult, CompanionAccountPreview, DesktopRuntimeState,
     ImportMethodDescriptor, ImportPreview, ImportPreviewOptions, ImportPreviewProfile,
     ImportPreviewSummary, ImportProblem, ImportProviderDescriptor, ImportRootDescriptor,
     ImportRunProfileResult, ImportRunRequest, ImportRunResult, InstagramNamingLedgerBackfillResult,
-    InstagramSourceSyncOptions, InstagramSyncOptionsPatch, MediaGalleryFile, MediaGalleryPost,
+    InstagramSourceSyncOptions, MediaGalleryFile, MediaGalleryPost,
     MediaThumbnailBatch, MoveSyncPlanInput, ProviderAccount, ProviderAccountCookie,
     ProviderAccountCookieImport, ProviderAccountEditor, ProviderAccountImportState,
     ProviderAccountSession, ProviderAccountSettingValue, ProviderAccountSettingValueKind,
@@ -128,6 +129,41 @@ fn twitter_model_selection(
         search: options.search_model.unwrap_or(false),
         likes: options.likes_model.unwrap_or(false),
     }
+}
+
+fn twitter_model_selection_for_run(
+    options: &TwitterSourceSyncOptions,
+    run_mode: Option<&str>,
+) -> twitter_connector::TwitterModelSelection {
+    if run_mode
+        .is_some_and(|value| value.eq_ignore_ascii_case(TWITTER_FULL_TIMELINE_BACKFILL_RUN_MODE))
+    {
+        return twitter_connector::TwitterModelSelection {
+            media: false,
+            profile: true,
+            search: false,
+            likes: false,
+        };
+    }
+
+    let mut selection = twitter_model_selection(options);
+    // A timeline completa sobrepoe o modelo media e portanto nunca participa
+    // do sync normal. Ela e executada somente no run mode de backfill acima.
+    selection.profile = false;
+    selection
+}
+
+fn twitter_model_selection_for_phase(
+    options: &TwitterSourceSyncOptions,
+    run_mode: Option<&str>,
+    completed_sections: &HashSet<String>,
+) -> twitter_connector::TwitterModelSelection {
+    let mut selection = twitter_model_selection_for_run(options, run_mode);
+    selection.media &= !completed_sections.contains("media");
+    selection.profile &= !completed_sections.contains("timeline");
+    selection.search &= !completed_sections.contains("search");
+    selection.likes &= !completed_sections.contains("likes");
+    selection
 }
 
 fn tiktok_section_selection(
@@ -1576,6 +1612,13 @@ fn load_existing_relative_media_paths(profile_root: &Path) -> HashSet<String> {
         return paths;
     };
     for file in files {
+        if file
+            .metadata()
+            .map(|metadata| metadata.len() == 0)
+            .unwrap_or(true)
+        {
+            continue;
+        }
         if let Some(name) = file.file_name().and_then(|value| value.to_str()) {
             paths.insert(name.to_string());
         }

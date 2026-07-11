@@ -635,6 +635,9 @@ pub struct SourceSyncQueueItem {
     pub progress_detail: Option<String>,
     pub progress_indeterminate: bool,
     pub downloaded_items: Option<u32>,
+    /// Prazo do hold automatico da Account, quando o item esta aguardando rate
+    /// limit. Ausente para jobs normais e pausas manuais por provider.
+    pub hold_until: Option<String>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -961,7 +964,8 @@ pub struct TwitterSourceSyncOptions {
 pub fn default_twitter_source_sync_options() -> TwitterSourceSyncOptions {
     TwitterSourceSyncOptions {
         media_model: Some(true),
-        profile_model: Some(true),
+        // A timeline completa e um backfill separado, nunca parte do sync normal.
+        profile_model: Some(false),
         // Modelos opcionais (mais propensos a limite) ficam desligados.
         search_model: Some(false),
         likes_model: Some(false),
@@ -1145,42 +1149,30 @@ pub struct BatchSourceProfilePatch {
     pub labels_to_add: Vec<String>,
     pub labels_to_remove: Vec<String>,
     pub ready_for_download: Option<bool>,
-    pub sync_options_patch: Option<InstagramSyncOptionsPatch>,
+    pub sync_options_patch: Option<BatchSourceSyncOptionsPatch>,
     pub set_group_id: Option<Option<String>>,
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct InstagramSyncOptionsPatch {
-    pub timeline: Option<bool>,
-    pub reels: Option<bool>,
-    pub stories: Option<bool>,
-    pub stories_user: Option<bool>,
-    pub tagged: Option<bool>,
-    pub temporary: Option<bool>,
-    pub favorite: Option<bool>,
-    pub download_images: Option<bool>,
-    pub download_videos: Option<bool>,
-    pub place_extracted_image_into_video_folder: Option<bool>,
-    pub extract_image_from_video: Option<InstagramExtractImageFromVideoPatch>,
-    pub get_user_media_only: Option<bool>,
-    pub missing_only: Option<bool>,
-    pub full_scan: Option<bool>,
-    pub verified_profile: Option<bool>,
-    pub force_update_user_name: Option<bool>,
-    pub force_update_user_information: Option<bool>,
-    pub download_text: Option<bool>,
-    pub download_text_posts: Option<bool>,
 }
 
 #[derive(Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
-pub struct InstagramExtractImageFromVideoPatch {
-    pub timeline: Option<bool>,
-    pub reels: Option<bool>,
-    pub stories: Option<bool>,
-    pub stories_user: Option<bool>,
-    pub tagged: Option<bool>,
+pub struct BatchSourceSyncOptionsPatch {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub instagram: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub twitter: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tiktok: Option<serde_json::Value>,
+}
+
+impl BatchSourceSyncOptionsPatch {
+    pub fn for_provider(&self, provider: &str) -> Option<&serde_json::Value> {
+        match provider {
+            "instagram" => self.instagram.as_ref(),
+            "twitter" => self.twitter.as_ref(),
+            "tiktok" => self.tiktok.as_ref(),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize)]

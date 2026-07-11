@@ -1654,9 +1654,16 @@ pub(super) fn companion_metadata(
             .then(|| value("igWwwClaim"))
             .flatten(),
         user_agent: value("userAgent"),
-        sec_ch_ua: value("secChUa"),
-        sec_ch_ua_full_version_list: value("secChUaFullVersionList"),
-        sec_ch_ua_platform_version: value("secChUaPlatformVersion"),
+        // Client-hints só alimentam o connector do Instagram; para os demais
+        // providers eles nunca são aplicados no download, então não os
+        // persistimos mesmo que um Companion antigo ainda os envie.
+        sec_ch_ua: (provider == "instagram").then(|| value("secChUa")).flatten(),
+        sec_ch_ua_full_version_list: (provider == "instagram")
+            .then(|| value("secChUaFullVersionList"))
+            .flatten(),
+        sec_ch_ua_platform_version: (provider == "instagram")
+            .then(|| value("secChUaPlatformVersion"))
+            .flatten(),
         lsd: (provider == "instagram").then(|| value("lsd")).flatten(),
         dtsg: (provider == "instagram").then(|| value("dtsg")).flatten(),
     }

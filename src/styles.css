@@ -5966,6 +5966,12 @@ p {
   color: var(--accent);
 }
 
+.queue-tag-held {
+  color: #d99a29;
+  border-color: color-mix(in srgb, #d99a29 55%, transparent);
+  background: color-mix(in srgb, #d99a29 12%, transparent);
+}
+
 .queue-icon-button {
   padding: 0.14rem 0.5rem;
   min-height: 1.5rem;
@@ -9736,6 +9742,42 @@ p {
   background: var(--glass-subtle-hover);
 }
 
+.batch-editor-value-row {
+  display: grid;
+  grid-template-columns: minmax(180px, 0.8fr) minmax(160px, 1fr);
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.25rem 0.65rem;
+}
+
+.batch-editor-value-mode {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  min-width: 0;
+  padding: 0.1rem 0;
+  border: none;
+  background: transparent;
+  color: var(--ink);
+  font-size: 0.8rem;
+  text-align: left;
+  cursor: pointer;
+}
+
+.batch-editor-value-row input {
+  min-width: 0;
+  min-height: 30px;
+  padding: 0.3rem 0.5rem;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface-input, var(--canvas));
+  color: var(--ink);
+}
+
+.batch-editor-value-row input:disabled {
+  opacity: 0.5;
+}
+
 .tri-state-indicator {
   width: 20px;
   height: 20px;
@@ -10842,4 +10884,10 @@ p {
   font-family: var(--font-data);
   font-feature-settings: "zero" 1, "tnum" 1;
   font-variant-numeric: tabular-nums slashed-zero;
+}
+.source-editor-sync-model-hint {
+  margin: 0 0 0.45rem;
+  color: var(--muted);
+  font-size: 0.78rem;
+  line-height: 1.35;
 }

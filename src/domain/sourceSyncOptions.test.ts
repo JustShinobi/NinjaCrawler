@@ -44,10 +44,10 @@ describe('tiktok source sync options', () => {
 })
 
 describe('twitter source sync options', () => {
-  it('mirrors the SCrawler defaults', () => {
+  it('uses the media feed for normal sync and keeps full timeline as backfill', () => {
     const options = createTwitterSourceSyncOptions()
     expect(options.mediaModel).toBe(true)
-    expect(options.profileModel).toBe(true)
+    expect(options.profileModel).toBe(false)
     // Search/Likes são opcionais e vêm desligados; endpoints graphql prontos.
     expect(options.searchModel).toBe(false)
     expect(options.likesModel).toBe(false)
@@ -72,7 +72,7 @@ describe('twitter source sync options', () => {
     // specialPath is trimmed
     expect(options.specialPath).toBe('F:/x')
     // untouched fields fall back to defaults
-    expect(options.profileModel).toBe(true)
+    expect(options.profileModel).toBe(false)
     expect(options.downloadVideos).toBe(true)
   })
 
@@ -80,13 +80,13 @@ describe('twitter source sync options', () => {
     const wrapped = createSourceSyncOptions('twitter')
     expect(wrapped.twitter).toBeDefined()
     expect(wrapped.instagram).toBeUndefined()
-    expect(wrapped.twitter?.profileModel).toBe(true)
+    expect(wrapped.twitter?.profileModel).toBe(false)
   })
 
   it('resolveTwitterSourceSyncOptions only resolves for twitter provider', () => {
     expect(resolveTwitterSourceSyncOptions('instagram', { twitter: { mediaModel: false } })).toBeUndefined()
     const resolved = resolveTwitterSourceSyncOptions('twitter', { twitter: { mediaModel: false } })
     expect(resolved?.mediaModel).toBe(false)
-    expect(resolved?.profileModel).toBe(true)
+    expect(resolved?.profileModel).toBe(false)
   })
 })

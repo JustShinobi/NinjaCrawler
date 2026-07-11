@@ -248,6 +248,16 @@ export function SourceEditorDialog({
     })
   }
 
+  async function handleTwitterFullTimelineBackfill() {
+    if (!source?.id) {
+      return
+    }
+    await runSourceSync(source.id, {
+      trigger: 'manual_twitter_full_timeline_backfill',
+      runMode: 'twitter_full_timeline_backfill',
+    })
+  }
+
   function commitLabelDraft() {
     const labelsToAdd = parseLabelCandidates(labelDraft)
     if (labelsToAdd.length === 0) {
@@ -659,6 +669,7 @@ export function SourceEditorDialog({
           >
             <SourceEditorSyncPanel
               onForceImportedBackfill={handleForceImportedBackfill}
+              onTwitterFullTimelineBackfill={handleTwitterFullTimelineBackfill}
               onInstagramSyncOptionsChange={updateInstagramSyncOptions}
               onTikTokSyncOptionsChange={updateTikTokSyncOptions}
               onTwitterSyncOptionsChange={updateTwitterSyncOptions}

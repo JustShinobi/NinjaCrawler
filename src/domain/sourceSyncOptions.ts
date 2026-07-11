@@ -148,12 +148,11 @@ export function createInstagramSourceSyncOptions(
   }
 }
 
-// Espelho dos defaults do módulo Twitter do SCrawler: ambos os modelos ligados,
-// abort/cooldown ligados, sleep desabilitado (-1) e before-first reutilizando o
-// valor do sleep timer (-2).
+// O sync normal usa o recorte de midia. A timeline completa e enfileirada como
+// backfill pontual e nunca se sobrepoe automaticamente a este modelo.
 export const DEFAULT_TWITTER_SOURCE_SYNC_OPTIONS: TwitterSourceSyncOptions = {
   mediaModel: true,
-  profileModel: true,
+  profileModel: false,
   searchModel: false,
   likesModel: false,
   searchUseGraphqlEndpoint: true,

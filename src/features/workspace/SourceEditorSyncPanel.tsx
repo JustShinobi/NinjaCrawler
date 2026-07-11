@@ -6,6 +6,7 @@ import {
   resolveTikTokSourceSyncOptions,
   resolveTwitterSourceSyncOptions,
 } from '../../domain/sourceSyncOptions'
+import { TWITTER_SYNC_OPTION_GROUPS } from '../../domain/twitterSyncOptionDefinitions'
 import type {
   ProviderKey,
   SourceProfile,
@@ -28,6 +29,7 @@ interface SourceEditorSyncPanelProps {
   providerNote?: string
   source?: SourceProfile
   onForceImportedBackfill?: () => void | Promise<void>
+  onTwitterFullTimelineBackfill?: () => void | Promise<void>
   syncOptions: SourceProfileUpsert['syncOptions']
   onInstagramSyncOptionsChange: (mutate: (current: InstagramSyncUpsertOptions) => InstagramSyncUpsertOptions) => void
   onTwitterSyncOptionsChange: (mutate: (current: TwitterSyncUpsertOptions) => TwitterSyncUpsertOptions) => void
@@ -79,6 +81,7 @@ export function SourceEditorSyncPanel({
   providerNote,
   source,
   onForceImportedBackfill,
+  onTwitterFullTimelineBackfill,
   syncOptions,
   onInstagramSyncOptionsChange,
   onTwitterSyncOptionsChange,
@@ -116,6 +119,7 @@ export function SourceEditorSyncPanel({
   if (twitterSyncOptions) {
     return (
       <TwitterSyncPanel
+        onFullTimelineBackfill={source?.id ? onTwitterFullTimelineBackfill : undefined}
         onTwitterSyncOptionsChange={onTwitterSyncOptionsChange}
         twitterSyncOptions={twitterSyncOptions}
       />
@@ -298,139 +302,77 @@ export function SourceEditorSyncPanel({
 interface TwitterSyncPanelProps {
   twitterSyncOptions: TwitterSyncUpsertOptions
   onTwitterSyncOptionsChange: (mutate: (current: TwitterSyncUpsertOptions) => TwitterSyncUpsertOptions) => void
+  onFullTimelineBackfill?: () => void | Promise<void>
 }
 
-function TwitterSyncPanel({ twitterSyncOptions, onTwitterSyncOptionsChange }: TwitterSyncPanelProps) {
-  const sleepDisabled = (twitterSyncOptions.sleepTimerSecs ?? -1) < 0
-
+function TwitterSyncPanel({ twitterSyncOptions, onTwitterSyncOptionsChange, onFullTimelineBackfill }: TwitterSyncPanelProps) {
   return (
     <div className="source-editor-sync-shell">
       <div className="source-editor-sync-groups">
         <div className="source-editor-sync-column">
-          <SyncGroupCard className="source-editor-sync-group-sections" title="Download models">
-            <ToggleRow
-              checked={Boolean(twitterSyncOptions.mediaModel)}
-              label="Media"
-              onChange={(checked) => updateTwitterOption(onTwitterSyncOptionsChange, 'mediaModel', checked)}
-              tooltip="Download the profile media tab (x.com/<user>/media). Excludes reposts of other users."
-            />
-            <ToggleRow
-              checked={Boolean(twitterSyncOptions.profileModel)}
-              label="Profile (timeline)"
-              onChange={(checked) => updateTwitterOption(onTwitterSyncOptionsChange, 'profileModel', checked)}
-            />
-            <ToggleRow
-              checked={Boolean(twitterSyncOptions.searchModel)}
-              label="Search"
-              onChange={(checked) => updateTwitterOption(onTwitterSyncOptionsChange, 'searchModel', checked)}
-              tooltip="Download via search (from:<user>, including native retweets). More complete but more rate-limit prone."
-            />
-            <ToggleRow
-              checked={Boolean(twitterSyncOptions.likesModel)}
-              label="Likes"
-              onChange={(checked) => updateTwitterOption(onTwitterSyncOptionsChange, 'likesModel', checked)}
-            />
-            <ToggleRow
-              checked={Boolean(twitterSyncOptions.searchUseGraphqlEndpoint)}
-              label="Search: new endpoint (graphql)"
-              onChange={(checked) => updateTwitterOption(onTwitterSyncOptionsChange, 'searchUseGraphqlEndpoint', checked)}
-              tooltip="Use -o search-endpoint=graphql for the search model (SCrawler's UseNewEndPointSearch)."
-            />
-            <ToggleRow
-              checked={Boolean(twitterSyncOptions.profileUseGraphqlEndpoint)}
-              label="Profile: new endpoint (graphql)"
-              onChange={(checked) => updateTwitterOption(onTwitterSyncOptionsChange, 'profileUseGraphqlEndpoint', checked)}
-              tooltip="Use -o search-endpoint=graphql for the media/profile models (SCrawler's UseNewEndPointProfiles)."
-            />
-            <ToggleRow
-              checked={Boolean(twitterSyncOptions.allowNonUserTweets)}
-              label="Media: allow non-user tweets"
-              onChange={(checked) => updateTwitterOption(onTwitterSyncOptionsChange, 'allowNonUserTweets', checked)}
-              tooltip="Allow reposts of other users in the media model (MediaModelAllowNonUserTweets)."
-            />
-          </SyncGroupCard>
-
-          <SyncGroupCard className="source-editor-sync-group-media" title="Media">
-            <ToggleRow
-              checked={Boolean(twitterSyncOptions.downloadImages)}
-              label="Download images"
-              onChange={(checked) => updateTwitterOption(onTwitterSyncOptionsChange, 'downloadImages', checked)}
-            />
-            <ToggleRow
-              checked={Boolean(twitterSyncOptions.downloadVideos)}
-              label="Download videos"
-              onChange={(checked) => updateTwitterOption(onTwitterSyncOptionsChange, 'downloadVideos', checked)}
-            />
-            <ToggleRow
-              checked={Boolean(twitterSyncOptions.downloadGifs)}
-              label="Download GIFs"
-              onChange={(checked) => updateTwitterOption(onTwitterSyncOptionsChange, 'downloadGifs', checked)}
-              tooltip="Download animated GIFs (saved as mp4)."
-            />
-            <ToggleRow
-              checked={Boolean(twitterSyncOptions.separateVideoFolder)}
-              label="Separate video folder"
-              onChange={(checked) => updateTwitterOption(onTwitterSyncOptionsChange, 'separateVideoFolder', checked)}
-              tooltip='Download videos into a "Video" subfolder (SCrawler layout).'
-            />
-            <FieldRow
-              label="GIFs special folder"
-              onChange={(value) => updateTwitterOption(onTwitterSyncOptionsChange, 'gifsSpecialFolder', value)}
-              tooltip="Subfolder for GIFs (relative to the profile folder). Empty keeps them with the rest."
-              value={twitterSyncOptions.gifsSpecialFolder ?? ''}
-            />
-            <FieldRow
-              label="GIF prefix"
-              onChange={(value) => updateTwitterOption(onTwitterSyncOptionsChange, 'gifsPrefix', value)}
-              tooltip="Filename prefix applied to GIFs (default GIF_)."
-              value={twitterSyncOptions.gifsPrefix ?? ''}
-            />
-            <ToggleRow
-              checked={Boolean(twitterSyncOptions.useMd5Comparison)}
-              label="Use MD5 comparison"
-              onChange={(checked) => updateTwitterOption(onTwitterSyncOptionsChange, 'useMd5Comparison', checked)}
-              tooltip="Discard byte-identical downloads by comparing content hashes."
-            />
-          </SyncGroupCard>
+          {TWITTER_SYNC_OPTION_GROUPS.slice(0, 2).map((group, groupIndex) => (
+            <SyncGroupCard className={group.className} key={group.title} title={group.title}>
+              {groupIndex === 0 ? (
+            <p className="source-editor-sync-model-hint">
+              Normal sync uses the media-only profile feed. Full timeline scanning is managed as a
+              separate backfill so both feeds are never scanned in the same normal run.
+            </p>
+              ) : null}
+              {group.options.map((option) => option.type === 'boolean' ? (
+                <ToggleRow
+                  checked={Boolean(twitterSyncOptions[option.key])}
+                  key={option.key}
+                  label={option.label}
+                  onChange={(checked) => updateTwitterOption(onTwitterSyncOptionsChange, option.key, checked)}
+                  tooltip={option.tooltip}
+                />
+              ) : (
+                <FieldRow
+                  key={option.key}
+                  label={option.label}
+                  onChange={(value) => updateTwitterOption(onTwitterSyncOptionsChange, option.key, value)}
+                  tooltip={option.tooltip}
+                  value={String(twitterSyncOptions[option.key] ?? '')}
+                />
+              ))}
+            </SyncGroupCard>
+          ))}
         </div>
 
         <div className="source-editor-sync-column">
-          <SyncGroupCard className="source-editor-sync-group-behavior" title="Rate limit">
-            <ToggleRow
-              checked={Boolean(twitterSyncOptions.abortOnLimit)}
-              label="Abort on limit"
-              onChange={(checked) => updateTwitterOption(onTwitterSyncOptionsChange, 'abortOnLimit', checked)}
-              tooltip="Stop remaining download models when Twitter's rate limit is reached."
-            />
-            <ToggleRow
-              checked={Boolean(twitterSyncOptions.downloadAlreadyParsed)}
-              label="Download already parsed"
-              onChange={(checked) => updateTwitterOption(onTwitterSyncOptionsChange, 'downloadAlreadyParsed', checked)}
-              tooltip="On rate limit, still download whatever was already parsed before aborting."
-            />
-            <NumberFieldRow
-              label="Sleep timer (s)"
-              onChange={(value) => updateTwitterOption(onTwitterSyncOptionsChange, 'sleepTimerSecs', value)}
-              tooltip="Seconds to wait between download models. -1 disables (SCrawler default)."
-              value={twitterSyncOptions.sleepTimerSecs ?? -1}
-            />
-            <NumberFieldRow
-              disabled={sleepDisabled}
-              label="Sleep before first (s)"
-              onChange={(value) => updateTwitterOption(onTwitterSyncOptionsChange, 'sleepTimerBeforeFirstSecs', value)}
-              tooltip="Seconds before the first request. -1 disables, -2 reuses the sleep timer value."
-              value={twitterSyncOptions.sleepTimerBeforeFirstSecs ?? -2}
-            />
+          <SyncGroupCard className="source-editor-sync-group-behavior" title="Managed sync">
+            <p className="source-editor-sync-model-hint">
+              NinjaCrawler throttles requests, holds every queued profile using the limited Account,
+              and periodically resumes each profile from its saved cursor.
+            </p>
+            {onFullTimelineBackfill ? (
+              <div className="source-editor-setting-row">
+                <div className="source-editor-setting-copy">
+                  <span>Full profile timeline</span>
+                  <small>Queue a dedicated historical backfill without changing this profile's normal sync.</small>
+                </div>
+                <button className="ghost-button" onClick={() => void onFullTimelineBackfill()} type="button">
+                  Queue backfill
+                </button>
+              </div>
+            ) : (
+              <small>Save this profile before queueing a full timeline backfill.</small>
+            )}
           </SyncGroupCard>
 
-          <SyncGroupCard className="source-editor-sync-group-automation" title="Storage">
-            <FieldRow
-              label="Special path"
-              onChange={(value) => updateTwitterOption(onTwitterSyncOptionsChange, 'specialPath', value)}
-              tooltip="Absolute folder for this profile's media. Leave empty to use the account/global media root."
-              value={twitterSyncOptions.specialPath ?? ''}
-            />
-          </SyncGroupCard>
+          {TWITTER_SYNC_OPTION_GROUPS.slice(2).map((group) => (
+            <SyncGroupCard className={group.className} key={group.title} title={group.title}>
+              {group.options.map((option) => (
+                <FieldRow
+                  key={option.key}
+                  label={option.label}
+                  onChange={(value) => updateTwitterOption(onTwitterSyncOptionsChange, option.key, value)}
+                  tooltip={option.tooltip}
+                  value={String(twitterSyncOptions[option.key] ?? '')}
+                />
+              ))}
+            </SyncGroupCard>
+          ))}
         </div>
       </div>
     </div>

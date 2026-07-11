@@ -50,6 +50,24 @@ describe('Companion popup layout', () => {
     expect(manifest.commands['download-story']).toBeDefined()
   })
 
+  it('bounds account capture so a stuck service worker cannot freeze the popup', () => {
+    expect(popupSource).toContain('ACCOUNT_CAPTURE_TIMEOUT_MS')
+    expect(popupSource).toMatch(/await withTimeout\(\s*chrome\.runtime\.sendMessage\(/)
+    expect(popupSource).toContain('function withTimeout(promise, timeoutMs, message)')
+  })
+
+  it('warns about and blocks import of an incomplete browser session', () => {
+    expect(popupHtml).toContain('id="accountImportWarnings"')
+    expect(popupSource).toContain('preview.missingRequiredFields')
+    expect(popupSource).toContain('Incomplete browser session')
+    expect(popupSource).toContain('elements.confirmAccountImport.disabled = state.isBusy || incomplete')
+    expect(popupSource).toContain('function formatMissingField(field)')
+  })
+
+  it('grants host access to the bare instagram.com origin used by the probe filter', () => {
+    expect(manifest.host_permissions).toContain('https://instagram.com/*')
+  })
+
   it('offers a guided update when NinjaCrawler reports a newer Companion', () => {
     expect(popupHtml).toContain('id="updatePanel"')
     expect(popupHtml).toContain('id="downloadUpdateButton"')

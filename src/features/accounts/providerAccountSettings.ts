@@ -111,7 +111,6 @@ const TWITTER_SETTINGS_LAYOUT: ProviderAccountSettingsLayout = {
     { key: 'defaults', label: 'New Profile Defaults', description: '' },
     { key: 'authorization', label: 'Authorization', description: '' },
     { key: 'download', label: 'Downloading', description: '' },
-    { key: 'timers', label: 'Timers', description: '' },
   ],
   fields: [
     { key: 'twitter.account.mediaPath', category: 'account', label: 'Path', kind: 'text', placeholder: 'F:/SCrawler/Data/Twitter', defaultValue: '' },
@@ -121,10 +120,9 @@ const TWITTER_SETTINGS_LAYOUT: ProviderAccountSettingsLayout = {
 
     { key: 'twitter.defaults.labels', category: 'defaults', label: 'Default labels', kind: 'text', placeholder: 'reference, priority', defaultValue: '' },
     { key: 'twitter.defaults.readyForDownload', category: 'defaults', label: 'Ready for download by default', kind: 'toggle', defaultValue: 'true' },
-    { key: 'twitter.defaults.mediaModel', category: 'defaults', label: "Model 'Media'", tooltip: 'x.com/<user>/media', kind: 'toggle', defaultValue: 'true' },
-    { key: 'twitter.defaults.profileModel', category: 'defaults', label: "Model 'Profile'", tooltip: 'x.com/<user>', kind: 'toggle', defaultValue: 'true' },
+    { key: 'twitter.defaults.mediaModel', category: 'defaults', label: 'Profile posts with media', tooltip: 'Media-only subset of the profile timeline at x.com/<user>/media.', kind: 'toggle', defaultValue: 'true' },
     { key: 'twitter.defaults.searchModel', category: 'defaults', label: "Model 'Search'", tooltip: 'x.com/search?q=from:<user>+include:nativeretweets', kind: 'toggle', defaultValue: 'false' },
-    { key: 'twitter.defaults.likesModel', category: 'defaults', label: "Model 'Likes'", tooltip: 'x.com/<user>/likes', kind: 'toggle', defaultValue: 'false' },
+    { key: 'twitter.defaults.likesModel', category: 'defaults', label: 'Liked posts', tooltip: 'x.com/<user>/likes; requires an Account that can view the Likes tab.', kind: 'toggle', defaultValue: 'false' },
     { key: 'twitter.defaults.allowNonUserTweets', category: 'defaults', label: 'Media model: allow non-user tweets', kind: 'toggle', defaultValue: 'false' },
     { key: 'twitter.defaults.temporary', category: 'defaults', label: 'Temporary', kind: 'toggle', defaultValue: 'false' },
     { key: 'twitter.defaults.downloadImages', category: 'defaults', label: 'Download images', kind: 'toggle', defaultValue: 'true' },
@@ -137,12 +135,6 @@ const TWITTER_SETTINGS_LAYOUT: ProviderAccountSettingsLayout = {
 
     { key: 'twitter.defaults.searchUseGraphqlEndpoint', category: 'download', label: 'New endpoint: search', tooltip: '-o search-endpoint=graphql for the search model.', kind: 'toggle', defaultValue: 'true' },
     { key: 'twitter.defaults.profileUseGraphqlEndpoint', category: 'download', label: 'New endpoint: profiles', tooltip: '-o search-endpoint=graphql for the media/profile models.', kind: 'toggle', defaultValue: 'true' },
-    { key: 'twitter.defaults.abortOnLimit', category: 'download', label: 'Abort on limit', kind: 'toggle', defaultValue: 'true' },
-    { key: 'twitter.defaults.downloadAlreadyParsed', category: 'download', label: 'Download already parsed', kind: 'toggle', defaultValue: 'true' },
-
-    { key: 'twitter.defaults.sleepTimerSecs', category: 'timers', label: 'Sleep timer (s)', tooltip: 'Seconds between download models. -1 disables.', kind: 'number', defaultValue: '-1' },
-    { key: 'twitter.defaults.sleepTimerBeforeFirstSecs', category: 'timers', label: 'Sleep timer at start (s)', tooltip: '-1 disables, -2 reuses the sleep timer value.', kind: 'number', defaultValue: '-2' },
-    { key: 'twitter.account.delayBetweenDownloadsSecs', category: 'timers', label: 'Delay between profiles (s)', tooltip: "Seconds the sync queue waits after each of this account's profiles before the next download. Each cookie has its own rate limit, so set it per account. 0 falls back to the global default in Settings.", kind: 'number', defaultValue: '0' },
   ],
 }
 
@@ -297,16 +289,12 @@ export function extractSourceDefaultsFromAccountSettings(
       syncOptions: {
         twitter: createTwitterSourceSyncOptions({
           mediaModel: parseOptionalToggle(draft['twitter.defaults.mediaModel']),
-          profileModel: parseOptionalToggle(draft['twitter.defaults.profileModel']),
+          profileModel: false,
           searchModel: parseOptionalToggle(draft['twitter.defaults.searchModel']),
           likesModel: parseOptionalToggle(draft['twitter.defaults.likesModel']),
           searchUseGraphqlEndpoint: parseOptionalToggle(draft['twitter.defaults.searchUseGraphqlEndpoint']),
           profileUseGraphqlEndpoint: parseOptionalToggle(draft['twitter.defaults.profileUseGraphqlEndpoint']),
           allowNonUserTweets: parseOptionalToggle(draft['twitter.defaults.allowNonUserTweets']),
-          abortOnLimit: parseOptionalToggle(draft['twitter.defaults.abortOnLimit']),
-          downloadAlreadyParsed: parseOptionalToggle(draft['twitter.defaults.downloadAlreadyParsed']),
-          sleepTimerSecs: parseOptionalNumber(draft['twitter.defaults.sleepTimerSecs']),
-          sleepTimerBeforeFirstSecs: parseOptionalNumber(draft['twitter.defaults.sleepTimerBeforeFirstSecs']),
           downloadImages: parseOptionalToggle(draft['twitter.defaults.downloadImages']),
           downloadVideos: parseOptionalToggle(draft['twitter.defaults.downloadVideos']),
           downloadGifs: parseOptionalToggle(draft['twitter.defaults.downloadGifs']),

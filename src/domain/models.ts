@@ -177,7 +177,7 @@ export interface SourceSyncOptions {
 
 export interface RunSourceSyncOptions {
   trigger?: string
-  runMode?: 'force_imported_backfill' | 'refresh_media_stats'
+  runMode?: 'force_imported_backfill' | 'refresh_media_stats' | 'twitter_full_timeline_backfill'
   syncOptionsOverride?: SourceSyncOptions
 }
 
@@ -676,7 +676,7 @@ export interface SourceSyncQueueItem {
   provider: ProviderKey
   handle: string
   accountId?: string
-  state: 'queued' | 'running'
+  state: 'queued' | 'running' | 'held'
   queuedAt: string
   startedAt?: string
   progressPercent?: number
@@ -684,6 +684,7 @@ export interface SourceSyncQueueItem {
   progressDetail?: string
   progressIndeterminate?: boolean
   downloadedItems?: number
+  holdUntil?: string
 }
 
 export interface SourceSyncQueueRecentResult {

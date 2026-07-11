@@ -1,5 +1,5 @@
 use super::*;
-use crate::domain::models::{ImportResolution, InstagramExtractImageFromVideoPatch};
+use crate::domain::models::{BatchSourceSyncOptionsPatch, ImportResolution};
 use serde_json::json;
 use tempfile::TempDir;
 
@@ -33,6 +33,137 @@ fn provider_section_selections_preserve_explicit_false_values() {
     assert_eq!(tiktok.liked_videos_limit, Some(0));
     assert_eq!(tiktok.liked_videos_incremental, Some(false));
     assert_eq!(tiktok.liked_videos_known_page_threshold, Some(5));
+}
+
+#[test]
+fn twitter_full_timeline_only_runs_in_dedicated_backfill_mode() {
+    let options = default_twitter_source_sync_options();
+    let normal = twitter_model_selection_for_run(&options, None);
+    assert!(normal.media);
+    assert!(!normal.profile);
+
+    let backfill =
+        twitter_model_selection_for_run(&options, Some(TWITTER_FULL_TIMELINE_BACKFILL_RUN_MODE));
+    assert!(!backfill.media);
+    assert!(backfill.profile);
+    assert!(!backfill.search);
+    assert!(!backfill.likes);
+}
+
+#[test]
+fn twitter_phase_skips_sections_completed_before_an_account_hold() {
+    let mut options = default_twitter_source_sync_options();
+    options.likes_model = Some(true);
+    let completed = HashSet::from(["media".to_string()]);
+
+    let resumed = twitter_model_selection_for_phase(&options, None, &completed);
+    assert!(!resumed.media);
+    assert!(!resumed.profile);
+    assert!(resumed.likes);
+}
+
+#[test]
+fn twitter_resume_cursor_is_scoped_by_account_profile_and_section() {
+    let (_temp_dir, layout) = create_test_layout();
+    with_workspace_layout(layout, |connection, test_layout| {
+        upsert_provider_account_with_connection(
+            connection,
+            test_layout,
+            sample_account("account-1", "twitter"),
+        )?;
+        upsert_source_profile_with_connection(
+            connection,
+            test_layout,
+            sample_source("source-1", "twitter", Some("account-1")),
+        )?;
+        upsert_provider_sync_resume_state(
+            connection,
+            "twitter",
+            "source-1",
+            "account-1",
+            "normal",
+            "media",
+            "pending",
+            Some("3_123/opaque"),
+            "2026-07-11T00:00:00Z",
+        )?;
+        upsert_provider_sync_resume_state(
+            connection,
+            "twitter",
+            "source-1",
+            "account-1",
+            "normal",
+            "search",
+            "completed",
+            None,
+            "2026-07-11T00:00:00Z",
+        )?;
+        let (cursors, completed) = load_provider_sync_resume_state(
+            connection,
+            "twitter",
+            "source-1",
+            "account-1",
+            "normal",
+        )?;
+        assert_eq!(
+            cursors.get("media").map(String::as_str),
+            Some("3_123/opaque")
+        );
+        assert!(!cursors.contains_key("timeline"));
+        assert!(completed.contains("search"));
+
+        clear_provider_sync_resume_scope(connection, "twitter", "source-1", "account-1", "normal")?;
+        let (cursors, completed) = load_provider_sync_resume_state(
+            connection,
+            "twitter",
+            "source-1",
+            "account-1",
+            "normal",
+        )?;
+        assert!(cursors.is_empty());
+        assert!(completed.is_empty());
+        let hold_until = set_twitter_sync_hold(
+            connection,
+            "account-1",
+            Duration::minutes(15),
+            "2026-07-11T00:00:00Z",
+        )?;
+        assert_eq!(hold_until.to_rfc3339(), "2026-07-11T00:15:00+00:00");
+        let stored_hold: String = connection
+            .query_row(
+                "SELECT hold_until FROM provider_sync_account_holds
+                 WHERE provider = 'twitter' AND account_id = 'account-1'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())?;
+        assert_eq!(stored_hold, "2026-07-11T00:15:00+00:00");
+        clear_twitter_sync_hold(connection, "account-1")?;
+        Ok(())
+    })
+    .expect("cursor lifecycle");
+}
+
+#[test]
+fn twitter_sync_reports_partial_completion_as_warnings() {
+    assert!(!twitter_sync_completed_with_warnings(false, &[]));
+    assert!(twitter_sync_completed_with_warnings(true, &[]));
+    assert!(twitter_sync_completed_with_warnings(
+        false,
+        &["media download failed".to_string()]
+    ));
+}
+
+#[test]
+fn existing_media_scan_ignores_zero_byte_download_placeholders() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    std::fs::write(temp.path().join("empty.mp4"), []).expect("placeholder");
+    std::fs::write(temp.path().join("valid.mp4"), b"media").expect("media");
+
+    let paths = load_existing_relative_media_paths(temp.path());
+
+    assert!(!paths.contains("empty.mp4"));
+    assert!(paths.contains("valid.mp4"));
 }
 
 #[test]
@@ -370,6 +501,67 @@ fn backfill_twitter_post_keys_fills_only_missing() {
         )
         .unwrap();
     assert_eq!(kept.as_deref(), Some("KEEP"));
+}
+
+#[test]
+fn twitter_media_ledger_accepts_multiple_media_keys_for_one_canonical_file() {
+    let conn = rusqlite::Connection::open_in_memory().expect("db");
+    conn.execute_batch(
+        "CREATE TABLE provider_sync_media_ledger (
+            provider TEXT, source_id TEXT, account_id TEXT, source_handle TEXT,
+            provider_media_key TEXT, media_type TEXT, media_section TEXT, relative_path TEXT,
+            provider_post_key TEXT, captured_at INTEGER, first_seen_at TEXT, last_seen_at TEXT,
+            PRIMARY KEY (provider, source_id, provider_media_key, media_type));",
+    )
+    .expect("schema");
+    let temp = tempfile::tempdir().expect("tempdir");
+    let canonical = temp.path().join("canonical.jpg");
+    fs::write(&canonical, b"same bytes").expect("canonical");
+    let rows = vec![
+        twitter_connector::DownloadedTwitterMedia {
+            file_path: canonical.clone(),
+            media_type: "image".to_string(),
+            media_section: "media".to_string(),
+            provider_media_key: "original-key".to_string(),
+            provider_post_key: "post-1".to_string(),
+            captured_at_timestamp: Some(1),
+            final_file_name: "canonical.jpg".to_string(),
+        },
+        twitter_connector::DownloadedTwitterMedia {
+            file_path: canonical,
+            media_type: "image".to_string(),
+            media_section: "media".to_string(),
+            provider_media_key: "duplicate-key".to_string(),
+            provider_post_key: "post-2".to_string(),
+            captured_at_timestamp: Some(2),
+            final_file_name: "canonical.jpg".to_string(),
+        },
+    ];
+
+    upsert_provider_sync_media_ledger_entries(
+        &conn,
+        &ProviderSyncMediaScope {
+            provider: "twitter",
+            source_id: "source-1",
+            account_id: "account-1",
+            source_handle: "profile",
+            profile_root: temp.path(),
+            timestamp: "2026-07-11T00:00:00Z",
+        },
+        &rows,
+    )
+    .expect("aliases");
+
+    let (count, paths): (i64, i64) = conn
+        .query_row(
+            "SELECT COUNT(*), COUNT(DISTINCT relative_path)
+             FROM provider_sync_media_ledger",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("counts");
+    assert_eq!(count, 2);
+    assert_eq!(paths, 1);
 }
 
 #[test]
@@ -1492,26 +1684,13 @@ fn batch_update_source_profiles_applies_group_and_sync_patch_when_inputs_are_val
                 labels_to_add: Vec::new(),
                 labels_to_remove: Vec::new(),
                 ready_for_download: None,
-                sync_options_patch: Some(InstagramSyncOptionsPatch {
-                    timeline: None,
-                    reels: None,
-                    stories: None,
-                    stories_user: None,
-                    tagged: None,
-                    temporary: Some(false),
-                    favorite: None,
-                    download_images: Some(false),
-                    download_videos: None,
-                    place_extracted_image_into_video_folder: None,
-                    extract_image_from_video: None,
-                    get_user_media_only: Some(true),
-                    missing_only: None,
-                    full_scan: None,
-                    verified_profile: None,
-                    force_update_user_name: None,
-                    force_update_user_information: None,
-                    download_text: None,
-                    download_text_posts: None,
+                sync_options_patch: Some(BatchSourceSyncOptionsPatch {
+                    instagram: Some(serde_json::json!({
+                        "temporary": false,
+                        "downloadImages": false,
+                        "getUserMediaOnly": true,
+                    })),
+                    ..Default::default()
                 }),
                 set_group_id: Some(Some("group-1".to_string())),
             },
@@ -1545,45 +1724,61 @@ fn batch_update_source_profiles_applies_group_and_sync_patch_when_inputs_are_val
 }
 
 #[test]
-fn apply_instagram_patch_updates_media_agnostic_fields() {
-    let mut options = InstagramSourceSyncOptions::default();
-    let patch = InstagramSyncOptionsPatch {
-        timeline: None,
-        reels: None,
-        stories: None,
-        stories_user: None,
-        tagged: None,
-        temporary: None,
-        favorite: None,
-        download_images: None,
-        download_videos: None,
-        place_extracted_image_into_video_folder: Some(true),
-        extract_image_from_video: Some(InstagramExtractImageFromVideoPatch {
-            timeline: Some(false),
-            reels: Some(false),
-            stories: None,
-            stories_user: Some(false),
-            tagged: Some(true),
-        }),
-        get_user_media_only: None,
-        missing_only: None,
-        full_scan: None,
-        verified_profile: None,
-        force_update_user_name: None,
-        force_update_user_information: None,
-        download_text: None,
-        download_text_posts: None,
-    };
+fn batch_update_source_profiles_applies_only_the_matching_provider_patch() {
+    let (_temp_dir, layout) = create_test_layout();
 
-    apply_instagram_patch(&mut options, &patch);
+    with_workspace_layout(layout.clone(), |connection, test_layout| {
+        upsert_provider_account_with_connection(
+            connection,
+            test_layout,
+            sample_account("twitter-account", "twitter"),
+        )?;
+        upsert_source_profile_with_connection(
+            connection,
+            test_layout,
+            sample_source("twitter-source", "twitter", Some("twitter-account")),
+        )
+    })
+    .expect("setup twitter source");
 
-    assert_eq!(options.place_extracted_image_into_video_folder, Some(true));
-    let extract = options.extract_image_from_video.expect("extract patch");
-    assert!(!extract.timeline);
-    assert!(!extract.reels);
-    assert!(!extract.stories_user);
-    assert!(extract.tagged);
-    assert!(extract.stories);
+    with_workspace_layout(layout.clone(), |connection, test_layout| {
+        batch_update_source_profiles_with_connection(
+            connection,
+            test_layout,
+            BatchSourceProfilePatch {
+                source_ids: vec!["twitter-source".to_string()],
+                labels_to_add: Vec::new(),
+                labels_to_remove: Vec::new(),
+                ready_for_download: None,
+                sync_options_patch: Some(BatchSourceSyncOptionsPatch {
+                    instagram: Some(serde_json::json!({ "downloadImages": false })),
+                    twitter: Some(serde_json::json!({
+                        "downloadGifs": false,
+                        "gifsPrefix": "ANIM_",
+                    })),
+                    tiktok: None,
+                }),
+                set_group_id: None,
+            },
+        )
+    })
+    .expect("twitter batch update should succeed");
+
+    let persisted: serde_json::Value = with_workspace_layout(layout, |connection, _| {
+        connection
+            .query_row(
+                "SELECT sync_options_json FROM source_profiles WHERE id = ?1",
+                params!["twitter-source"],
+                |row| row.get::<_, String>(0),
+            )
+            .map_err(|error| error.to_string())
+    })
+    .map(|json| serde_json::from_str(&json).expect("valid sync options json"))
+    .expect("load twitter source");
+
+    assert_eq!(persisted["twitter"]["downloadGifs"], false);
+    assert_eq!(persisted["twitter"]["gifsPrefix"], "ANIM_");
+    assert!(persisted.get("instagram").is_none());
 }
 
 #[test]
@@ -1599,6 +1794,110 @@ fn download_success_summary_uses_short_copy_for_zero_items() {
     assert_eq!(
         format_download_success_summary("Instagram sync succeeded.", 3),
         "Instagram sync succeeded. Downloaded 3 media items."
+    );
+}
+
+#[test]
+fn twitter_breakdown_is_only_shown_for_multiple_download_sources() {
+    let one = std::collections::BTreeMap::from([("media".to_string(), 2)]);
+    assert_eq!(format_twitter_download_breakdown(&one), None);
+
+    let multiple =
+        std::collections::BTreeMap::from([("likes".to_string(), 3), ("media".to_string(), 2)]);
+    assert_eq!(
+        format_twitter_download_breakdown(&multiple).as_deref(),
+        Some(" Breakdown: 3 from liked posts, 2 from profile posts.")
+    );
+}
+
+#[test]
+fn twitter_handle_redirect_is_single_run_safe_and_ignores_rate_limits() {
+    assert_eq!(
+        twitter_handle_redirect("samaissc", Some("@ruivinhasv"), false).as_deref(),
+        Some("ruivinhasv")
+    );
+    assert_eq!(
+        twitter_handle_redirect("ruivinhasv", Some("@RUIVINHASV"), false),
+        None
+    );
+    assert_eq!(
+        twitter_handle_redirect("samaissc", Some("@ruivinhasv"), true),
+        None
+    );
+    assert_eq!(twitter_handle_redirect("samaissc", Some("@"), false), None);
+}
+
+#[test]
+fn twitter_incremental_state_requires_fresh_full_scan_and_same_selection() {
+    let now = Utc
+        .with_ymd_and_hms(2026, 7, 11, 20, 0, 0)
+        .single()
+        .expect("now");
+    let signature = "v1:images=true;videos=true;gifs=true;non-user=false";
+    let eligible = twitter_connector::TwitterManifestSummary {
+        attempted_model_count: 1,
+        completed_model_count: 1,
+        selection_signature: Some(signature.to_string()),
+        full_scan_at: Some("2026-07-10T20:00:00Z".to_string()),
+        incremental_cutoff_timestamp: Some(1_720_000_000),
+        ..Default::default()
+    };
+
+    assert_eq!(
+        select_twitter_incremental_state(&[eligible.clone()], signature, now),
+        Some(TwitterIncrementalState {
+            cutoff_timestamp: 1_720_000_000,
+            full_scan_at: "2026-07-10T20:00:00Z".to_string(),
+        })
+    );
+    assert_eq!(
+        select_twitter_incremental_state(&[eligible.clone()], "changed", now),
+        None
+    );
+
+    let mut stale = eligible.clone();
+    stale.full_scan_at = Some("2026-07-01T20:00:00Z".to_string());
+    assert_eq!(
+        select_twitter_incremental_state(&[stale], signature, now),
+        None
+    );
+
+    let mut limited = eligible.clone();
+    limited.rate_limited = true;
+    assert_eq!(
+        select_twitter_incremental_state(&[limited], signature, now),
+        None
+    );
+}
+
+#[test]
+fn twitter_media_selection_signature_changes_with_download_policy() {
+    let mut options = TwitterSourceSyncOptions {
+        download_images: Some(true),
+        download_videos: Some(true),
+        download_gifs: Some(true),
+        allow_non_user_tweets: Some(false),
+        ..Default::default()
+    };
+    let initial = twitter_media_selection_signature(&options);
+    options.download_images = Some(false);
+
+    assert_ne!(twitter_media_selection_signature(&options), initial);
+}
+
+#[test]
+fn twitter_disabled_media_copy_explains_intentional_skips() {
+    let images = std::collections::BTreeMap::from([("image".to_string(), 8)]);
+    assert_eq!(
+        format_twitter_disabled_media_suffix(&images),
+        " 8 images were skipped because image downloads are disabled."
+    );
+
+    let mixed =
+        std::collections::BTreeMap::from([("gif".to_string(), 1), ("video".to_string(), 2)]);
+    assert_eq!(
+        format_twitter_disabled_media_suffix(&mixed),
+        " 1 GIF, 2 videos were skipped because these media types are disabled."
     );
 }
 

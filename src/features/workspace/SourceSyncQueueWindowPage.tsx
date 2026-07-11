@@ -47,7 +47,7 @@ interface QueueLiveTask {
   handle: string
   operation: QueueOperation
   modeDetail?: string
-  state: 'queued' | 'running'
+  state: 'queued' | 'running' | 'held'
   queuedAt: string
   startedAt?: string
   progressPercent?: number
@@ -56,6 +56,7 @@ interface QueueLiveTask {
   progressIndeterminate?: boolean
   filesProcessed?: number
   filesTotal?: number
+  holdUntil?: string
   cancelSourceId?: string
 }
 
@@ -201,6 +202,7 @@ function createSyncLiveTask(item: SourceSyncQueueItem): QueueLiveTask {
     progressLabel: item.progressLabel,
     progressDetail: item.progressDetail,
     progressIndeterminate: item.progressIndeterminate,
+    holdUntil: item.holdUntil,
     cancelSourceId: item.sourceId,
   }
 }
@@ -705,6 +707,7 @@ export function SourceSyncQueueWindowPage() {
 
   const renderLiveTask = (task: QueueLiveTask, position?: number) => {
     const isRunning = task.state === 'running'
+    const isHeld = task.state === 'held'
     const detailBits: string[] = []
     if (task.progressDetail) detailBits.push(task.progressDetail)
     if (task.filesProcessed !== undefined && task.filesTotal !== undefined) {
@@ -732,6 +735,7 @@ export function SourceSyncQueueWindowPage() {
             {task.operation === 'Delete' ? (
               <span className="queue-tag queue-tag-delete">Delete{task.modeDetail ? ` · ${task.modeDetail}` : ''}</span>
             ) : null}
+            {isHeld ? <span className="queue-tag queue-tag-held">Account hold</span> : null}
             {!isRunning && position !== undefined ? (
               <span className="queue-tag queue-tag-position">{position === 1 ? 'Next' : `#${position}`}</span>
             ) : null}
@@ -757,7 +761,10 @@ export function SourceSyncQueueWindowPage() {
             </>
           ) : (
             <small className="queue-task-meta" title={absoluteTimestamp(task.queuedAt)}>
-              queued {relativeTime(task.queuedAt, now)}
+              {isHeld
+                ? `${task.progressLabel ?? 'On hold'}${task.holdUntil ? ` · retry after ${absoluteTimestamp(task.holdUntil)}` : ''}`
+                : `queued ${relativeTime(task.queuedAt, now)}`}
+              {isHeld && detailBits.length ? ` · ${detailBits.join(' · ')}` : ''}
             </small>
           )}
         </div>

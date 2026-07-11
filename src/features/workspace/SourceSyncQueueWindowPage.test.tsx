@@ -168,6 +168,41 @@ describe('SourceSyncQueueWindowPage', () => {
     expect(screen.getByText(/^Next$/i)).toBeTruthy()
   })
 
+  it('shows an automatic Account hold with its retry deadline', async () => {
+    bridgeMocks.loadSourceSyncQueueStatus.mockResolvedValue(
+      statusFixture({
+        queuedCount: 1,
+        runningCount: 0,
+        providers: [{
+          provider: 'twitter',
+          displayName: 'X / Twitter',
+          queued: 1,
+          running: 0,
+          completed: 0,
+          failed: 0,
+          total: 1,
+          paused: false,
+        }],
+        queuedItems: [{
+          sourceId: 'twitter-held',
+          provider: 'twitter',
+          handle: '@held',
+          state: 'held',
+          queuedAt: '2026-07-11T00:00:00Z',
+          progressLabel: 'On hold',
+          progressDetail: 'Twitter Account rate limit.',
+          holdUntil: '2026-07-11T00:15:30Z',
+        }],
+        runningItems: [],
+      }),
+    )
+    render(<SourceSyncQueueWindowPage />)
+
+    expect(await screen.findByText('Account hold')).toBeTruthy()
+    expect(screen.getByText(/On hold.*retry after/i)).toBeTruthy()
+    expect(screen.getByText(/Twitter Account rate limit/i)).toBeTruthy()
+  })
+
   it('opens the realtime backend debugger from the queue window', async () => {
     render(<SourceSyncQueueWindowPage />)
 

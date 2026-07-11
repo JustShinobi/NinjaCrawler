@@ -7,14 +7,15 @@
 
 use chrono::{DateTime, Local, TimeZone};
 use reqwest::blocking::Client;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::infrastructure::connector_debug;
 
@@ -26,6 +27,7 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 const DEFAULT_DOWNLOAD_TIMEOUT_SECS: u64 = 120;
 const GALLERY_DL_TIMEOUT_SECS: u64 = 600;
+const TWITTER_REQUEST_SLEEP_RANGE: &str = "1.5-3.5";
 
 #[derive(Clone, Copy, Default)]
 pub struct TwitterModelSelection {
@@ -47,6 +49,12 @@ pub struct TwitterConnectorRequest {
     /// Diretório de trabalho para config + páginas temporárias do parser.
     pub cache_root: PathBuf,
     pub models: TwitterModelSelection,
+    /// Cursor opaco do gallery-dl por modelo/timeline. Nunca deve ser
+    /// compartilhado entre secoes.
+    pub resume_cursors: HashMap<String, String>,
+    /// Cutoff Unix do sync incremental do modelo `media`. `None` força full
+    /// scan; backfills e modelos que podem trazer posts antigos não o usam.
+    pub incremental_cutoff_timestamp: Option<i64>,
     pub ledger_post_keys: HashSet<String>,
     pub ledger_media_keys: HashSet<String>,
     pub existing_relative_paths: HashSet<String>,
@@ -108,7 +116,8 @@ pub struct DownloadedTwitterMedia {
     pub final_file_name: String,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone, Default, Deserialize, Serialize)]
+#[serde(default, rename_all = "camelCase")]
 pub struct TwitterManifestSummary {
     pub parsed_page_count: u32,
     pub normalized_post_count: u32,
@@ -116,12 +125,30 @@ pub struct TwitterManifestSummary {
     pub queued_asset_count: u32,
     pub skipped_existing_post_count: u32,
     pub skipped_existing_asset_count: u32,
+    pub skipped_disabled_asset_count: u32,
+    pub skipped_duplicate_asset_count: u32,
     pub downloaded_asset_count: u32,
+    pub completed_post_count: u32,
+    pub incomplete_post_count: u32,
+    pub attempted_model_count: u32,
+    pub completed_model_count: u32,
+    pub rate_limited: bool,
+    pub resume_cursor_count: u32,
+    pub downloaded_by_section: BTreeMap<String, u32>,
+    pub skipped_disabled_by_type: BTreeMap<String, u32>,
+    pub newest_post_timestamp: Option<i64>,
+    pub incremental_scan: bool,
+    pub incremental_cutoff_timestamp: Option<i64>,
+    pub selection_signature: Option<String>,
+    pub full_scan_at: Option<String>,
 }
 
 pub struct TwitterConnectorResult {
     pub observed_posts: Vec<ObservedTwitterPost>,
     pub downloaded_media: Vec<DownloadedTwitterMedia>,
+    /// Novos media keys cujo conteúdo já existia em outro arquivo. São
+    /// persistidos como aliases no ledger, mas não contam como downloads.
+    pub deduplicated_media_aliases: Vec<DownloadedTwitterMedia>,
     /// Media→post links from the fetched timeline (for backfilling the post key
     /// on already-downloaded media). Includes posts skipped from download.
     pub media_post_links: Vec<TwitterMediaPostLink>,
@@ -129,6 +156,10 @@ pub struct TwitterConnectorResult {
     pub rate_limited: bool,
     /// O sync interrompeu modelos restantes por limite (AbortOnLimit).
     pub limit_aborted: bool,
+    /// Cursores que ainda precisam ser retomados, indexados por media_section.
+    pub resume_cursors: BTreeMap<String, String>,
+    /// Modelos que chegaram ao fim e podem ter qualquer cursor anterior limpo.
+    pub completed_sections: Vec<String>,
     /// Id numérico do usuário resolvido das páginas (rest_id), quando disponível.
     pub resolved_user_id: Option<String>,
     /// URL do avatar (profile_image_url_https) do dono do perfil, quando
@@ -176,6 +207,34 @@ struct ModelRun {
     /// Argumentos extra do gallery-dl para este modelo (ex.: endpoint graphql
     /// do search).
     extra_args: Vec<String>,
+}
+
+fn twitter_section_label(section: &str) -> &'static str {
+    match section {
+        "media" => "profile posts with media",
+        "timeline" => "full profile timeline",
+        "search" => "search results",
+        "likes" => "liked posts",
+        _ => "Twitter media",
+    }
+}
+
+fn twitter_incremental_post_filter(cutoff_timestamp: i64) -> String {
+    format!("date.timestamp() >= {cutoff_timestamp} or abort()")
+}
+
+fn tweet_belongs_to_owner(tweet: &ParsedTweet, handle: &str, user_id_hint: Option<&str>) -> bool {
+    if let Some(hint) = user_id_hint
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return tweet.author_user_id.as_deref().is_some_and(|id| id == hint);
+    }
+
+    tweet
+        .author_screen_name
+        .as_deref()
+        .is_some_and(|name| name.eq_ignore_ascii_case(handle))
 }
 
 pub fn run_profile_sync<F, C, D>(
@@ -240,18 +299,25 @@ where
     }
 
     let mut summary = TwitterManifestSummary::default();
+    summary.incremental_scan = request.incremental_cutoff_timestamp.is_some();
+    summary.incremental_cutoff_timestamp = request.incremental_cutoff_timestamp;
     let mut section_errors: Vec<String> = Vec::new();
     let mut rate_limited = false;
     let mut limit_aborted = false;
-    let mut observed_posts: Vec<ObservedTwitterPost> = Vec::new();
+    let mut resume_cursors = BTreeMap::new();
+    let mut completed_sections = Vec::new();
     let mut media_post_links: Vec<TwitterMediaPostLink> = Vec::new();
     let mut planned_downloads: Vec<DownloadPlanEntry> = Vec::new();
+    let mut pending_posts: Vec<PendingTwitterPost> = Vec::new();
     let mut seen_post_keys: HashSet<String> = HashSet::new();
     let mut seen_media_keys: HashSet<String> = HashSet::new();
+    let mut available_media_keys = request.ledger_media_keys.clone();
     let mut resolved_user_id: Option<String> = None;
     let mut resolved_avatar_url: Option<String> = None;
     let mut duplicate_user_id: Option<String> = None;
+    let mut resolved_handle: Option<String> = None;
     let total_runs = runs.len();
+    summary.attempted_model_count = total_runs as u32;
 
     for (run_index, run) in runs.iter().enumerate() {
         if is_cancelled() {
@@ -261,9 +327,10 @@ where
         apply_sleep_timer(request, run_index, &is_cancelled);
 
         report_progress(TwitterProgress {
-            label: format!("Parsing {}", run.media_section),
+            label: format!("Parsing {}", twitter_section_label(run.media_section)),
             detail: format!(
-                "gallery-dl is fetching timeline pages ({}/{}).",
+                "gallery-dl is fetching {} ({}/{}).",
+                twitter_section_label(run.media_section),
                 run_index + 1,
                 total_runs
             ),
@@ -278,11 +345,28 @@ where
         let _ = fs::remove_dir_all(&pages_dir);
         fs::create_dir_all(&pages_dir).map_err(|error| error.to_string())?;
 
+        let mut parser_args = run.extra_args.clone();
+        if run.media_section == "media" {
+            if let Some(cutoff) = request.incremental_cutoff_timestamp {
+                parser_args.push("--post-filter".to_string());
+                parser_args.push(twitter_incremental_post_filter(cutoff));
+            }
+        }
+        if let Some(cursor) = request
+            .resume_cursors
+            .get(run.media_section)
+            .map(String::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            parser_args.push("-o".to_string());
+            parser_args.push(format!("cursor={cursor}"));
+        }
         let parse_outcome = run_gallery_dl_parser(
             request,
             &config_path,
             &run.url,
-            &run.extra_args,
+            &parser_args,
             &pages_dir,
             &is_cancelled,
         );
@@ -297,8 +381,14 @@ where
                 continue;
             }
         };
+        summary.completed_model_count += 1;
         if page_output.rate_limited {
             rate_limited = true;
+            if let Some(cursor) = page_output.continuation_cursor {
+                resume_cursors.insert(run.media_section.to_string(), cursor);
+            }
+        } else {
+            completed_sections.push(run.media_section.to_string());
         }
 
         let tweets = parse_tweets_from_pages(&pages_dir, &mut summary)?;
@@ -308,15 +398,15 @@ where
         // cancelando antes de baixar qualquer mídia.
         if resolved_user_id.is_none() {
             let owner_tweet = tweets.iter().find(|tweet| {
-                tweet
-                    .author_screen_name
-                    .as_deref()
-                    .map(|name| name.eq_ignore_ascii_case(&handle))
-                    .unwrap_or(false)
+                tweet_belongs_to_owner(tweet, &handle, request.user_id_hint.as_deref())
             });
-            resolved_user_id = owner_tweet
-                .and_then(|tweet| tweet.author_user_id.clone())
-                .or_else(|| tweets.iter().find_map(|tweet| tweet.author_user_id.clone()));
+            resolved_user_id = owner_tweet.and_then(|tweet| tweet.author_user_id.clone());
+            if let Some(current_handle) = owner_tweet
+                .and_then(|tweet| tweet.author_screen_name.as_deref())
+                .filter(|name| !name.eq_ignore_ascii_case(&handle))
+            {
+                resolved_handle = Some(current_handle.to_string());
+            }
             if let Some(uid) = resolved_user_id.as_deref() {
                 if is_duplicate_user_id(uid) {
                     duplicate_user_id = Some(uid.to_string());
@@ -329,15 +419,19 @@ where
             resolved_avatar_url = tweets
                 .iter()
                 .find(|tweet| {
-                    tweet
-                        .author_screen_name
-                        .as_deref()
-                        .map(|name| name.eq_ignore_ascii_case(&handle))
-                        .unwrap_or(false)
+                    tweet_belongs_to_owner(tweet, &handle, request.user_id_hint.as_deref())
                 })
                 .and_then(|tweet| tweet.author_avatar_url.clone());
         }
         if duplicate_user_id.is_some() {
+            let _ = fs::remove_dir_all(&pages_dir);
+            break;
+        }
+        if resolved_handle.is_some() {
+            // A identidade estável confirmou que esta URL pertence agora a
+            // outro handle. Não planeje downloads nesta passagem: o caller
+            // atualiza o perfil e repete uma única vez com o handle canônico,
+            // evitando bytes sem ledger ou colisões entre as duas passagens.
             let _ = fs::remove_dir_all(&pages_dir);
             break;
         }
@@ -347,16 +441,21 @@ where
             // allow_non_user_tweets (espelho do MediaModelAllowNonUserTweets).
             // Likes inclui posts de terceiros por natureza.
             if run.media_section == "media" && !request.allow_non_user_tweets {
-                if let Some(author) = tweet.author_screen_name.as_deref() {
-                    if !author.eq_ignore_ascii_case(&handle) {
-                        continue;
-                    }
+                if !tweet_belongs_to_owner(&tweet, &handle, request.user_id_hint.as_deref()) {
+                    continue;
                 }
             }
 
-            summary.normalized_post_count += 1;
             if !seen_post_keys.insert(tweet.post_key.clone()) {
                 continue;
+            }
+            summary.normalized_post_count += 1;
+            if let Some(timestamp) = tweet.captured_at_timestamp {
+                summary.newest_post_timestamp = Some(
+                    summary
+                        .newest_post_timestamp
+                        .map_or(timestamp, |current| current.max(timestamp)),
+                );
             }
             // Vínculo media→post de TODO tweet visto (inclusive os pulados abaixo):
             // permite preencher o post key na mídia já no disco, baixada antes de
@@ -369,20 +468,13 @@ where
                     captured_at_timestamp: tweet.captured_at_timestamp,
                 });
             }
-            // Post já baixado (no ledger) = pula todos os seus assets, como o
-            // SCrawler faz com o _Posts.txt. Tentar deduplicar por nome de
-            // arquivo aqui não funciona: o SCrawler nomeia diferente da URL e
-            // baixamos em `?name=orig`, então re-baixaríamos o post inteiro.
-            if request.ledger_post_keys.contains(&tweet.post_key) {
-                summary.skipped_existing_post_count += 1;
-                summary.skipped_existing_asset_count += tweet.assets.len() as u32;
-                continue;
-            }
-            observed_posts.push(ObservedTwitterPost {
-                provider_post_key: tweet.post_key.clone(),
-                media_section: run.media_section.to_string(),
-            });
-
+            // O post ledger sozinho não prova que todos os assets chegaram ao
+            // disco: versões anteriores registravam o post mesmo após falha de
+            // download. Reavalia os assets e deixa o media ledger decidir o que
+            // já existe, recuperando também backlog histórico sem migração.
+            let was_known_post = request.ledger_post_keys.contains(&tweet.post_key);
+            let mut asset_keys = Vec::with_capacity(tweet.assets.len());
+            let mut had_missing_assets = false;
             for asset in &tweet.assets {
                 summary.discovered_asset_count += 1;
                 let allowed = match asset.media_type.as_str() {
@@ -391,7 +483,21 @@ where
                     _ => request.download_videos,
                 };
                 if !allowed {
+                    summary.skipped_disabled_asset_count += 1;
+                    *summary
+                        .skipped_disabled_by_type
+                        .entry(asset.media_type.clone())
+                        .or_insert(0) += 1;
                     continue;
+                }
+                // Somente assets habilitados participam da completude atual do
+                // post. O connector reavalia todos os assets em cada sync, logo
+                // habilitar este tipo no futuro ainda agenda o download.
+                asset_keys.push(asset.provider_media_key.clone());
+                if !available_media_keys.contains(&asset.provider_media_key)
+                    && !asset_exists_on_disk(request, asset)
+                {
+                    had_missing_assets = true;
                 }
                 if !seen_media_keys.insert(asset.provider_media_key.clone()) {
                     continue;
@@ -399,9 +505,10 @@ where
                 if request
                     .ledger_media_keys
                     .contains(&asset.provider_media_key)
-                    || request.existing_relative_paths.contains(&asset.file_name)
+                    || asset_exists_on_disk(request, asset)
                 {
                     summary.skipped_existing_asset_count += 1;
+                    available_media_keys.insert(asset.provider_media_key.clone());
                     continue;
                 }
                 summary.queued_asset_count += 1;
@@ -412,25 +519,33 @@ where
                     captured_at_timestamp: tweet.captured_at_timestamp,
                 });
             }
+            pending_posts.push(PendingTwitterPost {
+                provider_post_key: tweet.post_key,
+                media_section: run.media_section.to_string(),
+                asset_keys,
+                was_known_post,
+                had_missing_assets,
+            });
         }
 
         let _ = fs::remove_dir_all(&pages_dir);
 
         if page_output.rate_limited && request.abort_on_limit {
             limit_aborted = run_index + 1 < total_runs;
-            if limit_aborted {
-                section_errors.push(
-                    "Twitter rate limit reached; remaining download models were skipped."
-                        .to_string(),
-                );
-            }
             break;
         }
     }
 
-    let _ = fs::remove_file(&config_path);
+    if summary.completed_model_count == 0 {
+        let _ = fs::remove_file(&config_path);
+        return Err(format!(
+            "All enabled Twitter download models failed: {}",
+            section_errors.join(" | ")
+        ));
+    }
 
     let mut downloaded_media: Vec<DownloadedTwitterMedia> = Vec::new();
+    let mut deduplicated_media_aliases: Vec<DownloadedTwitterMedia> = Vec::new();
     // Duplicado de outro perfil: cancela o download (o caller remove o perfil).
     let should_download =
         duplicate_user_id.is_none() && (!rate_limited || request.download_already_parsed);
@@ -438,10 +553,10 @@ where
         let client = build_download_client(request)?;
         // Hashes do conteúdo já presente no disco ANTES desta rodada, para o
         // dedupe por conteúdo (MD5 comparison) descartar baixados idênticos.
-        let mut known_hashes: HashSet<String> = if request.use_md5_comparison {
+        let mut known_hashes = if request.use_md5_comparison {
             seed_existing_hashes(&request.profile_root)
         } else {
-            HashSet::new()
+            HashMap::new()
         };
         let total = planned_downloads.len();
         for (index, entry) in planned_downloads.iter().enumerate() {
@@ -449,8 +564,17 @@ where
                 return Err("source sync cancelled by user".to_string());
             }
             report_progress(TwitterProgress {
-                label: "Downloading media".to_string(),
-                detail: format!("{} ({}/{})", entry.asset.file_name, index + 1, total),
+                label: format!(
+                    "Downloading {}",
+                    twitter_section_label(&entry.media_section)
+                ),
+                detail: format!(
+                    "{}: {} ({}/{})",
+                    twitter_section_label(&entry.media_section),
+                    entry.asset.file_name,
+                    index + 1,
+                    total
+                ),
                 downloaded_items: Some(downloaded_media.len() as u32),
                 progress_percent: Some(((index * 100) / total.max(1)) as u32),
                 indeterminate: false,
@@ -460,15 +584,33 @@ where
                 Ok(media) => {
                     if request.use_md5_comparison {
                         if let Ok(hash) = file_sha256(&media.file_path) {
-                            if !known_hashes.insert(hash) {
-                                // Conteúdo idêntico já presente: remove e ignora.
+                            if let Some(canonical_path) = known_hashes.get(&hash).cloned() {
+                                // Conteúdo idêntico já presente: remove os bytes
+                                // repetidos, mas persiste este novo media key como
+                                // alias do arquivo canônico para não baixá-lo de
+                                // novo em toda sincronização.
                                 let _ = fs::remove_file(&media.file_path);
-                                summary.skipped_existing_asset_count += 1;
+                                summary.skipped_duplicate_asset_count += 1;
+                                available_media_keys.insert(entry.asset.provider_media_key.clone());
+                                let mut alias = media;
+                                alias.final_file_name = canonical_path
+                                    .file_name()
+                                    .and_then(|value| value.to_str())
+                                    .unwrap_or_default()
+                                    .to_string();
+                                alias.file_path = canonical_path;
+                                deduplicated_media_aliases.push(alias);
                                 continue;
                             }
+                            known_hashes.insert(hash, media.file_path.clone());
                         }
                     }
                     summary.downloaded_asset_count += 1;
+                    *summary
+                        .downloaded_by_section
+                        .entry(entry.media_section.clone())
+                        .or_insert(0) += 1;
+                    available_media_keys.insert(entry.asset.provider_media_key.clone());
                     downloaded_media.push(media);
                 }
                 Err(error) => {
@@ -489,27 +631,34 @@ where
     // Recuperação de handle: nenhum tweet veio das páginas (sem rate limit nem
     // duplicata) — a conta pode ter sido renomeada. Resolve o handle atual via
     // `x.com/i/user/<userIdHint>`, cujos tweets trazem o screen_name corrente.
-    let mut resolved_handle: Option<String> = None;
-    if observed_posts.is_empty()
+    if pending_posts.is_empty()
         && downloaded_media.is_empty()
         && !rate_limited
         && duplicate_user_id.is_none()
     {
-        if let Some(hint) = request
-            .user_id_hint
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-        {
-            if let Some(current) =
-                resolve_handle_via_user_id(request, &config_path, hint, &is_cancelled)
+        if resolved_handle.is_none() {
+            if let Some(hint) = request
+                .user_id_hint
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
             {
-                if !current.eq_ignore_ascii_case(&handle) {
-                    resolved_handle = Some(current);
+                if let Some(current) =
+                    resolve_handle_via_user_id(request, &config_path, hint, &is_cancelled)
+                {
+                    if !current.eq_ignore_ascii_case(&handle) {
+                        resolved_handle = Some(current);
+                    }
                 }
             }
         }
     }
+    let _ = fs::remove_file(&config_path);
+
+    let observed_posts =
+        completed_observed_posts(pending_posts, &available_media_keys, &mut summary);
+    summary.rate_limited = rate_limited;
+    summary.resume_cursor_count = resume_cursors.len() as u32;
 
     report_progress(TwitterProgress {
         label: "Finishing".to_string(),
@@ -522,10 +671,13 @@ where
     Ok(TwitterConnectorResult {
         observed_posts,
         downloaded_media,
+        deduplicated_media_aliases,
         media_post_links,
         section_errors,
         rate_limited,
         limit_aborted,
+        resume_cursors,
+        completed_sections,
         resolved_user_id,
         resolved_avatar_url,
         duplicate_user_id,
@@ -584,6 +736,44 @@ struct DownloadPlanEntry {
     post_key: String,
     media_section: String,
     captured_at_timestamp: Option<i64>,
+}
+
+#[derive(Clone)]
+struct PendingTwitterPost {
+    provider_post_key: String,
+    media_section: String,
+    asset_keys: Vec<String>,
+    was_known_post: bool,
+    had_missing_assets: bool,
+}
+
+fn completed_observed_posts(
+    pending_posts: Vec<PendingTwitterPost>,
+    available_media_keys: &HashSet<String>,
+    summary: &mut TwitterManifestSummary,
+) -> Vec<ObservedTwitterPost> {
+    pending_posts
+        .into_iter()
+        .filter_map(|post| {
+            let complete = post
+                .asset_keys
+                .iter()
+                .all(|key| available_media_keys.contains(key));
+            if complete {
+                summary.completed_post_count += 1;
+                if post.was_known_post && !post.had_missing_assets {
+                    summary.skipped_existing_post_count += 1;
+                }
+                Some(ObservedTwitterPost {
+                    provider_post_key: post.provider_post_key,
+                    media_section: post.media_section,
+                })
+            } else {
+                summary.incomplete_post_count += 1;
+                None
+            }
+        })
+        .collect()
 }
 
 /// Dorme em passos curtos, abortando assim que o cancelamento é solicitado —
@@ -655,6 +845,56 @@ fn write_gallery_dl_config(request: &TwitterConnectorRequest) -> Result<PathBuf,
 
 struct ParserRunOutput {
     rate_limited: bool,
+    continuation_cursor: Option<String>,
+}
+
+fn parse_continuation_cursor(output: &str) -> Option<String> {
+    for line in output.lines().rev() {
+        if let Some(rest) = line.split("cursor=").nth(1) {
+            let cursor = rest
+                .trim_start()
+                .trim_start_matches(|character| matches!(character, '\'' | '"'))
+                .split(|character: char| {
+                    character.is_whitespace() || matches!(character, '\'' | '"')
+                })
+                .next()
+                .unwrap_or_default()
+                .trim_end_matches([')', '.']);
+            if !cursor.is_empty() && !cursor.eq_ignore_ascii_case("none") {
+                return Some(cursor.to_string());
+            }
+        }
+        if let Some((_, rest)) = line.rsplit_once("Cursor:") {
+            let cursor = rest.trim();
+            if cursor.eq_ignore_ascii_case("none") {
+                // O ultimo marcador do extractor e autoritativo. Continuar a
+                // busca ressuscitaria um cursor de uma pagina anterior mesmo
+                // depois de a timeline ter chegado normalmente ao fim.
+                return None;
+            }
+            if !cursor.is_empty() {
+                return Some(cursor.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn output_indicates_rate_limit(output: &str) -> bool {
+    output.lines().any(|line| {
+        let line = line.to_ascii_lowercase();
+        // Nunca procure apenas por `429`: IDs de tweets, timestamps e nomes de
+        // arquivos frequentemente contem essa sequencia. Os formatos abaixo
+        // exigem um status/mensagem HTTP ou uma mensagem explicita do extractor.
+        line.contains("\" 429 ")
+            || line.contains("429 too many requests")
+            || line.contains("http error 429")
+            || line.contains("http status 429")
+            || line.contains("status code 429")
+            || line.contains("status: 429")
+            || line.contains("rate limit")
+            || line.contains("rate-limit")
+    })
 }
 
 fn stream_debug_file(path: &Path, offset: &mut usize, event_type: &str) {
@@ -696,6 +936,13 @@ where
         .arg("--verbose")
         .arg("--no-download")
         .arg("--no-skip")
+        // O NinjaCrawler controla espera e retomada. O extractor deve devolver
+        // o controle assim que receber 429, preservando o cursor emitido.
+        .arg("-o")
+        .arg("ratelimit=abort")
+        // Espalha as requisicoes dentro de cada pagina para reduzir rajadas.
+        .arg("--sleep-request")
+        .arg(TWITTER_REQUEST_SLEEP_RANGE)
         .arg("--config")
         .arg(config_path)
         .arg("--write-pages")
@@ -765,10 +1012,8 @@ where
     );
     let _ = fs::remove_file(&stdout_log);
     let _ = fs::remove_file(&stderr_log);
-    let combined = format!("{stdout}\n{stderr}").to_ascii_lowercase();
-    let rate_limited = combined.contains("429")
-        || combined.contains("rate limit")
-        || combined.contains("rate-limit");
+    let combined = format!("{stdout}\n{stderr}");
+    let rate_limited = output_indicates_rate_limit(&combined);
 
     let produced_pages = fs::read_dir(pages_dir)
         .map(|entries| entries.flatten().next().is_some())
@@ -788,7 +1033,14 @@ where
         ));
     }
 
-    Ok(ParserRunOutput { rate_limited })
+    let continuation_cursor = rate_limited
+        .then(|| parse_continuation_cursor(&combined))
+        .flatten();
+
+    Ok(ParserRunOutput {
+        rate_limited,
+        continuation_cursor,
+    })
 }
 
 fn parse_tweets_from_pages(
@@ -971,6 +1223,39 @@ fn url_file_name(url: &str) -> Option<String> {
     Some(name.to_string())
 }
 
+/// Stable disk identity for Twitter CDN file names. It intentionally ignores
+/// the NinjaCrawler date prefix, the legacy `GIF_` prefix, casing and extension
+/// so SCrawler layouts such as `Video/GIF_<key>.mp4` match current downloads.
+pub fn twitter_disk_asset_key(file_name: &str) -> Option<String> {
+    let stem = file_name
+        .rsplit_once('.')
+        .map(|(value, _)| value)
+        .unwrap_or(file_name)
+        .trim();
+    let without_date = if stem.len() > 20
+        && stem.as_bytes().get(4) == Some(&b'-')
+        && stem.as_bytes().get(7) == Some(&b'-')
+        && stem.as_bytes().get(10) == Some(&b' ')
+        && stem.as_bytes().get(13) == Some(&b'.')
+        && stem.as_bytes().get(16) == Some(&b'.')
+        && stem.as_bytes().get(19) == Some(&b' ')
+    {
+        &stem[20..]
+    } else {
+        stem
+    };
+    let mut normalized = without_date.trim().to_ascii_lowercase();
+    if let Some(stripped) = normalized.strip_prefix("gif_") {
+        normalized = stripped.to_string();
+    }
+    (!normalized.is_empty()).then_some(normalized)
+}
+
+fn asset_exists_on_disk(request: &TwitterConnectorRequest, asset: &ParsedTweetAsset) -> bool {
+    twitter_disk_asset_key(&asset.file_name)
+        .is_some_and(|key| request.existing_relative_paths.contains(&key))
+}
+
 /// Formato legado do Twitter: "Wed Oct 10 20:19:24 +0000 2018".
 fn parse_twitter_timestamp(raw: &str) -> Option<i64> {
     DateTime::parse_from_str(raw, "%a %b %d %H:%M:%S %z %Y")
@@ -1021,9 +1306,6 @@ fn download_asset(
         request.profile_root.clone()
     };
     let destination = target_dir.join(&final_file_name);
-    if destination.exists() {
-        return Err("destination file already exists".to_string());
-    }
 
     connector_debug::append_current(
         "twitter-http",
@@ -1049,10 +1331,7 @@ fn download_asset(
         return Err("empty response body".to_string());
     }
 
-    if let Some(parent) = destination.parent() {
-        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-    }
-    fs::write(&destination, &bytes).map_err(|error| error.to_string())?;
+    write_download_atomically(&destination, &bytes)?;
 
     Ok(DownloadedTwitterMedia {
         file_path: destination,
@@ -1063,6 +1342,56 @@ fn download_asset(
         captured_at_timestamp: entry.captured_at_timestamp,
         final_file_name,
     })
+}
+
+fn write_download_atomically(destination: &Path, bytes: &[u8]) -> Result<(), String> {
+    if bytes.is_empty() {
+        return Err("empty response body".to_string());
+    }
+    let parent = destination
+        .parent()
+        .ok_or_else(|| "download destination has no parent directory".to_string())?;
+    fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+
+    let final_name = destination
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| "download destination has an invalid file name".to_string())?;
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let temporary = parent.join(format!(
+        ".{final_name}.{}.{}.part",
+        std::process::id(),
+        nonce
+    ));
+
+    if let Err(error) = fs::write(&temporary, bytes) {
+        let _ = fs::remove_file(&temporary);
+        return Err(error.to_string());
+    }
+
+    if destination.exists() {
+        let is_empty_placeholder = destination
+            .metadata()
+            .map(|metadata| metadata.len() == 0)
+            .unwrap_or(false);
+        if !is_empty_placeholder {
+            let _ = fs::remove_file(&temporary);
+            return Err("destination file already exists".to_string());
+        }
+        if let Err(error) = fs::remove_file(destination) {
+            let _ = fs::remove_file(&temporary);
+            return Err(error.to_string());
+        }
+    }
+
+    if let Err(error) = fs::rename(&temporary, destination) {
+        let _ = fs::remove_file(&temporary);
+        return Err(error.to_string());
+    }
+    Ok(())
 }
 
 /// Prefixa o nome do arquivo com a data/hora local do tweet, no mesmo formato
@@ -1099,8 +1428,8 @@ fn file_sha256(path: &Path) -> Result<String, String> {
 
 /// Calcula o sha256 de todos os arquivos já presentes na pasta do perfil, para
 /// o dedupe por conteúdo (MD5 comparison) descartar baixados idênticos.
-fn seed_existing_hashes(profile_root: &Path) -> HashSet<String> {
-    let mut hashes = HashSet::new();
+fn seed_existing_hashes(profile_root: &Path) -> HashMap<String, PathBuf> {
+    let mut hashes = HashMap::new();
     let mut pending = vec![profile_root.to_path_buf()];
     while let Some(dir) = pending.pop() {
         let Ok(entries) = fs::read_dir(&dir) else {
@@ -1111,7 +1440,7 @@ fn seed_existing_hashes(profile_root: &Path) -> HashSet<String> {
             if path.is_dir() {
                 pending.push(path);
             } else if let Ok(hash) = file_sha256(&path) {
-                hashes.insert(hash);
+                hashes.entry(hash).or_insert(path);
             }
         }
     }
@@ -1254,6 +1583,59 @@ mod tests {
     }
 
     #[test]
+    fn twitter_disk_asset_key_matches_current_and_legacy_names() {
+        assert_eq!(
+            twitter_disk_asset_key("G972MR2XoAA_QJr.mp4").as_deref(),
+            Some("g972mr2xoaa_qjr")
+        );
+        assert_eq!(
+            twitter_disk_asset_key("2026-01-05 20.02.32 GIF_G972MR2XoAA_QJr.mp4").as_deref(),
+            Some("g972mr2xoaa_qjr")
+        );
+        assert_eq!(
+            twitter_disk_asset_key("Gif_G972MR2XoAA_QJr.MP4").as_deref(),
+            Some("g972mr2xoaa_qjr")
+        );
+    }
+
+    #[test]
+    fn atomic_download_replaces_zero_byte_placeholder_without_leaving_part_files() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let destination = temp.path().join("media.mp4");
+        fs::write(&destination, []).expect("placeholder");
+
+        write_download_atomically(&destination, b"complete media").expect("atomic write");
+
+        assert_eq!(fs::read(&destination).expect("download"), b"complete media");
+        assert!(fs::read_dir(temp.path())
+            .expect("entries")
+            .all(|entry| !entry
+                .expect("entry")
+                .file_name()
+                .to_string_lossy()
+                .ends_with(".part")));
+    }
+
+    #[test]
+    fn atomic_download_preserves_a_nonempty_existing_destination() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let destination = temp.path().join("media.mp4");
+        fs::write(&destination, b"existing media").expect("existing");
+
+        let error = write_download_atomically(&destination, b"replacement").expect_err("blocked");
+
+        assert_eq!(error, "destination file already exists");
+        assert_eq!(fs::read(&destination).expect("existing"), b"existing media");
+        assert!(fs::read_dir(temp.path())
+            .expect("entries")
+            .all(|entry| !entry
+                .expect("entry")
+                .file_name()
+                .to_string_lossy()
+                .ends_with(".part")));
+    }
+
+    #[test]
     fn animated_gif_maps_to_gif_media_type() {
         let media = serde_json::json!({
             "type": "animated_gif",
@@ -1267,5 +1649,159 @@ mod tests {
         let asset = extract_asset_from_media(&media).expect("gif asset");
         assert_eq!(asset.media_type, "gif");
         assert_eq!(asset.file_name, "loop.mp4");
+    }
+
+    #[test]
+    fn likes_author_is_not_treated_as_profile_owner_without_an_identity_match() {
+        let tweet = ParsedTweet {
+            post_key: "post-1".to_string(),
+            author_screen_name: Some("someone_else".to_string()),
+            author_user_id: Some("other-id".to_string()),
+            author_avatar_url: None,
+            captured_at_timestamp: None,
+            assets: Vec::new(),
+        };
+
+        assert!(!tweet_belongs_to_owner(&tweet, "profile_owner", None));
+        assert!(!tweet_belongs_to_owner(
+            &tweet,
+            "profile_owner",
+            Some("profile-id")
+        ));
+        assert!(tweet_belongs_to_owner(
+            &tweet,
+            "renamed_profile",
+            Some("other-id")
+        ));
+    }
+
+    #[test]
+    fn only_posts_missing_enabled_media_remain_out_of_the_completed_post_ledger() {
+        let pending = vec![
+            PendingTwitterPost {
+                provider_post_key: "complete".to_string(),
+                media_section: "media".to_string(),
+                asset_keys: vec!["downloaded".to_string()],
+                was_known_post: true,
+                had_missing_assets: false,
+            },
+            PendingTwitterPost {
+                provider_post_key: "failed".to_string(),
+                media_section: "likes".to_string(),
+                asset_keys: vec!["missing".to_string()],
+                was_known_post: true,
+                had_missing_assets: true,
+            },
+            PendingTwitterPost {
+                provider_post_key: "recovered-history".to_string(),
+                media_section: "likes".to_string(),
+                asset_keys: vec!["recovered".to_string()],
+                was_known_post: true,
+                had_missing_assets: true,
+            },
+            PendingTwitterPost {
+                provider_post_key: "disabled-only".to_string(),
+                media_section: "timeline".to_string(),
+                asset_keys: Vec::new(),
+                was_known_post: true,
+                had_missing_assets: false,
+            },
+        ];
+        let available = HashSet::from(["downloaded".to_string(), "recovered".to_string()]);
+        let mut summary = TwitterManifestSummary::default();
+
+        let completed = completed_observed_posts(pending, &available, &mut summary);
+
+        assert_eq!(completed.len(), 3);
+        assert_eq!(completed[0].provider_post_key, "complete");
+        assert_eq!(completed[1].provider_post_key, "recovered-history");
+        assert_eq!(completed[2].provider_post_key, "disabled-only");
+        assert_eq!(summary.completed_post_count, 3);
+        assert_eq!(summary.incomplete_post_count, 1);
+        assert_eq!(summary.skipped_existing_post_count, 2);
+    }
+
+    #[test]
+    fn continuation_cursor_is_extracted_from_gallery_dl_resume_hint() {
+        let output = "[twitter][debug] Cursor: older\n[twitter][info] Use '-o cursor=3_1599855479290634240/DAADabc' to continue downloading from the current position";
+        assert_eq!(
+            parse_continuation_cursor(output).as_deref(),
+            Some("3_1599855479290634240/DAADabc")
+        );
+    }
+
+    #[test]
+    fn continuation_cursor_ignores_completed_cursor_marker() {
+        assert_eq!(
+            parse_continuation_cursor("[twitter][debug] Cursor: None"),
+            None
+        );
+    }
+
+    #[test]
+    fn completed_cursor_does_not_fall_back_to_an_older_page_cursor() {
+        let output = "[twitter][debug] Cursor: DAABCgABHM91IoZ_previous\n\
+                      .\\gallery-dl\\twitter\\profile\\1693020454921867429_1.mp4\n\
+                      [twitter][debug] Cursor: None";
+
+        assert_eq!(parse_continuation_cursor(output), None);
+    }
+
+    #[test]
+    fn tweet_ids_containing_429_do_not_trigger_rate_limit() {
+        let output = "gallery-dl --no-download -o ratelimit=abort\n\
+                      [urllib3.connectionpool][debug] GET /UserMedia HTTP/1.1\" 200 5073\n\
+                      .\\gallery-dl\\twitter\\profile\\1693020454921867429_1.mp4\n\
+                      .\\gallery-dl\\twitter\\profile\\1602842910675943425_1.jpg\n\
+                      [twitter][debug] Cursor: None";
+
+        assert!(!output_indicates_rate_limit(output));
+    }
+
+    #[test]
+    fn structured_http_429_and_explicit_messages_trigger_rate_limit() {
+        assert!(output_indicates_rate_limit(
+            "[urllib3.connectionpool][debug] GET /UserMedia HTTP/1.1\" 429 0"
+        ));
+        assert!(output_indicates_rate_limit(
+            "[twitter][warning] API rate limit exceeded"
+        ));
+        assert!(output_indicates_rate_limit(
+            "HttpError: 429 Too Many Requests"
+        ));
+    }
+
+    #[test]
+    fn incremental_filter_stops_when_twitter_reaches_the_overlap_cutoff() {
+        assert_eq!(
+            twitter_incremental_post_filter(1_700_000_000),
+            "date.timestamp() >= 1700000000 or abort()"
+        );
+    }
+
+    #[test]
+    fn legacy_manifest_deserializes_with_new_telemetry_defaults() {
+        let summary: TwitterManifestSummary = serde_json::from_str(
+            r#"{"parsedPageCount":3,"normalizedPostCount":10,"rateLimited":false}"#,
+        )
+        .expect("legacy manifest");
+
+        assert_eq!(summary.parsed_page_count, 3);
+        assert_eq!(summary.normalized_post_count, 10);
+        assert_eq!(summary.skipped_duplicate_asset_count, 0);
+        assert!(!summary.incremental_scan);
+        assert_eq!(summary.full_scan_at, None);
+    }
+
+    #[test]
+    fn existing_hash_index_keeps_the_canonical_file_path() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let canonical = temp.path().join("canonical.jpg");
+        fs::write(&canonical, b"same bytes").expect("media");
+        let hash = file_sha256(&canonical).expect("hash");
+
+        let hashes = seed_existing_hashes(temp.path());
+
+        assert_eq!(hashes.get(&hash), Some(&canonical));
     }
 }

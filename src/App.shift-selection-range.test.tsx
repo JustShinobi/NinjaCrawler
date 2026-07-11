@@ -51,11 +51,12 @@ vi.mock('./features/workspace/AccountsMenu', () => ({
   AccountsMenu: () => <div>AccountsMenu</div>,
 }))
 vi.mock('./features/workspace/ProfileWorkspace', () => ({
-  ProfileWorkspace: ({ onSelectSource }: { onSelectSource: (id: string, options?: { append?: boolean; range?: boolean; visibleIds?: string[] }) => void }) => {
+  ProfileWorkspace: ({ onSelectSource, selectedSourceIds }: { onSelectSource: (id: string, options?: { append?: boolean; range?: boolean; visibleIds?: string[] }) => void; selectedSourceIds: string[] }) => {
     const visibleIds = ['source-a', 'source-e', 'source-b', 'source-c', 'source-d']
 
     return (
       <div>
+        <output aria-label="Selected sources">{selectedSourceIds.join(',')}</output>
         <button
           onClick={() => onSelectSource('source-a')}
           type="button"
@@ -96,7 +97,12 @@ vi.mock('./features/workspace/ToolbarAddMenu', () => ({
 vi.mock('./features/workspace/workspaceProfiles', () => ({
   buildSourceProfileUrl: () => undefined,
   buildServiceTabs: () => [{ key: 'all', label: 'All', count: currentSnapshot.sources.length }],
-  filterSourcesForWorkspace: () => currentSnapshot.sources,
+  filterSourcesForWorkspace: (_sources: unknown, _serviceTab: string, searchText: string) => {
+    const query = searchText.trim().toLowerCase()
+    return query
+      ? currentSnapshot.sources.filter((source) => source.handle.toLowerCase().includes(query))
+      : currentSnapshot.sources
+  },
   formatSourceHandleLabel: (handle: string) => handle,
   parseClipboardProfileSeed: () => undefined,
 }))
@@ -224,5 +230,20 @@ describe('App shift selection range', () => {
     const downloadButton = within(toolbar as HTMLElement).getByRole('button', { name: 'Download' }) as HTMLButtonElement
 
     await waitFor(() => expect(downloadButton.disabled).toBe(true))
+  })
+
+  it('selects every currently filtered profile with Ctrl+A', async () => {
+    currentSnapshot.sources[0].handle = '@match-a'
+    currentSnapshot.sources[2].handle = '@match-c'
+    render(<App />)
+
+    fireEvent.change(screen.getByRole('searchbox'), { target: { value: 'match' } })
+    fireEvent.keyDown(document, { key: 'a', ctrlKey: true })
+
+    await waitFor(() => {
+      expect(screen.getByLabelText('Selected sources').textContent).toBe(
+        'source-a,source-c',
+      )
+    })
   })
 })

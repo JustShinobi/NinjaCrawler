@@ -4,6 +4,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { WorkspaceSnapshot } from '../../domain/models'
 import { createEmptyWorkspaceSnapshot } from '../../domain/workspaceSnapshot'
+import { TWITTER_SYNC_OPTION_GROUPS } from '../../domain/twitterSyncOptionDefinitions'
 import { BatchEditorWindowPage } from './BatchEditorWindowPage'
 
 const closeWindowMock = vi.hoisted(() => vi.fn())
@@ -20,11 +21,11 @@ vi.mock('@tauri-apps/api/window', () => ({
   getCurrentWindow: () => ({ close: closeWindowMock }),
 }))
 
-function createSnapshot(): WorkspaceSnapshot {
+function createSnapshot(provider: 'instagram' | 'twitter' = 'instagram'): WorkspaceSnapshot {
   const snapshot = createEmptyWorkspaceSnapshot()
   snapshot.sources = [{
     id: 'source-1',
-    provider: 'instagram',
+    provider,
     sourceKind: 'profile',
     handle: '@source-1',
     displayName: 'source-1',
@@ -140,5 +141,39 @@ describe('BatchEditorWindowPage', () => {
       expect(screen.getByText('Failed to apply changes: boom')).toBeTruthy()
     })
     expect(closeWindowMock).not.toHaveBeenCalled()
+  })
+
+  it('renders the shared Twitter option schema and applies only a Twitter patch', async () => {
+    const snapshot = createSnapshot('twitter')
+    bridgeMocks.loadWorkspaceSnapshot.mockResolvedValue(snapshot)
+    bridgeMocks.batchUpdateSourceProfiles.mockResolvedValue(snapshot)
+
+    render(<BatchEditorWindowPage initialSourceIds={['source-1']} />)
+
+    await screen.findByText('X / Twitter · Download models')
+    expect(screen.queryByText('Instagram · Sections')).toBeNull()
+    for (const group of TWITTER_SYNC_OPTION_GROUPS) {
+      for (const option of group.options) {
+        expect(screen.getByText(option.label)).toBeTruthy()
+      }
+    }
+
+    fireEvent.click(screen.getByRole('button', { name: 'Download GIFs' }))
+    fireEvent.click(screen.getByRole('button', { name: 'GIF prefix' }))
+    fireEvent.change(screen.getByRole('textbox', { name: 'GIF prefix value' }), {
+      target: { value: 'ANIM_' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Apply changes' }))
+
+    await waitFor(() => expect(bridgeMocks.batchUpdateSourceProfiles).toHaveBeenCalledTimes(1))
+    expect(bridgeMocks.batchUpdateSourceProfiles).toHaveBeenCalledWith(expect.objectContaining({
+      sourceIds: ['source-1'],
+      syncOptionsPatch: {
+        twitter: {
+          downloadGifs: true,
+          gifsPrefix: 'ANIM_',
+        },
+      },
+    }))
   })
 })

@@ -548,6 +548,15 @@ function App() {
       }
 
       const loweredKey = event.key.toLowerCase()
+      if (loweredKey === 'a') {
+        event.preventDefault()
+        const visibleSourceIds = filteredSources.map((source) => source.id)
+        setSelectedSourceIds(visibleSourceIds)
+        setSelectionAnchorId(visibleSourceIds[0])
+        setProfileContextMenu(undefined)
+        return
+      }
+
       if (loweredKey === 'v') {
         event.preventDefault()
         void openAddDialog()
@@ -570,7 +579,7 @@ function App() {
     return () => {
       document.removeEventListener('keydown', handleKeyDown)
     }
-  }, [activeSection, windowKind, openAddDialog])
+  }, [activeSection, filteredSources, windowKind, openAddDialog])
 
   useEffect(() => {
     if (windowKind !== 'main' || activeSection !== 'accounts') {

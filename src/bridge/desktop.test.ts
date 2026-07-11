@@ -286,7 +286,17 @@ describe('loadWorkspaceSnapshot', () => {
       failedCount: 1,
       totalCount: 4,
       providers: [],
-      queuedItems: [],
+      queuedItems: [
+        {
+          source_id: 'source-held',
+          provider: 'twitter',
+          handle: '@held',
+          state: 'held',
+          queued_at: '2026-07-11T00:00:00Z',
+          progress_label: 'On hold',
+          hold_until: '2026-07-11T00:15:30Z',
+        },
+      ],
       runningItems: [
         {
           job_key: 'source-1:instagram-story:123',
@@ -322,6 +332,14 @@ describe('loadWorkspaceSnapshot', () => {
     expect(invokeMock).toHaveBeenCalledWith('source_sync_queue_status')
     expect(status.completedCount).toBe(3)
     expect(status.failedCount).toBe(1)
+    expect(status.queuedItems[0]).toEqual(
+      expect.objectContaining({
+        sourceId: 'source-held',
+        state: 'held',
+        progressLabel: 'On hold',
+        holdUntil: '2026-07-11T00:15:30Z',
+      }),
+    )
     expect(status.runningItems[0]).toEqual(
       expect.objectContaining({
         jobKey: 'source-1:instagram-story:123',

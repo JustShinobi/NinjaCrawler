@@ -96,6 +96,31 @@ fn import_and_revert_swap_the_protected_session() {
 }
 
 #[test]
+fn client_hints_are_kept_only_for_instagram() {
+    let mut capture = capture("token");
+    capture.authorization.insert(
+        "secChUa".to_string(),
+        "\"Chromium\";v=\"130\"".to_string(),
+    );
+    capture
+        .authorization
+        .insert("secChUaPlatformVersion".to_string(), "\"15.0.0\"".to_string());
+
+    let twitter = companion_metadata("twitter", &capture);
+    assert_eq!(twitter.user_agent.as_deref(), Some("Mozilla/5.0 Test"));
+    assert!(twitter.sec_ch_ua.is_none());
+    assert!(twitter.sec_ch_ua_platform_version.is_none());
+
+    let instagram = companion_metadata("instagram", &capture);
+    assert_eq!(instagram.user_agent.as_deref(), Some("Mozilla/5.0 Test"));
+    assert_eq!(instagram.sec_ch_ua.as_deref(), Some("\"Chromium\";v=\"130\""));
+    assert_eq!(
+        instagram.sec_ch_ua_platform_version.as_deref(),
+        Some("\"15.0.0\"")
+    );
+}
+
+#[test]
 fn preview_is_redacted() {
     let temp = tempfile::tempdir().expect("temp dir");
     let layout = storage::workspace_layout_from_roots(

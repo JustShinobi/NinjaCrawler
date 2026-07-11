@@ -1042,7 +1042,7 @@ function normalizeSourceSyncQueueItem(value: unknown): SourceSyncQueueItem | nul
     provider: normalizeProviderKey(pick(value, 'provider', 'providerKey', 'provider_key')),
     handle: stringValue(value, ['handle'], ''),
     accountId: optionalStringValue(value, ['accountId', 'account_id']),
-    state: enumValue(pick(value, 'state'), ['queued', 'running'] as const, 'queued'),
+    state: enumValue(pick(value, 'state'), ['queued', 'running', 'held'] as const, 'queued'),
     queuedAt: stringValue(value, ['queuedAt', 'queued_at'], new Date().toISOString()),
     startedAt: optionalStringValue(value, ['startedAt', 'started_at']),
     progressPercent,
@@ -1054,6 +1054,7 @@ function normalizeSourceSyncQueueItem(value: unknown): SourceSyncQueueItem | nul
       progressPercent === undefined,
     ),
     downloadedItems,
+    holdUntil: optionalStringValue(value, ['holdUntil', 'hold_until']),
   }
 }
 
@@ -2921,8 +2922,14 @@ export interface BatchSourceProfilePatch {
   labelsToAdd: string[]
   labelsToRemove: string[]
   readyForDownload?: boolean
-  syncOptionsPatch?: BatchInstagramSyncOptionsPatch
+  syncOptionsPatch?: BatchSourceSyncOptionsPatch
   setGroupId?: string | null
+}
+
+export interface BatchSourceSyncOptionsPatch {
+  instagram?: BatchInstagramSyncOptionsPatch
+  twitter?: Partial<import('../domain/models').TwitterSourceSyncOptions>
+  tiktok?: Partial<import('../domain/models').TikTokSourceSyncOptions>
 }
 
 export interface BatchInstagramSyncOptionsPatch {

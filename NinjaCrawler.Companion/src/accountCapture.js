@@ -4,6 +4,12 @@ const PROVIDER_COOKIE_DOMAINS = {
   tiktok: ['tiktok.com'],
 }
 
+// Tempo máximo que a captura espera pela sonda de página. Sem esse corte, uma
+// aba não-responsiva (timeline pesada, renderer ocupado, aba navegando) deixa o
+// `chrome.scripting.executeScript` pendente para sempre, mantém o service worker
+// vivo e trava o popup em "Capturing…".
+const PAGE_PROBE_TIMEOUT_MS = 10_000
+
 const INSTAGRAM_PROBE_FILTER = {
   urls: [
     'https://instagram.com/api/v1/accounts/current_user/*',
@@ -64,7 +70,11 @@ export async function captureAccountFromTab(tab, provider) {
 
   const probe = provider === 'instagram'
     ? await runInstagramProbe(tab.id, csrfToken, observedHeaders)
-    : await runPageProbe(tab.id, provider)
+    : await withTimeout(
+      runPageProbe(tab.id, provider),
+      PAGE_PROBE_TIMEOUT_MS,
+      `${provider} account capture timed out. Reload the tab and try again.`,
+    )
   const providerUserId = probe.identity?.providerUserId || cookieProviderUserId
   const username = resolveCapturedUsername(probe.identity?.username, providerUserId)
   if (!username) {
@@ -130,7 +140,7 @@ async function runInstagramProbe(tabId, csrfToken, observedHeaders) {
   try {
     return await withTimeout(
       runPageProbe(tabId, 'instagram', { csrfToken }),
-      10_000,
+      PAGE_PROBE_TIMEOUT_MS,
       'Instagram account capture timed out.',
     )
   } finally {
@@ -151,7 +161,11 @@ async function runPageProbe(tabId, provider, options = {}) {
 
 async function pageProbe(provider, options) {
   const browser = { userAgent: navigator.userAgent }
-  if (navigator.userAgentData) {
+  // Os client-hints (Sec-CH-UA*) só são consumidos pelo connector do Instagram.
+  // Twitter/TikTok baixam com impersonation própria (que já emite um conjunto
+  // coerente de UA+CH+TLS), então coletar esse fingerprint do navegador para eles
+  // só exporia dado sensível sem uso. O userAgent, esse sim, os três usam.
+  if (provider === 'instagram' && navigator.userAgentData) {
     const brands = navigator.userAgentData.brands ?? []
     browser.secChUa = brands.map((brand) => `"${brand.brand}";v="${brand.version}"`).join(', ')
     try {
@@ -228,12 +242,16 @@ async function pageProbe(provider, options) {
   }
 
   if (provider === 'twitter') {
+    // Deriva o handle apenas de elementos que pertencem à conta logada. Uma
+    // varredura global de `a[href^="/"]` percorreria toda a timeline (caro em
+    // páginas longas) e capturaria o perfil de terceiros — o que gravaria a
+    // conta com o username errado.
+    const handleFromPath = (value) => value?.match(/^\/([A-Za-z0-9_]{1,15})$/)?.[1]
+    const profileLink = document.querySelector('a[data-testid="AppTabBar_Profile_Link"]')
     const switcher = document.querySelector('[data-testid="SideNav_AccountSwitcher_Button"]')
-    const username = switcher?.textContent?.match(/@([A-Za-z0-9_]{1,15})/)?.[1]
-      ?? Array.from(document.querySelectorAll('a[href^="/"]'))
-        .map((anchor) => anchor.getAttribute('href'))
-        .find((href) => /^\/[A-Za-z0-9_]{1,15}$/.test(href ?? ''))
-        ?.slice(1)
+    const username = handleFromPath(profileLink?.getAttribute('href'))
+      ?? switcher?.textContent?.match(/@([A-Za-z0-9_]{1,15})/)?.[1]
+      ?? handleFromPath(switcher?.querySelector('a[href^="/"]')?.getAttribute('href'))
     return { ok: true, value: { identity: { username }, browser } }
   }
 

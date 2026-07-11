@@ -229,6 +229,41 @@ describe('SourceEditorDialog', () => {
     expect(document.getElementById('source-editor-tab-history')?.className).toContain('source-editor-tab-panel-history')
   })
 
+  it('keeps the full Twitter timeline out of normal sync and queues it as backfill', async () => {
+    const { store } = renderDialog(
+      {
+        accounts: [buildAccount({ provider: 'twitter', displayName: 'Twitter account' })],
+      },
+      {
+        source: buildSource({
+          provider: 'twitter',
+          syncOptions: {
+            twitter: {
+              mediaModel: true,
+              profileModel: false,
+              likesModel: true,
+            },
+          },
+        }),
+      },
+    )
+    store.runSourceSync.mockResolvedValue(buildSnapshot())
+
+    fireEvent.click(screen.getByRole('tab', { name: /sync/i }))
+
+    expect(screen.getByText(/full timeline scanning is managed as a separate backfill/i)).toBeTruthy()
+    expect((screen.getByRole('checkbox', { name: 'Profile posts with media' }) as HTMLInputElement).checked).toBe(true)
+    expect(screen.queryByRole('checkbox', { name: 'Full profile timeline' })).toBeNull()
+    expect((screen.getByRole('checkbox', { name: 'Liked posts' }) as HTMLInputElement).checked).toBe(true)
+    fireEvent.click(screen.getByRole('button', { name: 'Queue backfill' }))
+    await waitFor(() =>
+      expect(store.runSourceSync).toHaveBeenCalledWith('source-1', {
+        trigger: 'manual_twitter_full_timeline_backfill',
+        runMode: 'twitter_full_timeline_backfill',
+      }),
+    )
+  })
+
   it('shows legacy import metadata and runs force backfill for imported profiles', async () => {
     const { store } = renderDialog(
       {},

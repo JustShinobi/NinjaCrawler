@@ -5,8 +5,10 @@ import {
   subscribeToBatchEditorWindowIntent,
   upsertSchedulerGroup,
   type BatchInstagramSyncOptionsPatch,
+  type BatchSourceSyncOptionsPatch,
 } from '../../bridge/desktop'
 import type { SchedulerGroup, WorkspaceSnapshot } from '../../domain/models'
+import { TWITTER_SYNC_OPTION_GROUPS } from '../../domain/twitterSyncOptionDefinitions'
 import { closeDesktopWindow } from '../../utils/closeDesktopWindow'
 
 type TriState = 'unchanged' | 'on' | 'off'
@@ -74,6 +76,8 @@ export function BatchEditorWindowPage({ initialSourceIds }: BatchEditorWindowPag
   const [groupAction, setGroupAction] = useState<string>(GROUP_UNCHANGED)
   const [newGroupName, setNewGroupName] = useState('')
   const [syncToggles, setSyncToggles] = useState<Record<string, TriState>>({})
+  const [syncValues, setSyncValues] = useState<Record<string, string>>({})
+  const [changedSyncValues, setChangedSyncValues] = useState<Set<string>>(new Set())
   const [applying, setApplying] = useState(false)
   const [applyError, setApplyError] = useState<string | undefined>(undefined)
   const [collapsedSections, setCollapsedSections] = useState<Set<string>>(new Set())
@@ -137,6 +141,16 @@ export function BatchEditorWindowPage({ initialSourceIds }: BatchEditorWindowPag
   }, [allKnownLabels, labelsToRemove, removeLabelDraft])
 
   const schedulerGroups: SchedulerGroup[] = snapshot?.schedulerGroups ?? []
+  const selectedProviders = useMemo(() => {
+    const selectedIdSet = new Set(sourceIds)
+    return new Set(
+      snapshot?.sources
+        .filter((source) => selectedIdSet.has(source.id))
+        .map((source) => source.provider) ?? [],
+    )
+  }, [snapshot, sourceIds])
+  const hasInstagramSources = selectedProviders.has('instagram')
+  const hasTwitterSources = selectedProviders.has('twitter')
 
   function getTriState(key: string): TriState {
     return syncToggles[key] ?? 'unchanged'
@@ -147,6 +161,15 @@ export function BatchEditorWindowPage({ initialSourceIds }: BatchEditorWindowPag
       ...prev,
       [key]: nextTriState(prev[key] ?? 'unchanged'),
     }))
+  }
+
+  function toggleSyncValue(key: string) {
+    setChangedSyncValues((current) => {
+      const next = new Set(current)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
+      return next
+    })
   }
 
   function toggleSection(section: string) {
@@ -227,22 +250,43 @@ export function BatchEditorWindowPage({ initialSourceIds }: BatchEditorWindowPag
     setApplyError(undefined)
     setApplying(true)
     try {
-      const patch: BatchInstagramSyncOptionsPatch = {}
+      const patch: BatchSourceSyncOptionsPatch = {}
       let hasSyncChanges = false
-      for (const toggle of [...SECTION_TOGGLES, ...BEHAVIOR_TOGGLES, ...MEDIA_TOGGLES]) {
-        const state = getTriState(toggle.key)
-        if (state !== 'unchanged') {
-          (patch as Record<string, boolean>)[toggle.key] = state === 'on'
-          hasSyncChanges = true
+      if (hasInstagramSources) {
+        const instagramPatch: BatchInstagramSyncOptionsPatch = {}
+        for (const toggle of [...SECTION_TOGGLES, ...BEHAVIOR_TOGGLES, ...MEDIA_TOGGLES]) {
+          const state = getTriState(toggle.key)
+          if (state !== 'unchanged') {
+            (instagramPatch as Record<string, boolean>)[toggle.key] = state === 'on'
+            hasSyncChanges = true
+          }
         }
+        for (const toggle of EXTRACT_MEDIA_TOGGLES) {
+          const state = getTriState(toggle.key)
+          if (state !== 'unchanged') {
+            instagramPatch.extractImageFromVideo ??= {}
+            const extractKey = toggle.key.replace('extractImageFromVideo.', '')
+            const extractPatch = instagramPatch.extractImageFromVideo as Record<string, boolean>
+            extractPatch[extractKey] = state === 'on'
+            hasSyncChanges = true
+          }
+        }
+        if (hasSyncChanges) patch.instagram = instagramPatch
       }
-      for (const toggle of EXTRACT_MEDIA_TOGGLES) {
-        const state = getTriState(toggle.key)
-        if (state !== 'unchanged') {
-          patch.extractImageFromVideo ??= {}
-          const extractKey = toggle.key.replace('extractImageFromVideo.', '')
-          const extractPatch = patch.extractImageFromVideo as Record<string, boolean>
-          extractPatch[extractKey] = state === 'on'
+
+      if (hasTwitterSources) {
+        const twitterPatch: Record<string, boolean | string> = {}
+        for (const option of TWITTER_SYNC_OPTION_GROUPS.flatMap((group) => group.options)) {
+          const stateKey = `twitter.${option.key}`
+          if (option.type === 'boolean') {
+            const state = getTriState(stateKey)
+            if (state !== 'unchanged') twitterPatch[option.key] = state === 'on'
+          } else if (changedSyncValues.has(stateKey)) {
+            twitterPatch[option.key] = syncValues[stateKey] ?? ''
+          }
+        }
+        if (Object.keys(twitterPatch).length > 0) {
+          patch.twitter = twitterPatch
           hasSyncChanges = true
         }
       }
@@ -279,7 +323,8 @@ export function BatchEditorWindowPage({ initialSourceIds }: BatchEditorWindowPag
     labelsToRemove.length > 0 ||
     readyForDownload !== 'unchanged' ||
     (groupAction !== GROUP_UNCHANGED) ||
-    Object.values(syncToggles).some((v) => v !== 'unchanged')
+    Object.values(syncToggles).some((v) => v !== 'unchanged') ||
+    changedSyncValues.size > 0
   const applyBlockedByPendingGroupCreation = groupAction === GROUP_CREATE
 
   return (
@@ -436,10 +481,10 @@ export function BatchEditorWindowPage({ initialSourceIds }: BatchEditorWindowPag
           />
         </BatchSection>
 
-        <BatchSection
+        {hasInstagramSources ? <BatchSection
           collapsed={collapsedSections.has('sections')}
           onToggle={() => toggleSection('sections')}
-          title="Sections"
+          title="Instagram · Sections"
         >
           {SECTION_TOGGLES.map((toggle) => (
             <TriStateRow
@@ -449,12 +494,12 @@ export function BatchEditorWindowPage({ initialSourceIds }: BatchEditorWindowPag
               value={getTriState(toggle.key)}
             />
           ))}
-        </BatchSection>
+        </BatchSection> : null}
 
-        <BatchSection
+        {hasInstagramSources ? <BatchSection
           collapsed={collapsedSections.has('behavior')}
           onToggle={() => toggleSection('behavior')}
-          title="Behavior"
+          title="Instagram · Behavior"
         >
           {BEHAVIOR_TOGGLES.map((toggle) => (
             <TriStateRow
@@ -464,12 +509,12 @@ export function BatchEditorWindowPage({ initialSourceIds }: BatchEditorWindowPag
               value={getTriState(toggle.key)}
             />
           ))}
-        </BatchSection>
+        </BatchSection> : null}
 
-        <BatchSection
+        {hasInstagramSources ? <BatchSection
           collapsed={collapsedSections.has('media')}
           onToggle={() => toggleSection('media')}
-          title="Media"
+          title="Instagram · Media"
         >
           {MEDIA_TOGGLES.map((toggle) => (
             <TriStateRow
@@ -487,7 +532,40 @@ export function BatchEditorWindowPage({ initialSourceIds }: BatchEditorWindowPag
               value={getTriState(toggle.key)}
             />
           ))}
-        </BatchSection>
+        </BatchSection> : null}
+
+        {hasTwitterSources ? TWITTER_SYNC_OPTION_GROUPS.map((group) => {
+          const sectionKey = `twitter.${group.title}`
+          return (
+            <BatchSection
+              collapsed={collapsedSections.has(sectionKey)}
+              key={sectionKey}
+              onToggle={() => toggleSection(sectionKey)}
+              title={`X / Twitter · ${group.title}`}
+            >
+              {group.options.map((option) => {
+                const stateKey = `twitter.${option.key}`
+                return option.type === 'boolean' ? (
+                  <TriStateRow
+                    key={option.key}
+                    label={option.label}
+                    onChange={() => toggleSyncOption(stateKey)}
+                    value={getTriState(stateKey)}
+                  />
+                ) : (
+                  <BatchValueRow
+                    changed={changedSyncValues.has(stateKey)}
+                    key={option.key}
+                    label={option.label}
+                    onChange={(value) => setSyncValues((current) => ({ ...current, [stateKey]: value }))}
+                    onToggle={() => toggleSyncValue(stateKey)}
+                    value={syncValues[stateKey] ?? ''}
+                  />
+                )
+              })}
+            </BatchSection>
+          )
+        }) : null}
       </div>
 
       <footer className="batch-editor-footer">
@@ -593,11 +671,45 @@ interface TriStateRowProps {
 
 function TriStateRow({ label, value, onChange }: TriStateRowProps) {
   return (
-    <button className="batch-editor-toggle-row" onClick={onChange} type="button">
+    <button aria-label={label} className="batch-editor-toggle-row" onClick={onChange} type="button">
       <span className={`tri-state-indicator tri-state-${value}`}>
         {value === 'on' ? '\u2713' : value === 'off' ? '\u2715' : '\u2014'}
       </span>
       <span>{label}</span>
     </button>
+  )
+}
+
+interface BatchValueRowProps {
+  label: string
+  value: string
+  changed: boolean
+  onToggle: () => void
+  onChange: (value: string) => void
+}
+
+function BatchValueRow({ label, value, changed, onToggle, onChange }: BatchValueRowProps) {
+  return (
+    <div className="batch-editor-value-row">
+      <button
+        aria-label={label}
+        aria-pressed={changed}
+        className="batch-editor-value-mode"
+        onClick={onToggle}
+        type="button"
+      >
+        <span className={`tri-state-indicator tri-state-${changed ? 'on' : 'unchanged'}`}>
+          {changed ? '\u2713' : '\u2014'}
+        </span>
+        <span>{label}</span>
+      </button>
+      <input
+        aria-label={`${label} value`}
+        disabled={!changed}
+        onChange={(event) => onChange(event.target.value)}
+        type="text"
+        value={value}
+      />
+    </div>
   )
 }

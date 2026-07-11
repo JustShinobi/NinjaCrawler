@@ -1,4 +1,5 @@
 use rusqlite::{Connection, OptionalExtension};
+use std::collections::HashSet;
 use std::path::Path;
 
 const MIGRATIONS: &[(i64, &str)] = &[
@@ -141,7 +142,72 @@ const MIGRATIONS: &[(i64, &str)] = &[
         37,
         include_str!("../../migrations/0037_source_sync_queue_job_keys.sql"),
     ),
+    (
+        38,
+        include_str!("../../migrations/0038_provider_sync_resume_cursor.sql"),
+    ),
+    (
+        39,
+        include_str!("../../migrations/0039_provider_sync_resume_schema_repair.sql"),
+    ),
 ];
+
+const PROVIDER_SYNC_RESUME_SCHEMA: &str =
+    include_str!("../../migrations/0039_provider_sync_resume_schema_repair.sql");
+
+fn table_columns(connection: &Connection, table: &str) -> rusqlite::Result<HashSet<String>> {
+    let mut statement = connection.prepare(&format!("PRAGMA table_info({table})"))?;
+    let rows = statement.query_map([], |row| row.get::<_, String>(1))?;
+    rows.collect()
+}
+
+fn ensure_provider_sync_resume_schema(connection: &Connection) -> rusqlite::Result<()> {
+    let resume_columns = table_columns(connection, "provider_sync_resume_cursors")?;
+    let required_resume_columns = [
+        "provider",
+        "source_id",
+        "account_id",
+        "scope",
+        "section",
+        "state",
+        "cursor",
+        "updated_at",
+    ];
+    if !resume_columns.is_empty()
+        && !required_resume_columns
+            .iter()
+            .all(|column| resume_columns.contains(*column))
+    {
+        // Essas tabelas guardam apenas checkpoints temporarios. Um draft
+        // incompatível nao pode impedir toda a fila de sincronizar.
+        connection.execute_batch(
+            "DROP TABLE IF EXISTS provider_sync_resume_cursors;
+             DROP INDEX IF EXISTS idx_provider_sync_resume_account;",
+        )?;
+    }
+
+    let hold_columns = table_columns(connection, "provider_sync_account_holds")?;
+    let required_hold_columns = [
+        "provider",
+        "account_id",
+        "hold_until",
+        "reason",
+        "updated_at",
+    ];
+    if !hold_columns.is_empty()
+        && !required_hold_columns
+            .iter()
+            .all(|column| hold_columns.contains(*column))
+    {
+        connection.execute_batch("DROP TABLE IF EXISTS provider_sync_account_holds;")?;
+    }
+
+    connection.execute_batch(PROVIDER_SYNC_RESUME_SCHEMA)?;
+    connection.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_provider_sync_resume_account
+         ON provider_sync_resume_cursors(provider, account_id, scope, updated_at);",
+    )
+}
 
 pub fn open_connection(path: &Path) -> rusqlite::Result<Connection> {
     let mut connection = Connection::open(path)?;
@@ -182,12 +248,78 @@ pub fn open_connection(path: &Path) -> rusqlite::Result<Connection> {
         transaction.commit()?;
     }
 
+    // Invariante operacional: migrations de branches de desenvolvimento podem
+    // colidir por versao. A fila nao deve falhar só porque o ledger diz que a
+    // migration passou enquanto as tabelas requeridas estao ausentes.
+    ensure_provider_sync_resume_schema(&connection)?;
+
     Ok(connection)
 }
 
 #[cfg(test)]
 mod tests {
-    use rusqlite::{params, Connection};
+    use super::*;
+    use rusqlite::params;
+
+    #[test]
+    fn open_connection_repairs_registered_migration_with_missing_runtime_tables() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("repair.db");
+        let raw = Connection::open(&path).expect("raw connection");
+        raw.execute_batch(
+            "CREATE TABLE schema_migrations (
+                version INTEGER PRIMARY KEY,
+                applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+             );",
+        )
+        .expect("migration ledger");
+        for version in 1..=38 {
+            raw.execute(
+                "INSERT INTO schema_migrations(version) VALUES (?1)",
+                [version],
+            )
+            .expect("registered migration");
+        }
+        drop(raw);
+
+        let repaired = open_connection(&path).expect("repaired connection");
+        let resume = table_columns(&repaired, "provider_sync_resume_cursors").expect("resume");
+        let holds = table_columns(&repaired, "provider_sync_account_holds").expect("holds");
+        assert!(resume.contains("scope"));
+        assert!(resume.contains("state"));
+        assert!(holds.contains("hold_until"));
+    }
+
+    #[test]
+    fn open_connection_replaces_incompatible_draft_resume_table() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("draft.db");
+        let raw = Connection::open(&path).expect("raw connection");
+        raw.execute_batch(
+            "CREATE TABLE schema_migrations (
+                version INTEGER PRIMARY KEY,
+                applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+             );
+             CREATE TABLE provider_sync_resume_cursors (
+                provider TEXT, source_id TEXT, account_id TEXT,
+                section TEXT, cursor TEXT, updated_at TEXT
+             );",
+        )
+        .expect("draft schema");
+        for version in 1..=39 {
+            raw.execute(
+                "INSERT INTO schema_migrations(version) VALUES (?1)",
+                [version],
+            )
+            .expect("registered migration");
+        }
+        drop(raw);
+
+        let repaired = open_connection(&path).expect("repaired connection");
+        let columns = table_columns(&repaired, "provider_sync_resume_cursors").expect("columns");
+        assert!(columns.contains("scope"));
+        assert!(columns.contains("state"));
+    }
 
     #[test]
     fn story_job_key_migration_preserves_old_jobs_and_allows_same_source_twice() {

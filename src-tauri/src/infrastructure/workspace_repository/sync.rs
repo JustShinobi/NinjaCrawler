@@ -2,6 +2,10 @@ use super::*;
 
 pub(super) const INSTAGRAM_SYNC_RETRY_AFTER_FALLBACK_SECS: i64 = 10 * 60;
 pub(super) const INSTAGRAM_SYNC_COOLDOWN_UNTIL_SETTING_KEY: &str = "instagram.sync.cooldownUntil";
+pub const TWITTER_FULL_TIMELINE_BACKFILL_RUN_MODE: &str = "twitter_full_timeline_backfill";
+const TWITTER_RATE_LIMIT_HOLD_SECS: i64 = 15 * 60 + 30;
+const TWITTER_INCREMENTAL_OVERLAP_SECS: i64 = 7 * 24 * 60 * 60;
+const TWITTER_PERIODIC_FULL_SCAN_SECS: i64 = 7 * 24 * 60 * 60;
 pub(super) const SOURCE_SYNC_PROGRESS_POLL_MS: u64 = 900;
 /// `run_mode` da ação pontual "Refresh media stats" (TikTok): roda um sync
 /// normal com re-coleta de estatísticas da mídia existente, sem persistir nada
@@ -967,6 +971,7 @@ pub(super) fn execute_source_sync_with_connection(
             &context,
             &account_settings,
             trigger,
+            run_mode,
             sync_options_override,
         );
     }
@@ -1115,12 +1120,13 @@ pub(super) fn execute_twitter_source_sync_with_connection(
     context: &SourceSyncContext,
     settings: &HashMap<String, String>,
     trigger: &str,
+    run_mode: Option<&str>,
     sync_options_override: Option<&SourceSyncOptions>,
 ) -> Result<SourceSyncOutcome, String> {
     let options = source_twitter_sync_options_with_override(&context.source, sync_options_override);
     let started_at = now_timestamp();
 
-    let handle = sanitize_source_handle("twitter", &context.source.handle)
+    let mut handle = sanitize_source_handle("twitter", &context.source.handle)
         .trim_start_matches('@')
         .to_string();
     if handle.is_empty() {
@@ -1164,16 +1170,59 @@ pub(super) fn execute_twitter_source_sync_with_connection(
         load_provider_sync_post_ledger_keys(connection, "twitter", &context.source.id)?;
     let ledger_media_keys =
         load_provider_sync_media_ledger_keys(connection, "twitter", &context.source.id)?;
-    let existing_relative_paths = load_existing_relative_media_paths(&profile_root);
+    let existing_relative_paths = load_existing_relative_media_paths(&profile_root)
+        .into_iter()
+        .filter_map(|file_name| twitter_connector::twitter_disk_asset_key(&file_name))
+        .collect();
 
-    let request = twitter_connector::TwitterConnectorRequest {
+    let phase_scope = if run_mode
+        .is_some_and(|value| value.eq_ignore_ascii_case(TWITTER_FULL_TIMELINE_BACKFILL_RUN_MODE))
+    {
+        "full_timeline_backfill"
+    } else {
+        "normal"
+    };
+    let (resume_cursors, completed_phase_sections) = load_provider_sync_resume_state(
+        connection,
+        "twitter",
+        &context.source.id,
+        &context.account.id,
+        phase_scope,
+    )?;
+    let mut models =
+        twitter_model_selection_for_phase(&options, run_mode, &completed_phase_sections);
+    if !models.media && !models.profile && !models.search && !models.likes {
+        clear_provider_sync_resume_scope(
+            connection,
+            "twitter",
+            &context.source.id,
+            &context.account.id,
+            phase_scope,
+        )?;
+        models = twitter_model_selection_for_run(&options, run_mode);
+    }
+    let media_selection_signature = twitter_media_selection_signature(&options);
+    let incremental_state = if phase_scope == "normal"
+        && models.media
+        && resume_cursors.is_empty()
+        && completed_phase_sections.is_empty()
+    {
+        load_twitter_incremental_state(connection, &context.source.id, &media_selection_signature)?
+    } else {
+        None
+    };
+    let mut request = twitter_connector::TwitterConnectorRequest {
         handle: handle.clone(),
         gallery_dl_executable: PathBuf::from(&executable),
         cookie_file,
         user_agent,
         profile_root: profile_root.clone(),
         cache_root,
-        models: twitter_model_selection(&options),
+        models,
+        resume_cursors,
+        incremental_cutoff_timestamp: incremental_state
+            .as_ref()
+            .map(|state| state.cutoff_timestamp),
         ledger_post_keys,
         ledger_media_keys,
         existing_relative_paths,
@@ -1181,7 +1230,9 @@ pub(super) fn execute_twitter_source_sync_with_connection(
             .user_id_hint
             .clone()
             .filter(|value| !value.trim().is_empty()),
-        abort_on_limit: options.abort_on_limit.unwrap_or(true),
+        // Politica central: o connector devolve o controle ao NinjaCrawler no
+        // primeiro 429; a fila persiste cursor, hold e retomada.
+        abort_on_limit: true,
         download_already_parsed: options.download_already_parsed.unwrap_or(true),
         sleep_timer_secs: options.sleep_timer_secs.unwrap_or(-1),
         sleep_timer_before_first_secs: options.sleep_timer_before_first_secs.unwrap_or(-2),
@@ -1219,38 +1270,179 @@ pub(super) fn execute_twitter_source_sync_with_connection(
     // closure antes de baixar. Se o id já pertence a outro perfil, cancela.
     let is_first_sync = context.source.last_synced_at.is_none();
     let dup_source_id = context.source.id.clone();
-    let execution = twitter_connector::run_profile_sync(
-        &request,
-        |progress| {
+    let run_connector = |request: &twitter_connector::TwitterConnectorRequest| {
+        twitter_connector::run_profile_sync(
+            request,
+            |progress| {
+                source_sync_runtime::report_source_sync_progress(
+                    &context.source.id,
+                    progress.progress_percent,
+                    Some(progress.label),
+                    Some(progress.detail),
+                    progress.indeterminate,
+                    progress.downloaded_items,
+                );
+            },
+            || cancel_token.load(Ordering::SeqCst),
+            |user_id| {
+                is_first_sync
+                    && find_source_with_same_user_id(connection, "twitter", user_id, &dup_source_id)
+                        .ok()
+                        .flatten()
+                        .is_some()
+            },
+        )
+    };
+    let mut execution = run_connector(&request);
+    let mut redirected_from_handle = None;
+    let redirect_handle = execution.as_ref().ok().and_then(|result| {
+        twitter_handle_redirect(
+            &handle,
+            result.resolved_handle.as_deref(),
+            result.rate_limited,
+        )
+    });
+    if let Some(new_handle) = redirect_handle {
+        let handle_updated_at = now_timestamp();
+        if let Err(error) = update_twitter_source_handle_after_sync(
+            connection,
+            &context.source.id,
+            &new_handle,
+            &handle_updated_at,
+        ) {
+            execution = Err(format!(
+                "Twitter handle change detected (@{handle} -> @{new_handle}) but updating the source failed: {error}"
+            ));
+        } else {
+            log_runtime_event(
+                layout,
+                "sync.profile",
+                "info",
+                RuntimeLogAnchor {
+                    account_id: Some(&context.account.id),
+                    provider: Some(&context.source.provider),
+                    source_id: Some(&context.source.id),
+                    source_handle: Some(&context.source.handle),
+                },
+                format!(
+                    "Twitter handle changed from '@{handle}' to '@{new_handle}'. Continuing the same sync automatically."
+                ),
+                None,
+            );
             source_sync_runtime::report_source_sync_progress(
                 &context.source.id,
-                progress.progress_percent,
-                Some(progress.label),
-                Some(progress.detail),
-                progress.indeterminate,
-                progress.downloaded_items,
+                Some(0),
+                Some("Handle updated".to_string()),
+                Some(format!(
+                    "Continuing automatically with the current handle @{new_handle}."
+                )),
+                true,
+                Some(0),
             );
-        },
-        || cancel_token.load(Ordering::SeqCst),
-        |user_id| {
-            is_first_sync
-                && find_source_with_same_user_id(connection, "twitter", user_id, &dup_source_id)
-                    .ok()
-                    .flatten()
-                    .is_some()
-        },
-    );
+            let resume_clear = clear_provider_sync_resume_scope(
+                connection,
+                "twitter",
+                &context.source.id,
+                &context.account.id,
+                phase_scope,
+            );
+            if let Err(error) = resume_clear {
+                execution = Err(format!(
+                    "Twitter handle was updated to @{new_handle}, but clearing the previous handle resume state failed: {error}"
+                ));
+            } else {
+                request.resume_cursors.clear();
+                request.models = twitter_model_selection_for_run(&options, run_mode);
+                request.incremental_cutoff_timestamp = None;
+                redirected_from_handle = Some(handle.clone());
+                handle = new_handle;
+                request.handle.clone_from(&handle);
+                execution = run_connector(&request);
+            }
+        }
+    }
     clear_source_sync_cancel_token(&context.source.id);
     let finished_at = now_timestamp();
 
+    let enabled_models = [
+        (request.models.media, "profile-media"),
+        (request.models.profile, "full-timeline"),
+        (request.models.search, "search"),
+        (request.models.likes, "likes"),
+    ]
+    .into_iter()
+    .filter_map(|(enabled, label)| enabled.then_some(label))
+    .collect::<Vec<_>>()
+    .join(",");
     let command_preview = format!(
-        "internal.twitter profile {} -> {}",
+        "internal.twitter models={} profile {} -> {}",
+        enabled_models,
         handle,
         profile_root.display()
     );
 
     let outcome = match execution {
-        Ok(result) => {
+        Ok(mut result) => {
+            if request.models.media {
+                result.manifest_summary.selection_signature =
+                    Some(media_selection_signature.clone());
+                if result.manifest_summary.incremental_scan {
+                    result.manifest_summary.full_scan_at = incremental_state
+                        .as_ref()
+                        .map(|state| state.full_scan_at.clone());
+                } else if !result.rate_limited
+                    && result.section_errors.is_empty()
+                    && result.manifest_summary.incomplete_post_count == 0
+                    && result
+                        .completed_sections
+                        .iter()
+                        .any(|section| section == "media")
+                {
+                    result.manifest_summary.full_scan_at = Some(finished_at.clone());
+                    result.manifest_summary.incremental_cutoff_timestamp = result
+                        .manifest_summary
+                        .newest_post_timestamp
+                        .map(|timestamp| {
+                            timestamp.saturating_sub(TWITTER_INCREMENTAL_OVERLAP_SECS)
+                        });
+                }
+            }
+            if result.rate_limited {
+                for section in &result.completed_sections {
+                    upsert_provider_sync_resume_state(
+                        connection,
+                        "twitter",
+                        &context.source.id,
+                        &context.account.id,
+                        phase_scope,
+                        section,
+                        "completed",
+                        None,
+                        &finished_at,
+                    )?;
+                }
+                for (section, cursor) in &result.resume_cursors {
+                    upsert_provider_sync_resume_state(
+                        connection,
+                        "twitter",
+                        &context.source.id,
+                        &context.account.id,
+                        phase_scope,
+                        section,
+                        "pending",
+                        Some(cursor.as_str()),
+                        &finished_at,
+                    )?;
+                }
+            } else {
+                clear_provider_sync_resume_scope(
+                    connection,
+                    "twitter",
+                    &context.source.id,
+                    &context.account.id,
+                    phase_scope,
+                )?;
+            }
             // Duplicado detectado no primeiro sync: remove o perfil recém-
             // adicionado, informa e cancela (nada foi baixado).
             if let Some(user_id) = result.duplicate_user_id.as_deref() {
@@ -1282,96 +1474,6 @@ pub(super) fn execute_twitter_source_sync_with_connection(
                 }
             }
 
-            // Renomeação de conta: nenhum tweet veio sob o handle salvo, mas
-            // `x.com/i/user/<userIdHint>` resolveu para outro screen_name.
-            // Atualiza o perfil; o próximo sync baixa as mídias sob o novo handle.
-            if let Some(new_handle) = result.resolved_handle.as_deref() {
-                let new_handle = sanitize_source_handle("twitter", new_handle)
-                    .trim_start_matches('@')
-                    .to_string();
-                if !new_handle.is_empty() && !handle.eq_ignore_ascii_case(&new_handle) {
-                    let summary = match update_twitter_source_handle_after_sync(
-                        connection,
-                        &context.source.id,
-                        &new_handle,
-                        &finished_at,
-                    ) {
-                        Ok(()) => {
-                            log_runtime_event(
-        layout,
-        "sync.profile",
-        "info",
-        RuntimeLogAnchor {
-            account_id: Some(&context.account.id),
-            provider: Some(&context.source.provider),
-            source_id: Some(&context.source.id),
-            source_handle: Some(&context.source.handle),
-        },
-        format!(
-                                    "Twitter handle changed from '@{handle}' to '@{new_handle}'. Source handle updated automatically."
-                                ),
-        None,
-    );
-                            format!(
-                                "Twitter handle changed: @{handle} → @{new_handle}. Profile updated; run the sync again to download media under the new handle."
-                            )
-                        }
-                        Err(error) => {
-                            log_runtime_event(
-        layout,
-        "sync.profile",
-        "warning",
-        RuntimeLogAnchor {
-            account_id: Some(&context.account.id),
-            provider: Some(&context.source.provider),
-            source_id: Some(&context.source.id),
-            source_handle: Some(&context.source.handle),
-        },
-        format!(
-                                    "Twitter handle change detected (@{handle} → @{new_handle}) but updating the source failed: {error}"
-                                ),
-        Some(error),
-    );
-                            format!(
-                                "Twitter handle change detected (@{handle} → @{new_handle}) but the source update failed."
-                            )
-                        }
-                    };
-                    let outcome = SourceSyncOutcome {
-                        tool: "internal.twitter".to_string(),
-                        status: "succeeded".to_string(),
-                        summary,
-                        command_preview: command_preview.clone(),
-                        manifest_summary_json: None,
-                        degraded_capabilities: Vec::new(),
-                        validation_error: None,
-                    };
-                    persist_source_sync_run(
-                        connection,
-                        context,
-                        &outcome,
-                        trigger,
-                        &started_at,
-                        &finished_at,
-                    )?;
-                    propagate_source_sync_account_health(
-                        connection,
-                        context,
-                        &outcome,
-                        &finished_at,
-                    )?;
-                    source_sync_runtime::report_source_sync_progress(
-                        &context.source.id,
-                        Some(100),
-                        Some("Handle updated".to_string()),
-                        Some(outcome.summary.clone()),
-                        false,
-                        None,
-                    );
-                    return Ok(outcome);
-                }
-            }
-
             upsert_provider_sync_post_ledger_entries(
                 connection,
                 "twitter",
@@ -1392,6 +1494,18 @@ pub(super) fn execute_twitter_source_sync_with_connection(
                     timestamp: &finished_at,
                 },
                 &result.downloaded_media,
+            )?;
+            upsert_provider_sync_media_ledger_entries(
+                connection,
+                &ProviderSyncMediaScope {
+                    provider: "twitter",
+                    source_id: &context.source.id,
+                    account_id: &context.account.id,
+                    source_handle: &handle,
+                    profile_root: &profile_root,
+                    timestamp: &finished_at,
+                },
+                &result.deduplicated_media_aliases,
             )?;
             // Preenche o post key na mídia já no disco (baixada antes de o key ser
             // gravado): casa pelo provider_media_key, só onde está vazio.
@@ -1460,33 +1574,92 @@ pub(super) fn execute_twitter_source_sync_with_connection(
                 "summary",
                 "manifest",
                 format!(
-                    "parsed_pages={} queued_assets={} downloaded_assets={} skipped_existing_posts={} skipped_existing_assets={}",
+                    "scan_mode={} cutoff={} parsed_pages={} queued_assets={} downloaded_assets={} skipped_existing_posts={} skipped_existing_assets={} skipped_duplicates={}",
+                    if result.manifest_summary.incremental_scan {
+                        "incremental"
+                    } else {
+                        "full"
+                    },
+                    result
+                        .manifest_summary
+                        .incremental_cutoff_timestamp
+                        .map_or_else(|| "none".to_string(), |value| value.to_string()),
                     result.manifest_summary.parsed_page_count,
                     result.manifest_summary.queued_asset_count,
                     downloaded,
                     result.manifest_summary.skipped_existing_post_count,
                     result.manifest_summary.skipped_existing_asset_count,
+                    result.manifest_summary.skipped_duplicate_asset_count,
                 ),
             );
-            let mut summary =
-                format_download_success_summary("Twitter sync succeeded.", downloaded);
+            let completed_with_warnings = twitter_sync_completed_with_warnings(
+                result.rate_limited || result.limit_aborted,
+                &result.section_errors,
+            );
+            let mut summary = format_download_success_summary(
+                if completed_with_warnings {
+                    "Twitter sync completed with warnings."
+                } else {
+                    "Twitter sync succeeded."
+                },
+                downloaded,
+            );
+            if let Some(previous_handle) = redirected_from_handle.as_deref() {
+                summary.push_str(&format!(
+                    " Profile handle updated automatically: @{previous_handle} -> @{handle}; sync continued in the same run."
+                ));
+            }
+            if let Some(breakdown) =
+                format_twitter_download_breakdown(&result.manifest_summary.downloaded_by_section)
+            {
+                summary.push_str(&breakdown);
+            }
             summary.push_str(&format_already_up_to_date_suffix(
                 result.manifest_summary.skipped_existing_post_count,
             ));
-            if result.limit_aborted {
-                summary.push_str(" Rate limit reached; remaining models were skipped.");
+            summary.push_str(&format_twitter_disabled_media_suffix(
+                &result.manifest_summary.skipped_disabled_by_type,
+            ));
+            if result.manifest_summary.skipped_duplicate_asset_count > 0 {
+                let count = result.manifest_summary.skipped_duplicate_asset_count;
+                summary.push_str(&format!(
+                    " {count} duplicate media {} reused from existing files.",
+                    if count == 1 { "item was" } else { "items were" }
+                ));
+            }
+            if result.manifest_summary.incomplete_post_count > 0 {
+                summary.push_str(&format!(
+                    " {} posts remain pending because enabled media could not be downloaded.",
+                    result.manifest_summary.incomplete_post_count
+                ));
+            }
+            if result.rate_limited {
+                let hold_until = set_twitter_sync_hold(
+                    connection,
+                    &context.account.id,
+                    Duration::seconds(TWITTER_RATE_LIMIT_HOLD_SECS),
+                    &finished_at,
+                )?;
+                summary.push_str(&format!(
+                    " Twitter rate limit reached; this Account is on hold until {}. The profile remains queued and will resume automatically.",
+                    hold_until.to_rfc3339()
+                ));
+            } else {
+                clear_twitter_sync_hold(connection, &context.account.id)?;
             }
             if !result.section_errors.is_empty() {
                 summary.push_str(" Warnings: ");
                 summary.push_str(&result.section_errors.join(" | "));
             }
 
+            let manifest_summary_json = serde_json::to_string(&result.manifest_summary)
+                .map_err(|error| error.to_string())?;
             SourceSyncOutcome {
                 tool: "internal.twitter".to_string(),
                 status: "succeeded".to_string(),
                 summary,
                 command_preview,
-                manifest_summary_json: None,
+                manifest_summary_json: Some(manifest_summary_json),
                 degraded_capabilities: Vec::new(),
                 validation_error: None,
             }
@@ -1540,6 +1713,320 @@ pub(super) fn execute_twitter_source_sync_with_connection(
         None,
     );
     Ok(outcome)
+}
+
+pub(super) fn load_provider_sync_resume_state(
+    connection: &Connection,
+    provider: &str,
+    source_id: &str,
+    account_id: &str,
+    scope: &str,
+) -> Result<(HashMap<String, String>, HashSet<String>), String> {
+    let mut statement = connection
+        .prepare(
+            "SELECT section, state, cursor
+             FROM provider_sync_resume_cursors
+             WHERE provider = ?1 AND source_id = ?2 AND account_id = ?3 AND scope = ?4",
+        )
+        .map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map(params![provider, source_id, account_id, scope], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+            ))
+        })
+        .map_err(|error| error.to_string())?;
+    let mut cursors = HashMap::new();
+    let mut completed = HashSet::new();
+    for row in rows {
+        let (section, state, cursor) = row.map_err(|error| error.to_string())?;
+        if state == "completed" {
+            completed.insert(section);
+        } else if let Some(cursor) = cursor.filter(|value| !value.trim().is_empty()) {
+            cursors.insert(section, cursor);
+        }
+    }
+    Ok((cursors, completed))
+}
+
+pub(super) fn upsert_provider_sync_resume_state(
+    connection: &Connection,
+    provider: &str,
+    source_id: &str,
+    account_id: &str,
+    scope: &str,
+    section: &str,
+    state: &str,
+    cursor: Option<&str>,
+    now: &str,
+) -> Result<(), String> {
+    connection
+        .execute(
+            "INSERT INTO provider_sync_resume_cursors
+                (provider, source_id, account_id, scope, section, state, cursor, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             ON CONFLICT(provider, source_id, account_id, scope, section)
+             DO UPDATE SET state = excluded.state,
+                           cursor = excluded.cursor,
+                           updated_at = excluded.updated_at",
+            params![provider, source_id, account_id, scope, section, state, cursor, now],
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+pub(super) fn clear_provider_sync_resume_scope(
+    connection: &Connection,
+    provider: &str,
+    source_id: &str,
+    account_id: &str,
+    scope: &str,
+) -> Result<(), String> {
+    connection
+        .execute(
+            "DELETE FROM provider_sync_resume_cursors
+             WHERE provider = ?1 AND source_id = ?2 AND account_id = ?3 AND scope = ?4",
+            params![provider, source_id, account_id, scope],
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+pub(super) fn set_twitter_sync_hold(
+    connection: &Connection,
+    account_id: &str,
+    retry_after: Duration,
+    now: &str,
+) -> Result<DateTime<Utc>, String> {
+    let until = parse_rfc3339_utc(now).unwrap_or_else(Utc::now) + retry_after;
+    connection
+        .execute(
+            "INSERT INTO provider_sync_account_holds
+                (provider, account_id, hold_until, reason, updated_at)
+             VALUES ('twitter', ?1, ?2, 'rate_limit', ?3)
+             ON CONFLICT(provider, account_id)
+             DO UPDATE SET hold_until = excluded.hold_until,
+                           reason = excluded.reason,
+                           updated_at = excluded.updated_at",
+            params![account_id, until.to_rfc3339(), now],
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(until)
+}
+
+pub(super) fn clear_twitter_sync_hold(
+    connection: &Connection,
+    account_id: &str,
+) -> Result<(), String> {
+    connection
+        .execute(
+            "DELETE FROM provider_sync_account_holds
+             WHERE provider = 'twitter' AND account_id = ?1",
+            params![account_id],
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+/// Hold interno consultado pelo worker. Expiracoes sao limpas aqui para que
+/// reiniciar o app nao deixe uma Account permanentemente bloqueada.
+pub fn active_source_sync_account_hold_until(
+    account_id: &str,
+    provider: &str,
+) -> Result<Option<DateTime<Utc>>, String> {
+    if !provider.eq_ignore_ascii_case("twitter") {
+        return Ok(None);
+    }
+    with_workspace(|connection, _| {
+        let until = connection
+            .query_row(
+                "SELECT hold_until FROM provider_sync_account_holds
+                 WHERE provider = 'twitter' AND account_id = ?1",
+                params![account_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|error| error.to_string())?
+            .as_deref()
+            .and_then(parse_rfc3339_utc);
+        if until.is_some_and(|value| value <= Utc::now()) {
+            clear_twitter_sync_hold(connection, account_id)?;
+            return Ok(None);
+        }
+        Ok(until)
+    })
+}
+
+pub(super) fn twitter_sync_completed_with_warnings(
+    limit_aborted: bool,
+    section_errors: &[String],
+) -> bool {
+    limit_aborted || !section_errors.is_empty()
+}
+
+pub(super) fn twitter_handle_redirect(
+    current_handle: &str,
+    resolved_handle: Option<&str>,
+    rate_limited: bool,
+) -> Option<String> {
+    if rate_limited {
+        return None;
+    }
+    let resolved = sanitize_source_handle("twitter", resolved_handle?)
+        .trim_start_matches('@')
+        .to_string();
+    (!resolved.is_empty() && !current_handle.eq_ignore_ascii_case(&resolved)).then_some(resolved)
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct TwitterIncrementalState {
+    pub(super) cutoff_timestamp: i64,
+    pub(super) full_scan_at: String,
+}
+
+pub(super) fn twitter_media_selection_signature(options: &TwitterSourceSyncOptions) -> String {
+    format!(
+        "v1:images={};videos={};gifs={};non-user={}",
+        options.download_images.unwrap_or(true),
+        options.download_videos.unwrap_or(true),
+        options.download_gifs.unwrap_or(true),
+        options.allow_non_user_tweets.unwrap_or(false),
+    )
+}
+
+pub(super) fn select_twitter_incremental_state(
+    summaries: &[twitter_connector::TwitterManifestSummary],
+    selection_signature: &str,
+    now: DateTime<Utc>,
+) -> Option<TwitterIncrementalState> {
+    summaries.iter().find_map(|summary| {
+        if summary.rate_limited
+            || summary.incomplete_post_count > 0
+            || summary.attempted_model_count == 0
+            || summary.completed_model_count != summary.attempted_model_count
+            || summary.selection_signature.as_deref() != Some(selection_signature)
+        {
+            return None;
+        }
+        let full_scan_at = summary.full_scan_at.as_deref()?;
+        let parsed = DateTime::parse_from_rfc3339(full_scan_at)
+            .ok()?
+            .with_timezone(&Utc);
+        let age = now.signed_duration_since(parsed).num_seconds();
+        if !(0..TWITTER_PERIODIC_FULL_SCAN_SECS).contains(&age) {
+            return None;
+        }
+        Some(TwitterIncrementalState {
+            cutoff_timestamp: summary.incremental_cutoff_timestamp?,
+            full_scan_at: full_scan_at.to_string(),
+        })
+    })
+}
+
+fn load_twitter_incremental_state(
+    connection: &Connection,
+    source_id: &str,
+    selection_signature: &str,
+) -> Result<Option<TwitterIncrementalState>, String> {
+    let mut statement = connection
+        .prepare(
+            "SELECT manifest_summary_json
+             FROM source_sync_runs
+             WHERE source_id = ?1 AND provider = 'twitter'
+               AND status = 'succeeded' AND manifest_summary_json IS NOT NULL
+             ORDER BY finished_at DESC
+             LIMIT 20",
+        )
+        .map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map([source_id], |row| row.get::<_, String>(0))
+        .map_err(|error| error.to_string())?;
+    let mut summaries = Vec::new();
+    for row in rows {
+        if let Ok(summary) = serde_json::from_str::<twitter_connector::TwitterManifestSummary>(
+            &row.map_err(|error| error.to_string())?,
+        ) {
+            summaries.push(summary);
+        }
+    }
+    Ok(select_twitter_incremental_state(
+        &summaries,
+        selection_signature,
+        Utc::now(),
+    ))
+}
+
+pub(super) fn format_twitter_download_breakdown(
+    downloaded_by_section: &std::collections::BTreeMap<String, u32>,
+) -> Option<String> {
+    if downloaded_by_section.len() < 2 {
+        return None;
+    }
+    let breakdown = downloaded_by_section
+        .iter()
+        .map(|(section, count)| {
+            let label = match section.as_str() {
+                "media" => "profile posts",
+                "timeline" => "full timeline backfill",
+                "search" => "search results",
+                "likes" => "liked posts",
+                _ => section.as_str(),
+            };
+            format!("{count} from {label}")
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(format!(" Breakdown: {breakdown}."))
+}
+
+pub(super) fn format_twitter_disabled_media_suffix(
+    skipped_by_type: &std::collections::BTreeMap<String, u32>,
+) -> String {
+    let entries = skipped_by_type
+        .iter()
+        .filter(|(_, count)| **count > 0)
+        .map(|(media_type, count)| (media_type.as_str(), *count))
+        .collect::<Vec<_>>();
+    let format_part = |media_type: &str, count: u32| {
+        let label = match (media_type, count) {
+            ("image", 1) => "image",
+            ("image", _) => "images",
+            ("video", 1) => "video",
+            ("video", _) => "videos",
+            ("gif", 1) => "GIF",
+            ("gif", _) => "GIFs",
+            _ => media_type,
+        };
+        format!("{count} {label}")
+    };
+    match entries.as_slice() {
+        [] => String::new(),
+        [(media_type, count)] => {
+            let item = format_part(media_type, *count);
+            let setting = match *media_type {
+                "image" => "image",
+                "video" => "video",
+                "gif" => "GIF",
+                other => other,
+            };
+            format!(
+                " {item} {} skipped because {setting} downloads are disabled.",
+                if *count == 1 { "was" } else { "were" }
+            )
+        }
+        _ => {
+            let parts = entries
+                .iter()
+                .map(|(media_type, count)| format_part(media_type, *count))
+                .collect::<Vec<_>>();
+            format!(
+                " {} were skipped because these media types are disabled.",
+                parts.join(", ")
+            )
+        }
+    }
 }
 /// Sync interno do TikTok: yt-dlp baixa os vídeos da timeline e o gallery-dl
 /// parseia os posts de fotos (slideshow), persistindo nos ledgers

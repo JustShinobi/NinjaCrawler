@@ -23,6 +23,7 @@
   "host_permissions": [
     "http://127.0.0.1:47219/*",
     "http://localhost:47219/*",
+    "https://instagram.com/*",
     "https://*.instagram.com/*",
     "https://x.com/*",
     "https://*.x.com/*",
