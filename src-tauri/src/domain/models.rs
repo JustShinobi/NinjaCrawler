@@ -622,6 +622,7 @@ pub struct SourceSyncQueueProviderStatus {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SourceSyncQueueItem {
+    pub job_key: String,
     pub source_id: String,
     pub provider: String,
     pub handle: String,

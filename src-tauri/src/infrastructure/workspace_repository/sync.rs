@@ -807,15 +807,16 @@ pub fn persist_source_sync_queue_job(job: &PersistedSourceSyncQueueJob) -> Resul
         connection
             .execute(
                 "INSERT INTO source_sync_queue_jobs
-                   (source_id, trigger, run_mode, sync_options_override_json, queued_at, order_index)
-                 VALUES (?1, ?2, ?3, ?4, ?5,
-                         (SELECT COALESCE(MAX(order_index), 0) + 1 FROM source_sync_queue_jobs))
-                 ON CONFLICT(source_id) DO UPDATE SET
+                   (job_key, source_id, trigger, run_mode, sync_options_override_json, queued_at, order_index)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6,
+                          (SELECT COALESCE(MAX(order_index), 0) + 1 FROM source_sync_queue_jobs))
+                 ON CONFLICT(job_key) DO UPDATE SET
                    trigger = excluded.trigger,
                    run_mode = excluded.run_mode,
                    sync_options_override_json = excluded.sync_options_override_json,
                    queued_at = excluded.queued_at",
                 params![
+                    job.job_key,
                     job.source_id,
                     job.trigger,
                     job.run_mode,
@@ -828,30 +829,30 @@ pub fn persist_source_sync_queue_job(job: &PersistedSourceSyncQueueJob) -> Resul
     })
 }
 /// Persiste a ordem manual (drag-and-drop) atribuindo `order_index` crescente
-/// conforme a posição em `ordered_source_ids`. Só afeta os jobs informados; a
+/// conforme a posição em `ordered_job_keys`. Só afeta os jobs informados; a
 /// ordem relativa por provider é o que importa no restore.
-pub fn persist_source_sync_queue_order(ordered_source_ids: &[String]) -> Result<(), String> {
-    if ordered_source_ids.is_empty() {
+pub fn persist_source_sync_queue_order(ordered_job_keys: &[String]) -> Result<(), String> {
+    if ordered_job_keys.is_empty() {
         return Ok(());
     }
     with_workspace(|connection, _| {
-        for (index, source_id) in ordered_source_ids.iter().enumerate() {
+        for (index, job_key) in ordered_job_keys.iter().enumerate() {
             connection
                 .execute(
-                    "UPDATE source_sync_queue_jobs SET order_index = ?2 WHERE source_id = ?1",
-                    params![source_id, index as i64],
+                    "UPDATE source_sync_queue_jobs SET order_index = ?2 WHERE job_key = ?1",
+                    params![job_key, index as i64],
                 )
                 .map_err(|error| error.to_string())?;
         }
         Ok(())
     })
 }
-pub fn remove_source_sync_queue_job(source_id: &str) -> Result<(), String> {
+pub fn remove_source_sync_queue_job(job_key: &str) -> Result<(), String> {
     with_workspace(|connection, _| {
         connection
             .execute(
-                "DELETE FROM source_sync_queue_jobs WHERE source_id = ?1",
-                params![source_id],
+                "DELETE FROM source_sync_queue_jobs WHERE job_key = ?1",
+                params![job_key],
             )
             .map_err(|error| error.to_string())?;
         Ok(())
@@ -861,7 +862,7 @@ pub fn load_persisted_source_sync_queue_jobs() -> Result<Vec<PersistedSourceSync
     with_workspace(|connection, _| {
         let mut statement = connection
             .prepare(
-                "SELECT source_id, trigger, run_mode, sync_options_override_json, queued_at
+                "SELECT job_key, source_id, trigger, run_mode, sync_options_override_json, queued_at
                  FROM source_sync_queue_jobs
                  ORDER BY order_index ASC, queued_at ASC",
             )
@@ -871,21 +872,23 @@ pub fn load_persisted_source_sync_queue_jobs() -> Result<Vec<PersistedSourceSync
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
-                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, String>(2)?,
                     row.get::<_, Option<String>>(3)?,
-                    row.get::<_, String>(4)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, String>(5)?,
                 ))
             })
             .map_err(|error| error.to_string())?;
 
         let mut jobs = Vec::new();
         for row in rows {
-            let (source_id, trigger, run_mode, override_json, queued_at) =
+            let (job_key, source_id, trigger, run_mode, override_json, queued_at) =
                 row.map_err(|error| error.to_string())?;
             let sync_options_override = override_json
                 .as_deref()
                 .and_then(|json| serde_json::from_str::<SourceSyncOptions>(json).ok());
             jobs.push(PersistedSourceSyncQueueJob {
+                job_key,
                 source_id,
                 trigger,
                 run_mode,

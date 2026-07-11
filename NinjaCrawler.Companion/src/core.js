@@ -238,7 +238,18 @@ export function normalizeHandle(value) {
 }
 
 export async function loadContext(tabUrl) {
-  const response = await fetch(`${API_BASE}/context?url=${encodeURIComponent(tabUrl ?? '')}`, {
+  const companionVersion = globalThis.chrome?.runtime?.getManifest?.()?.version ?? ''
+  const response = await fetch(`${API_BASE}/context?url=${encodeURIComponent(tabUrl ?? '')}&companionVersion=${encodeURIComponent(companionVersion)}`, {
+    method: 'GET',
+    cache: 'no-store',
+  })
+  if (!response.ok) throw new Error(await readError(response))
+  return response.json()
+}
+
+export async function loadHealth() {
+  const companionVersion = globalThis.chrome?.runtime?.getManifest?.()?.version ?? ''
+  const response = await fetch(`${API_BASE}/health?companionVersion=${encodeURIComponent(companionVersion)}`, {
     method: 'GET',
     cache: 'no-store',
   })
@@ -247,10 +258,11 @@ export async function loadContext(tabUrl) {
 }
 
 export async function loadContexts(tabUrls) {
+  const companionVersion = globalThis.chrome?.runtime?.getManifest?.()?.version ?? ''
   const response = await fetch(`${API_BASE}/contexts`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ urls: tabUrls }),
+    body: JSON.stringify({ urls: tabUrls, companionVersion }),
   })
   if (!response.ok) throw new Error(await companionApiError(response))
   return response.json()

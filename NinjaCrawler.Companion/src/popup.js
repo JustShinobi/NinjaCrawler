@@ -12,6 +12,7 @@ import {
   importAccount,
   loadContext,
   loadContexts,
+  loadHealth,
   previewAccount,
   syncSource,
 } from './core.js'
@@ -20,6 +21,12 @@ const elements = {
   profileSummary: document.querySelector('#profileSummary'),
   activeTabMeta: document.querySelector('#activeTabMeta'),
   statusPill: document.querySelector('#statusPill'),
+  updatePanel: document.querySelector('#updatePanel'),
+  updateTitle: document.querySelector('#updateTitle'),
+  updateMeta: document.querySelector('#updateMeta'),
+  downloadUpdateButton: document.querySelector('#downloadUpdateButton'),
+  openExtensionsButton: document.querySelector('#openExtensionsButton'),
+  viewReleaseButton: document.querySelector('#viewReleaseButton'),
   unsupportedPanel: document.querySelector('#unsupportedPanel'),
   offlinePanel: document.querySelector('#offlinePanel'),
   profilesPanel: document.querySelector('#profilesPanel'),
@@ -34,6 +41,7 @@ const elements = {
   profileForm: document.querySelector('#profileForm'),
   existingBanner: document.querySelector('#existingBanner'),
   existingMeta: document.querySelector('#existingMeta'),
+  targetMeta: document.querySelector('#targetMeta'),
   targetButton: document.querySelector('#targetButton'),
   singleVideoButton: document.querySelector('#singleVideoButton'),
   syncButton: document.querySelector('#syncButton'),
@@ -49,6 +57,10 @@ const elements = {
   cancelAccountImport: document.querySelector('#cancelAccountImport'),
   accountImportMessage: document.querySelector('#accountImportMessage'),
   message: document.querySelector('#message'),
+  themeSelect: document.querySelector('#themeSelect'),
+  syncShortcut: document.querySelector('#syncShortcut'),
+  storyShortcut: document.querySelector('#storyShortcut'),
+  configureShortcutsButton: document.querySelector('#configureShortcutsButton'),
 }
 
 const state = {
@@ -58,6 +70,7 @@ const state = {
   target: null,
   video: null,
   context: null,
+  compatibility: null,
   accountCapture: null,
   accountPreview: null,
   profiles: [],
@@ -70,6 +83,8 @@ boot()
 
 async function boot() {
   bindEvents()
+  await loadPreferences()
+  await renderShortcuts()
   const activeTabPromise = chrome.tabs.query({ active: true, currentWindow: true })
   const allTabsPromise = chrome.tabs.query({})
   const [tab] = await activeTabPromise
@@ -80,15 +95,26 @@ async function boot() {
   state.video = detectVideoFromUrl(tab?.url)
 
   renderActiveLoading()
+  const compatibilityTask = loadCompatibility()
   const profilesTask = loadOpenProfiles(allTabsPromise)
   const activeContextTask = loadActiveContext()
-  await Promise.allSettled([profilesTask, activeContextTask])
+  await Promise.allSettled([compatibilityTask, profilesTask, activeContextTask])
+}
+
+async function loadCompatibility() {
+  try {
+    const health = await loadHealth()
+    rememberCompatibility(health?.companionCompatibility)
+  } catch {
+    // The active context still owns desktop-offline feedback for supported tabs.
+  }
 }
 
 async function loadActiveContext() {
   if (!state.provider) return
   try {
     state.context = await loadContext(state.tab.url)
+    rememberCompatibility(state.context?.companionCompatibility)
     renderContext()
   } catch (error) {
     showOffline(error)
@@ -119,6 +145,7 @@ async function loadOpenProfiles(allTabsPromise) {
     state.profiles.forEach((profile, index) => {
       profile.context = contexts[index]
     })
+    rememberCompatibility(contexts[0]?.companionCompatibility)
     state.profilesAreLoading = false
     state.profilesError = ''
     renderProfiles()
@@ -144,6 +171,7 @@ function renderActiveLoading() {
   elements.offlinePanel.classList.add('hidden')
   elements.profileForm.classList.toggle('hidden', !activeSupported)
   elements.existingBanner.classList.add('hidden')
+  elements.targetMeta.classList.add('hidden')
   elements.accountImportPanel.classList.add('hidden')
 
   if (!activeSupported) {
@@ -180,6 +208,11 @@ function bindEvents() {
   elements.accountDestination?.addEventListener('change', () => renderAccountDestination())
   elements.selectAllButton?.addEventListener('click', () => toggleSelectAll())
   elements.addSelectedButton?.addEventListener('click', () => submitSelectedProfiles())
+  elements.themeSelect?.addEventListener('change', () => saveTheme(elements.themeSelect.value))
+  elements.configureShortcutsButton?.addEventListener('click', () => openShortcutSettings())
+  elements.downloadUpdateButton?.addEventListener('click', () => openCompatibilityUrl('downloadUrl'))
+  elements.viewReleaseButton?.addEventListener('click', () => openCompatibilityUrl('releasePageUrl'))
+  elements.openExtensionsButton?.addEventListener('click', () => openChromeExtensions())
 }
 
 function renderProfiles() {
@@ -338,15 +371,16 @@ function renderContext() {
   } else if (existing) {
     setStatus('good', target ? 'Story' : 'Added')
     elements.existingBanner.classList.remove('hidden')
-    elements.existingMeta.textContent = target
-      ? `${existing.handle} · selected story ${target.storyId}`
-      : `${existing.handle} · ${existing.lastSyncedAt ? `Last sync ${formatDate(existing.lastSyncedAt)}` : 'Never synced'}`
+    elements.existingMeta.textContent = `${existing.handle} · ${existing.lastSyncedAt ? `Last sync ${formatDate(existing.lastSyncedAt)}` : 'Never synced'}`
+    elements.targetMeta.textContent = target ? `Selected story ${target.storyId}` : ''
+    elements.targetMeta.classList.toggle('hidden', !target)
     elements.targetButton?.classList.toggle('hidden', !target)
     elements.syncButton.classList.remove('hidden')
     elements.addButton.classList.add('hidden')
   } else {
     setStatus('ready', 'Ready')
     elements.existingBanner.classList.add('hidden')
+    elements.targetMeta.classList.add('hidden')
     elements.targetButton?.classList.add('hidden')
     elements.syncButton.classList.add('hidden')
     elements.addButton.classList.remove('hidden')
@@ -608,6 +642,45 @@ function setMessage(text, kind = '') {
   elements.message.className = `message ${kind}`.trim()
 }
 
+function rememberCompatibility(compatibility) {
+  if (!compatibility) return
+  state.compatibility = compatibility
+  renderCompatibility()
+}
+
+function renderCompatibility() {
+  const compatibility = state.compatibility
+  const needsUpdate = compatibility?.status === 'update_available'
+    || compatibility?.status === 'incompatible'
+  elements.updatePanel.classList.toggle('hidden', !needsUpdate)
+  if (!needsUpdate) return
+
+  const installed = compatibility.installedVersion || chrome.runtime.getManifest().version
+  elements.updateTitle.textContent = compatibility.status === 'incompatible'
+    ? 'Companion update required'
+    : 'Companion update available'
+  elements.updateMeta.textContent = `Installed ${installed} · available ${compatibility.availableVersion}`
+}
+
+async function openCompatibilityUrl(field) {
+  const url = state.compatibility?.[field]
+  if (!url) return
+  try {
+    await chrome.tabs.create({ url })
+  } catch (error) {
+    setMessage(error?.message || 'Could not open the Companion update.', 'error')
+  }
+}
+
+async function openChromeExtensions() {
+  try {
+    await chrome.tabs.create({ url: 'chrome://extensions' })
+    window.close()
+  } catch (error) {
+    setMessage(error?.message || 'Could not open Chrome Extensions.', 'error')
+  }
+}
+
 function formatDate(value) {
   try {
     return new Intl.DateTimeFormat(undefined, {
@@ -616,5 +689,40 @@ function formatDate(value) {
     }).format(new Date(value))
   } catch {
     return value
+  }
+}
+
+async function loadPreferences() {
+  const { theme = 'system' } = await chrome.storage.sync.get({ theme: 'system' })
+  elements.themeSelect.value = theme
+  applyTheme(theme)
+}
+
+async function saveTheme(theme) {
+  applyTheme(theme)
+  await chrome.storage.sync.set({ theme })
+}
+
+function applyTheme(theme) {
+  if (theme === 'light' || theme === 'dark') {
+    document.documentElement.dataset.theme = theme
+  } else {
+    delete document.documentElement.dataset.theme
+  }
+}
+
+async function renderShortcuts() {
+  const commands = await chrome.commands.getAll()
+  const shortcuts = new Map(commands.map((command) => [command.name, command.shortcut]))
+  elements.syncShortcut.textContent = shortcuts.get('sync-profile') || 'Not set'
+  elements.storyShortcut.textContent = shortcuts.get('download-story') || 'Not set'
+}
+
+async function openShortcutSettings() {
+  try {
+    await chrome.tabs.create({ url: 'chrome://extensions/shortcuts' })
+    window.close()
+  } catch (error) {
+    setMessage(error?.message || 'Could not open Chrome shortcut settings.', 'error')
   }
 }

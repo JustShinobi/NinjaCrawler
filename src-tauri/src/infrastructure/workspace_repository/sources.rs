@@ -405,6 +405,7 @@ pub struct SourceSyncQueueItemSeed {
 /// fechamento do app.
 #[derive(Clone)]
 pub struct PersistedSourceSyncQueueJob {
+    pub job_key: String,
     pub source_id: String,
     pub trigger: String,
     pub run_mode: Option<String>,

@@ -40,6 +40,7 @@ const QUEUED_COLLAPSE_LIMIT = 6
 
 interface QueueLiveTask {
   key: string
+  queueKey?: string
   sourceId: string
   provider: ProviderKey
   providerLabel: string
@@ -184,8 +185,10 @@ function formatDeleteModeDetail(mode: 'user_only' | 'with_media'): string {
 }
 
 function createSyncLiveTask(item: SourceSyncQueueItem): QueueLiveTask {
+  const jobKey = item.jobKey ?? item.sourceId
   return {
-    key: `sync-${item.state}-${item.sourceId}`,
+    key: `sync-${item.state}-${jobKey}`,
+    queueKey: jobKey,
     sourceId: item.sourceId,
     provider: item.provider,
     providerLabel: providerDisplayName(item.provider),
@@ -601,7 +604,9 @@ export function SourceSyncQueueWindowPage() {
         if (override) {
           const rank = new Map(override.map((id, index) => [id, index]))
           queued = [...queued].sort(
-            (a, b) => (rank.get(a.sourceId) ?? Infinity) - (rank.get(b.sourceId) ?? Infinity),
+            (a, b) =>
+              (rank.get(a.queueKey ?? a.sourceId) ?? Infinity)
+              - (rank.get(b.queueKey ?? b.sourceId) ?? Infinity),
           )
         }
         return {
@@ -631,7 +636,7 @@ export function SourceSyncQueueWindowPage() {
       for (const provider of keys) {
         const currentIds = syncStatus.queuedItems
           .filter((item) => item.provider === provider)
-          .map((item) => item.sourceId)
+          .map((item) => item.jobKey ?? item.sourceId)
         const overrideIds = prev[provider]
         const sameSet =
           currentIds.length === overrideIds.length && currentIds.every((id) => overrideIds.includes(id))
@@ -672,17 +677,18 @@ export function SourceSyncQueueWindowPage() {
   const activeProviderCount = lanes.filter((lane) => lane.running.length > 0).length
   const queuedProviderCount = lanes.filter((lane) => lane.queued.length > 0).length
 
-  // Lista de source ids (apenas Sync em fila) de uma raia, na ordem exibida.
+  // Lista de job keys (apenas Sync em fila) de uma raia, na ordem exibida.
   const laneQueuedSyncIds = (provider: ProviderKey): string[] => {
-    const lane = lanes.find((entry) => entry.provider === provider)
-    return lane ? lane.queued.filter((task) => task.operation === 'Sync').map((task) => task.sourceId) : []
+    return syncStatus.queuedItems
+      .filter((item) => item.provider === provider)
+      .map((item) => item.jobKey ?? item.sourceId)
   }
 
   // Move um job em fila uma posição para cima (-1) ou para baixo (+1), trocando
   // com o vizinho. Atualiza otimista e persiste a nova ordem no backend.
-  const moveQueued = (provider: ProviderKey, sourceId: string, direction: -1 | 1) => {
+  const moveQueued = (provider: ProviderKey, jobKey: string, direction: -1 | 1) => {
     const ids = laneQueuedSyncIds(provider)
-    const index = ids.indexOf(sourceId)
+    const index = ids.indexOf(jobKey)
     const target = index + direction
     if (index < 0 || target < 0 || target >= ids.length) {
       return
@@ -710,7 +716,7 @@ export function SourceSyncQueueWindowPage() {
     let canMoveDown = false
     if (reorderable) {
       const ids = laneQueuedSyncIds(task.provider)
-      const index = ids.indexOf(task.sourceId)
+      const index = ids.indexOf(task.queueKey ?? task.sourceId)
       canMoveUp = index > 0
       canMoveDown = index >= 0 && index < ids.length - 1
     }
@@ -761,7 +767,7 @@ export function SourceSyncQueueWindowPage() {
               <button
                 className="ghost-button queue-reorder-button"
                 disabled={!canMoveUp}
-                onClick={() => moveQueued(task.provider, task.sourceId, -1)}
+                onClick={() => moveQueued(task.provider, task.queueKey ?? task.sourceId, -1)}
                 type="button"
                 title="Move up"
                 aria-label="Move up in queue"
@@ -771,7 +777,7 @@ export function SourceSyncQueueWindowPage() {
               <button
                 className="ghost-button queue-reorder-button"
                 disabled={!canMoveDown}
-                onClick={() => moveQueued(task.provider, task.sourceId, 1)}
+                onClick={() => moveQueued(task.provider, task.queueKey ?? task.sourceId, 1)}
                 type="button"
                 title="Move down"
                 aria-label="Move down in queue"

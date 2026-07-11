@@ -671,6 +671,7 @@ export interface SourceSyncQueueProviderStatus {
 }
 
 export interface SourceSyncQueueItem {
+  jobKey?: string
   sourceId: string
   provider: ProviderKey
   handle: string

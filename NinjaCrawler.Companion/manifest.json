@@ -30,5 +30,13 @@
     "https://*.twitter.com/*",
     "https://tiktok.com/*",
     "https://*.tiktok.com/*"
-  ]
+  ],
+  "commands": {
+    "sync-profile": {
+      "description": "Sync the profile in the active tab"
+    },
+    "download-story": {
+      "description": "Download the story in the active tab"
+    }
+  }
 }

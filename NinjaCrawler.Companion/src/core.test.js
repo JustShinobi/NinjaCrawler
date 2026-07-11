@@ -1,5 +1,12 @@
-import { describe, expect, it } from 'vitest'
-import { collectDetectedProfiles, detectTargetFromUrl, detectVideoFromUrl } from './core.js'
+import { describe, expect, it, vi } from 'vitest'
+import {
+  collectDetectedProfiles,
+  detectTargetFromUrl,
+  detectVideoFromUrl,
+  loadContext,
+  loadContexts,
+  loadHealth,
+} from './core.js'
 
 describe('collectDetectedProfiles', () => {
   it('collects supported profiles across tabs and removes duplicates', () => {
@@ -88,5 +95,33 @@ describe('detectVideoFromUrl', () => {
     expect(detectVideoFromUrl('https://example.com/video/1')).toBeNull()
     expect(detectVideoFromUrl('not a url')).toBeNull()
     expect(detectVideoFromUrl('')).toBeNull()
+  })
+})
+
+describe('Companion version reporting', () => {
+  it('reports the installed version without requiring a custom CORS header', async () => {
+    const previousChrome = globalThis.chrome
+    globalThis.chrome = { runtime: { getManifest: () => ({ version: '0.3.1' }) } }
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true,
+      json: async () => ({}),
+    })
+
+    try {
+      await loadContext('https://www.instagram.com/example/')
+      await loadContexts(['https://www.instagram.com/example/'])
+      await loadHealth()
+
+      expect(fetchMock.mock.calls[0][0]).toContain('companionVersion=0.3.1')
+      expect(JSON.parse(fetchMock.mock.calls[1][1].body)).toMatchObject({
+        companionVersion: '0.3.1',
+      })
+      expect(fetchMock.mock.calls[0][1].headers).toBeUndefined()
+      expect(fetchMock.mock.calls[2][0]).toContain('/health?companionVersion=0.3.1')
+    } finally {
+      fetchMock.mockRestore()
+      if (previousChrome) globalThis.chrome = previousChrome
+      else delete globalThis.chrome
+    }
   })
 })

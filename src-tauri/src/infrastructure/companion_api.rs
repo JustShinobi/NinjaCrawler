@@ -18,6 +18,8 @@ use tauri::AppHandle;
 const BIND_ADDR: &str = "127.0.0.1:47219";
 const API_PREFIX: &str = "/ninjacrawler-companion/v1";
 const MAX_BODY_BYTES: usize = 256 * 1024;
+const MINIMUM_COMPANION_VERSION: &str = "0.3.0";
+const GITHUB_RELEASES_URL: &str = "https://github.com/MetalDevOps/NinjaCrawler/releases";
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -47,6 +49,18 @@ struct CompanionContext {
     detected_profile: Option<DetectedProfile>,
     detected_target: Option<DetectedTarget>,
     existing_source: Option<SourceProfile>,
+    companion_compatibility: CompanionCompatibility,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CompanionCompatibility {
+    installed_version: Option<String>,
+    available_version: String,
+    minimum_version: &'static str,
+    status: &'static str,
+    release_page_url: String,
+    download_url: String,
 }
 
 #[derive(Deserialize)]
@@ -66,6 +80,8 @@ struct AddSourcesRequest {
 #[derive(Deserialize)]
 struct ContextsRequest {
     urls: Vec<String>,
+    #[serde(default)]
+    companion_version: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -236,18 +252,23 @@ fn route_request(app: AppHandle, request: HttpRequest) -> Vec<u8> {
     }
 
     match (request.method.as_str(), request.path.as_str()) {
-        ("GET", path) if path == format!("{API_PREFIX}/health") => json_response(
-            200,
-            &json!({
-                "app": "NinjaCrawler",
-                "companion": "NinjaCrawler Companion",
-                "apiVersion": 1,
-                "status": "ok"
-            }),
-        ),
+        ("GET", path) if path == format!("{API_PREFIX}/health") => {
+            let companion_version = request.query.get("companionVersion").map(String::as_str);
+            json_response(
+                200,
+                &json!({
+                    "app": "NinjaCrawler",
+                    "companion": "NinjaCrawler Companion",
+                    "apiVersion": 1,
+                    "status": "ok",
+                    "companionCompatibility": companion_compatibility(companion_version)
+                }),
+            )
+        }
         ("GET", path) if path == format!("{API_PREFIX}/context") => {
             let url = request.query.get("url").map(String::as_str);
-            match build_context(url) {
+            let companion_version = request.query.get("companionVersion").map(String::as_str);
+            match build_context(url, companion_version) {
                 Ok(context) => json_response(200, &context),
                 Err(error) => error_response(500, &error),
             }
@@ -348,26 +369,35 @@ fn ensure_sensitive_companion_request(request: &HttpRequest) -> Result<(), Strin
     Ok(())
 }
 
-fn build_context(url: Option<&str>) -> Result<CompanionContext, String> {
+fn build_context(
+    url: Option<&str>,
+    installed_companion_version: Option<&str>,
+) -> Result<CompanionContext, String> {
     let snapshot = workspace_repository::bootstrap_workspace()?;
-    Ok(build_context_from_snapshot(&snapshot, url))
+    Ok(build_context_from_snapshot(
+        &snapshot,
+        url,
+        installed_companion_version,
+    ))
 }
 
 fn build_contexts(input: ContextsRequest) -> Result<Vec<CompanionContext>, String> {
     if input.urls.len() > 500 {
         return Err("A maximum of 500 tab URLs can be checked at once.".to_string());
     }
+    let installed_companion_version = input.companion_version.as_deref();
     let snapshot = workspace_repository::bootstrap_workspace()?;
     Ok(input
         .urls
         .iter()
-        .map(|url| build_context_from_snapshot(&snapshot, Some(url)))
+        .map(|url| build_context_from_snapshot(&snapshot, Some(url), installed_companion_version))
         .collect())
 }
 
 fn build_context_from_snapshot(
     snapshot: &WorkspaceSnapshot,
     url: Option<&str>,
+    installed_companion_version: Option<&str>,
 ) -> CompanionContext {
     let detected_profile = url.and_then(detect_profile_from_url);
     let detected_target = url.and_then(detect_target_from_url);
@@ -381,7 +411,62 @@ fn build_context_from_snapshot(
         detected_profile,
         detected_target,
         existing_source,
+        companion_compatibility: companion_compatibility(installed_companion_version),
     }
+}
+
+fn bundled_companion_version() -> String {
+    serde_json::from_str::<serde_json::Value>(include_str!(
+        "../../../NinjaCrawler.Companion/manifest.json"
+    ))
+    .ok()
+    .and_then(|manifest| manifest.get("version")?.as_str().map(str::to_string))
+    .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string())
+}
+
+fn companion_compatibility(installed_version: Option<&str>) -> CompanionCompatibility {
+    let available_version = bundled_companion_version();
+    let status = match installed_version {
+        Some(version) if version_is_older(version, MINIMUM_COMPANION_VERSION) => "incompatible",
+        Some(version) if version_is_older(version, &available_version) => "update_available",
+        Some(version) if parse_version(version).is_some() => "current",
+        _ => "unknown",
+    };
+    let release_version = env!("CARGO_PKG_VERSION");
+    let release_page_url = format!("{GITHUB_RELEASES_URL}/tag/v{release_version}");
+    let download_url = format!(
+        "{GITHUB_RELEASES_URL}/download/v{release_version}/NinjaCrawler-Companion-{available_version}.zip"
+    );
+
+    CompanionCompatibility {
+        installed_version: installed_version.map(str::to_string),
+        available_version,
+        minimum_version: MINIMUM_COMPANION_VERSION,
+        status,
+        release_page_url,
+        download_url,
+    }
+}
+
+fn version_is_older(left: &str, right: &str) -> bool {
+    match (parse_version(left), parse_version(right)) {
+        (Some(left), Some(right)) => left < right,
+        _ => false,
+    }
+}
+
+fn parse_version(value: &str) -> Option<[u64; 4]> {
+    let parts = value
+        .split('.')
+        .map(str::parse::<u64>)
+        .collect::<Result<Vec<_>, _>>()
+        .ok()?;
+    if parts.is_empty() || parts.len() > 4 {
+        return None;
+    }
+    let mut normalized = [0_u64; 4];
+    normalized[..parts.len()].copy_from_slice(&parts);
+    Some(normalized)
 }
 
 fn add_source(app: AppHandle, input: AddSourceRequest) -> Result<serde_json::Value, String> {
@@ -964,6 +1049,34 @@ mod tests {
         for url in cases {
             assert!(detect_target_from_url(url).is_none(), "{url}");
         }
+    }
+
+    #[test]
+    fn compares_companion_versions_numerically() {
+        assert!(version_is_older("0.3.9", "0.10.0"));
+        assert!(!version_is_older("0.3", "0.3.0"));
+        assert!(!version_is_older("1.0.0", "0.10.0"));
+        assert_eq!(parse_version("invalid"), None);
+    }
+
+    #[test]
+    fn classifies_companion_compatibility_and_builds_release_links() {
+        let available = bundled_companion_version();
+        let current = companion_compatibility(Some(&available));
+        assert_eq!(current.status, "current");
+        assert_eq!(
+            current.installed_version.as_deref(),
+            Some(available.as_str())
+        );
+        assert!(current
+            .download_url
+            .contains(&format!("NinjaCrawler-Companion-{available}.zip")));
+
+        assert_eq!(
+            companion_compatibility(Some("0.2.9")).status,
+            "incompatible"
+        );
+        assert_eq!(companion_compatibility(None).status, "unknown");
     }
 
     #[test]

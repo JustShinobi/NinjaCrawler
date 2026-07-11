@@ -268,8 +268,8 @@ describe('SourceSyncQueueWindowPage', () => {
         queuedCount: 2,
         runningCount: 0,
         queuedItems: [
-          { sourceId: 'q1', provider: 'instagram', handle: '@q1', state: 'queued', queuedAt: '2026-03-11T12:00:00Z' },
-          { sourceId: 'q2', provider: 'instagram', handle: '@q2', state: 'queued', queuedAt: '2026-03-11T12:01:00Z' },
+          { jobKey: 'source-1:instagram-story:111', sourceId: 'source-1', provider: 'instagram', handle: '@q1', state: 'queued', queuedAt: '2026-03-11T12:00:00Z' },
+          { jobKey: 'source-1:instagram-story:222', sourceId: 'source-1', provider: 'instagram', handle: '@q2', state: 'queued', queuedAt: '2026-03-11T12:01:00Z' },
         ],
         runningItems: [],
       }),
@@ -284,7 +284,10 @@ describe('SourceSyncQueueWindowPage', () => {
     fireEvent.click(within(firstRow).getByRole('button', { name: /move down in queue/i }))
 
     await waitFor(() => {
-      expect(bridgeMocks.reorderSourceSyncProviderQueue).toHaveBeenCalledWith('instagram', ['q2', 'q1'])
+      expect(bridgeMocks.reorderSourceSyncProviderQueue).toHaveBeenCalledWith('instagram', [
+        'source-1:instagram-story:222',
+        'source-1:instagram-story:111',
+      ])
     })
   })
 

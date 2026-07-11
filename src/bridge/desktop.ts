@@ -1037,6 +1037,7 @@ function normalizeSourceSyncQueueItem(value: unknown): SourceSyncQueueItem | nul
     : undefined
 
   return {
+    jobKey: optionalStringValue(value, ['jobKey', 'job_key']),
     sourceId: stringValue(value, ['sourceId', 'source_id'], ''),
     provider: normalizeProviderKey(pick(value, 'provider', 'providerKey', 'provider_key')),
     handle: stringValue(value, ['handle'], ''),

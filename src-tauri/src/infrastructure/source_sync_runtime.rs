@@ -24,8 +24,34 @@ fn is_force_imported_backfill(run_mode: Option<&str>) -> bool {
     run_mode.is_some_and(|value| value.eq_ignore_ascii_case("force_imported_backfill"))
 }
 
+fn source_sync_job_key(
+    source_id: &str,
+    sync_options_override: Option<&SourceSyncOptions>,
+) -> String {
+    if let Some(story_id) = sync_options_override
+        .and_then(|options| options.instagram.as_ref())
+        .and_then(|options| options.target_story_media_id.as_deref())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return format!("{source_id}:instagram-story:{story_id}");
+    }
+
+    if let Some(target_url) = sync_options_override
+        .and_then(|options| options.tiktok.as_ref())
+        .and_then(|options| options.target_video_url.as_deref())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return format!("{source_id}:tiktok-story:{target_url}");
+    }
+
+    source_id.to_string()
+}
+
 #[derive(Clone)]
 struct SourceSyncQueueJob {
+    job_key: String,
     source_id: String,
     provider: String,
     handle: String,
@@ -65,7 +91,7 @@ struct SourceSyncQueueState {
     /// providers diferentes baixam em paralelo (ex.: TikTok e Instagram ao mesmo
     /// tempo), enquanto dentro de um provider segue sequencial.
     queues: HashMap<String, VecDeque<SourceSyncQueueJob>>,
-    queued_ids: HashSet<String>,
+    queued_keys: HashSet<String>,
     /// Job ativo por provider (no máximo um por provider).
     active_jobs: HashMap<String, SourceSyncQueueJob>,
     /// Providers com worker vivo.
@@ -144,20 +170,20 @@ fn log_source_sync_event(
 }
 
 fn enqueue_job(state: &mut SourceSyncQueueState, job: SourceSyncQueueJob) -> QueueEnqueueResult {
-    let source_id = job.source_id.clone();
+    let job_key = job.job_key.clone();
     let provider = job.provider.clone();
     let force_imported_backfill = is_force_imported_backfill(job.run_mode.as_deref());
     let already_active = state
         .active_jobs
         .get(&provider)
-        .is_some_and(|active| active.source_id == source_id);
+        .is_some_and(|active| active.job_key == job_key);
     let mut promoted_existing_job = false;
 
-    if let Some(existing_job) = state.queues.get_mut(&provider).and_then(|queue| {
-        queue
-            .iter_mut()
-            .find(|queued| queued.source_id == source_id)
-    }) {
+    if let Some(existing_job) = state
+        .queues
+        .get_mut(&provider)
+        .and_then(|queue| queue.iter_mut().find(|queued| queued.job_key == job_key))
+    {
         if force_imported_backfill {
             existing_job.trigger = job.trigger.clone();
             existing_job.run_mode = job.run_mode.clone();
@@ -166,14 +192,14 @@ fn enqueue_job(state: &mut SourceSyncQueueState, job: SourceSyncQueueJob) -> Que
         }
     }
 
-    let already_queued = state.queued_ids.contains(&source_id);
+    let already_queued = state.queued_keys.contains(&job_key);
     let queued_now = if !already_queued && (!already_active || force_imported_backfill) {
         state
             .queues
             .entry(provider.clone())
             .or_default()
             .push_back(job);
-        state.queued_ids.insert(source_id);
+        state.queued_keys.insert(job_key);
         true
     } else {
         false
@@ -223,6 +249,7 @@ pub fn enqueue_source_sync(
     )?;
 
     let job = SourceSyncQueueJob {
+        job_key: source_sync_job_key(&seed.source_id, input.sync_options_override.as_ref()),
         source_id: seed.source_id.clone(),
         provider: seed.provider.clone(),
         handle: seed.handle.clone(),
@@ -240,6 +267,7 @@ pub fn enqueue_source_sync(
     };
 
     let queued_at = job.queued_at.clone();
+    let job_key = job.job_key.clone();
     let queue_result = {
         let mut state = queue_state()
             .lock()
@@ -252,6 +280,7 @@ pub fn enqueue_source_sync(
     if queue_result.queued_now || queue_result.promoted_existing_job {
         let _ = workspace_repository::persist_source_sync_queue_job(
             &workspace_repository::PersistedSourceSyncQueueJob {
+                job_key,
                 source_id: seed.source_id.clone(),
                 trigger: trigger.clone(),
                 run_mode: input.run_mode.clone(),
@@ -329,12 +358,13 @@ pub fn restore_persisted_queue(app: &AppHandle) {
             Ok(seed) => seed,
             Err(_) => {
                 // Perfil removido/inválido desde o fechamento: descarta o job.
-                let _ = workspace_repository::remove_source_sync_queue_job(&persisted.source_id);
+                let _ = workspace_repository::remove_source_sync_queue_job(&persisted.job_key);
                 continue;
             }
         };
 
         let job = SourceSyncQueueJob {
+            job_key: persisted.job_key.clone(),
             source_id: seed.source_id.clone(),
             provider: seed.provider.clone(),
             handle: seed.handle.clone(),
@@ -500,7 +530,7 @@ fn dequeue_next(provider: &str) -> Result<Option<SourceSyncQueueJob>, String> {
         .and_then(|queue| queue.pop_front());
     match next {
         Some(mut job) => {
-            state.queued_ids.remove(&job.source_id);
+            state.queued_keys.remove(&job.job_key);
             job.started_at = Some(Utc::now().to_rfc3339());
             job.progress_label = Some("Starting download".to_string());
             job.progress_detail = Some("Connector runtime is preparing source sync.".to_string());
@@ -539,12 +569,12 @@ fn dequeue_next(provider: &str) -> Result<Option<SourceSyncQueueJob>, String> {
 
 fn finish_active(job: &SourceSyncQueueJob, status: &str, summary: &str) {
     // O job terminou (sucesso ou falha): sai da persistência da fila.
-    let _ = workspace_repository::remove_source_sync_queue_job(&job.source_id);
+    let _ = workspace_repository::remove_source_sync_queue_job(&job.job_key);
     if let Ok(mut state) = queue_state().lock() {
         if state
             .active_jobs
             .get(&job.provider)
-            .is_some_and(|active| active.source_id == job.source_id)
+            .is_some_and(|active| active.job_key == job.job_key)
         {
             state.active_jobs.remove(&job.provider);
         }
@@ -746,7 +776,7 @@ pub fn cancel_source_sync_profile(
             *queue = retained;
         }
         for job in &removed_jobs {
-            state.queued_ids.remove(&job.source_id);
+            state.queued_keys.remove(&job.job_key);
         }
 
         if let Some(active_job) = state.active_job_for_source_mut(&source_id) {
@@ -756,7 +786,7 @@ pub fn cancel_source_sync_profile(
     }
 
     for job in removed_jobs {
-        let _ = workspace_repository::remove_source_sync_queue_job(&job.source_id);
+        let _ = workspace_repository::remove_source_sync_queue_job(&job.job_key);
         log_source_sync_event(
             "sync.queue",
             "warning",
@@ -830,7 +860,7 @@ pub fn cancel_source_sync_provider(
             *queue = retained;
         }
         for job in &removed_jobs {
-            state.queued_ids.remove(&job.source_id);
+            state.queued_keys.remove(&job.job_key);
         }
 
         active_job_to_cancel = state
@@ -841,7 +871,7 @@ pub fn cancel_source_sync_provider(
     }
 
     for job in removed_jobs {
-        let _ = workspace_repository::remove_source_sync_queue_job(&job.source_id);
+        let _ = workspace_repository::remove_source_sync_queue_job(&job.job_key);
         log_source_sync_event(
             "sync.queue",
             "warning",
@@ -935,12 +965,12 @@ pub fn resume_source_sync_provider(
 }
 
 /// Reordena a fila (apenas os jobs aguardando) de um provider conforme a ordem
-/// de `ordered_source_ids` vinda do drag-and-drop. Ids não presentes na fila são
+/// de `ordered_job_keys` vinda do drag-and-drop. Chaves não presentes na fila são
 /// ignorados; jobs da fila ausentes da lista ficam ao final, na ordem original.
 pub fn reorder_source_sync_provider_queue(
     app: &AppHandle,
     provider: String,
-    ordered_source_ids: Vec<String>,
+    ordered_job_keys: Vec<String>,
 ) -> Result<WorkspaceSnapshot, String> {
     register_queue_app_handle(app);
     let normalized_provider = provider.trim().to_ascii_lowercase();
@@ -952,7 +982,7 @@ pub fn reorder_source_sync_provider_queue(
             .lock()
             .map_err(|_| "Source sync queue lock is poisoned.".to_string())?;
         if let Some(queue) = state.queues.get_mut(&normalized_provider) {
-            let rank: HashMap<&str, usize> = ordered_source_ids
+            let rank: HashMap<&str, usize> = ordered_job_keys
                 .iter()
                 .enumerate()
                 .map(|(index, id)| (id.as_str(), index))
@@ -961,7 +991,7 @@ pub fn reorder_source_sync_provider_queue(
             // sort_by_key é estável: jobs fora da lista (usize::MAX) preservam a
             // ordem relativa original ao final.
             jobs.sort_by_key(|job| {
-                rank.get(job.source_id.as_str())
+                rank.get(job.job_key.as_str())
                     .copied()
                     .unwrap_or(usize::MAX)
             });
@@ -971,10 +1001,10 @@ pub fn reorder_source_sync_provider_queue(
         // depois a nova ordem da fila.
         let mut order: Vec<String> = Vec::new();
         if let Some(active) = state.active_jobs.get(&normalized_provider) {
-            order.push(active.source_id.clone());
+            order.push(active.job_key.clone());
         }
         if let Some(queue) = state.queues.get(&normalized_provider) {
-            order.extend(queue.iter().map(|job| job.source_id.clone()));
+            order.extend(queue.iter().map(|job| job.job_key.clone()));
         }
         order
     };
@@ -1075,6 +1105,7 @@ fn build_queue_status(state: &SourceSyncQueueState) -> SourceSyncQueueStatus {
             continue;
         };
         queued_items.extend(queue.iter().map(|job| SourceSyncQueueItem {
+            job_key: job.job_key.clone(),
             source_id: job.source_id.clone(),
             provider: job.provider.clone(),
             handle: job.handle.clone(),
@@ -1094,6 +1125,7 @@ fn build_queue_status(state: &SourceSyncQueueState) -> SourceSyncQueueStatus {
         .active_jobs
         .values()
         .map(|job| SourceSyncQueueItem {
+            job_key: job.job_key.clone(),
             source_id: job.source_id.clone(),
             provider: job.provider.clone(),
             handle: job.handle.clone(),
@@ -1155,8 +1187,11 @@ fn build_queue_status(state: &SourceSyncQueueState) -> SourceSyncQueueStatus {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_queue_status, enqueue_job, SourceSyncQueueJob, SourceSyncQueueJobResult,
-        SourceSyncQueueState,
+        build_queue_status, enqueue_job, source_sync_job_key, SourceSyncQueueJob,
+        SourceSyncQueueJobResult, SourceSyncQueueState,
+    };
+    use crate::domain::models::{
+        InstagramSourceSyncOptions, SourceSyncOptions, TikTokSourceSyncOptions,
     };
 
     fn sample_job(
@@ -1166,6 +1201,7 @@ mod tests {
         queued_at: &str,
     ) -> SourceSyncQueueJob {
         SourceSyncQueueJob {
+            job_key: source_id.to_string(),
             source_id: source_id.to_string(),
             provider: provider.to_string(),
             handle: handle.to_string(),
@@ -1246,7 +1282,7 @@ mod tests {
                 "@queued_handle",
                 "2026-03-11T17:00:00Z",
             ));
-        state.queued_ids.insert("source-1".to_string());
+        state.queued_keys.insert("source-1".to_string());
         state.workers_running.insert("instagram".to_string());
 
         let result = enqueue_job(
@@ -1307,9 +1343,66 @@ mod tests {
         assert!(!result.promoted_existing_job);
         let queue = state.queues.get("instagram").expect("instagram queue");
         assert_eq!(queue.len(), 1);
-        assert!(state.queued_ids.contains("source-1"));
+        assert!(state.queued_keys.contains("source-1"));
         let queued = queue.front().expect("queued follow-up");
         assert_eq!(queued.run_mode.as_deref(), Some("force_imported_backfill"));
+    }
+
+    #[test]
+    fn enqueue_job_allows_distinct_story_targets_for_the_same_source() {
+        let mut state = SourceSyncQueueState::default();
+        state.workers_running.insert("instagram".to_string());
+
+        let mut first = sample_job(
+            "source-1",
+            "instagram",
+            "@story_handle",
+            "2026-03-11T17:00:00Z",
+        );
+        first.job_key = "source-1:instagram-story:111".to_string();
+        let mut second = sample_job(
+            "source-1",
+            "instagram",
+            "@story_handle",
+            "2026-03-11T17:01:00Z",
+        );
+        second.job_key = "source-1:instagram-story:222".to_string();
+
+        assert!(enqueue_job(&mut state, first.clone()).queued_now);
+        assert!(enqueue_job(&mut state, second).queued_now);
+        assert!(!enqueue_job(&mut state, first).queued_now);
+        assert_eq!(
+            state.queues.get("instagram").map(|queue| queue.len()),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn story_job_keys_include_the_target_identity() {
+        let instagram = SourceSyncOptions {
+            instagram: Some(InstagramSourceSyncOptions {
+                target_story_media_id: Some("123456".to_string()),
+                ..InstagramSourceSyncOptions::default()
+            }),
+            ..SourceSyncOptions::default()
+        };
+        let tiktok = SourceSyncOptions {
+            tiktok: Some(TikTokSourceSyncOptions {
+                target_video_url: Some("https://www.tiktok.com/@user/video/987".to_string()),
+                ..TikTokSourceSyncOptions::default()
+            }),
+            ..SourceSyncOptions::default()
+        };
+
+        assert_eq!(
+            source_sync_job_key("source-1", Some(&instagram)),
+            "source-1:instagram-story:123456"
+        );
+        assert_eq!(
+            source_sync_job_key("source-1", Some(&tiktok)),
+            "source-1:tiktok-story:https://www.tiktok.com/@user/video/987"
+        );
+        assert_eq!(source_sync_job_key("source-1", None), "source-1");
     }
 
     #[test]

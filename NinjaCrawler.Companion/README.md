@@ -6,6 +6,21 @@ The extension deduplicates supported profile tabs across every Chrome window, sh
 
 Captured cookies and provider authorization metadata are sent only to the loopback desktop API and stored in NinjaCrawler's protected session store. Updating an account preserves its paths, defaults, capabilities, and source bindings. NinjaCrawler keeps one previous Companion import that can be restored from the Accounts window.
 
+The popup supports system, light, and dark themes. Open **Appearance & shortcuts**
+to choose a theme, inspect the currently assigned commands, or open Chrome's
+native shortcut editor. The available commands are **Sync active profile** for
+Instagram, TikTok, and X/Twitter, and **Download active story** when the active
+Instagram or TikTok URL identifies a supported story. Command results are shown
+on the extension badge, so the popup does not need to remain open.
+
+NinjaCrawler reports the Companion version bundled with its current release and
+the minimum compatible version. When the installed extension is older, the
+popup shows the installed and available versions with guided actions to download
+the exact release ZIP and open `chrome://extensions`. The extension badge uses
+`↑` for an available update and `!` when an update is required for compatibility.
+After downloading, extract the ZIP over the existing Companion folder and click
+**Reload** on the Chrome Extensions page.
+
 ## Local Development
 
 1. Build and run NinjaCrawler.

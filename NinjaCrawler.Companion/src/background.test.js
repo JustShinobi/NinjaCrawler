@@ -13,3 +13,27 @@ describe('Companion badge lifecycle', () => {
     expect(backgroundSource).toContain('chrome.runtime.onStartup.addListener')
   })
 })
+
+describe('Companion keyboard commands', () => {
+  it('handles profile sync and story download from the active tab', () => {
+    expect(backgroundSource).toContain('chrome.commands.onCommand.addListener')
+    expect(backgroundSource).toContain("command === 'sync-profile'")
+    expect(backgroundSource).toContain("command === 'download-story'")
+    expect(backgroundSource).toContain('syncSource({ sourceId: existing.id })')
+    expect(backgroundSource).toContain('downloadTarget({ sourceId: existing.id, target })')
+  })
+
+  it('reports command failures through the extension badge', () => {
+    expect(backgroundSource).toContain("text: '!'")
+    expect(backgroundSource).toContain('Command failed.')
+  })
+})
+
+describe('Companion update feedback', () => {
+  it('prioritizes incompatible and available updates in the badge', () => {
+    expect(backgroundSource).toContain("compatibility?.status === 'incompatible'")
+    expect(backgroundSource).toContain("compatibility?.status === 'update_available'")
+    expect(backgroundSource).toContain("text: '↑'")
+    expect(backgroundSource).toContain('update required')
+  })
+})

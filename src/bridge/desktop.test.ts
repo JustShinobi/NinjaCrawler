@@ -289,6 +289,7 @@ describe('loadWorkspaceSnapshot', () => {
       queuedItems: [],
       runningItems: [
         {
+          job_key: 'source-1:instagram-story:123',
           source_id: 'source-1',
           provider: 'instagram',
           handle: '@active',
@@ -323,6 +324,7 @@ describe('loadWorkspaceSnapshot', () => {
     expect(status.failedCount).toBe(1)
     expect(status.runningItems[0]).toEqual(
       expect.objectContaining({
+        jobKey: 'source-1:instagram-story:123',
         sourceId: 'source-1',
         progressPercent: 64,
         progressLabel: 'Downloading profile',

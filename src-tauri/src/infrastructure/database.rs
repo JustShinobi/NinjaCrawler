@@ -137,6 +137,10 @@ const MIGRATIONS: &[(i64, &str)] = &[
         36,
         include_str!("../../migrations/0036_provider_post_stats.sql"),
     ),
+    (
+        37,
+        include_str!("../../migrations/0037_source_sync_queue_job_keys.sql"),
+    ),
 ];
 
 pub fn open_connection(path: &Path) -> rusqlite::Result<Connection> {
@@ -179,4 +183,64 @@ pub fn open_connection(path: &Path) -> rusqlite::Result<Connection> {
     }
 
     Ok(connection)
+}
+
+#[cfg(test)]
+mod tests {
+    use rusqlite::{params, Connection};
+
+    #[test]
+    fn story_job_key_migration_preserves_old_jobs_and_allows_same_source_twice() {
+        let connection = Connection::open_in_memory().expect("in-memory database");
+        connection
+            .execute_batch(include_str!(
+                "../../migrations/0022_source_sync_queue_persistence.sql"
+            ))
+            .expect("legacy queue table");
+        connection
+            .execute_batch(include_str!(
+                "../../migrations/0024_source_sync_queue_order.sql"
+            ))
+            .expect("legacy queue order");
+        connection
+            .execute(
+                "INSERT INTO source_sync_queue_jobs
+                    (source_id, trigger, queued_at, order_index)
+                 VALUES ('source-1', 'manual', '2026-07-11T00:00:00Z', 1)",
+                [],
+            )
+            .expect("legacy job");
+
+        connection
+            .execute_batch(include_str!(
+                "../../migrations/0037_source_sync_queue_job_keys.sql"
+            ))
+            .expect("job key migration");
+
+        let preserved: (String, String) = connection
+            .query_row(
+                "SELECT job_key, source_id FROM source_sync_queue_jobs",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("preserved job");
+        assert_eq!(preserved, ("source-1".to_string(), "source-1".to_string()));
+
+        connection
+            .execute(
+                "INSERT INTO source_sync_queue_jobs
+                    (job_key, source_id, trigger, queued_at, order_index)
+                 VALUES (?1, ?2, 'companion_story', '2026-07-11T00:01:00Z', 2)",
+                params!["source-1:instagram-story:222", "source-1"],
+            )
+            .expect("second targeted job for same source");
+        let count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM source_sync_queue_jobs WHERE source_id = 'source-1'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("queue count");
+        assert_eq!(count, 2);
+    }
 }
