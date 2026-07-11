@@ -45,6 +45,7 @@ jobs:
           manifest-file: .release-please-manifest.json
 
       - name: Trigger Windows release build
+        # The root package (".") keeps the unprefixed outputs.
         if: ${{ steps.release.outputs.release_created == 'true' }}
         env:
           GH_TOKEN: ${{ github.token }}
@@ -54,3 +55,15 @@ jobs:
           --ref main
           -f tag=${{ steps.release.outputs.tag_name }}
           -f sha=${{ steps.release.outputs.sha }}
+
+      - name: Trigger Companion release build
+        # The Companion package uses path-prefixed outputs (<path>--...).
+        if: ${{ steps.release.outputs['NinjaCrawler.Companion--release_created'] == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >
+          gh workflow run release-companion.yml
+          --repo ${{ github.repository }}
+          --ref main
+          -f tag=${{ steps.release.outputs['NinjaCrawler.Companion--tag_name'] }}
+          -f sha=${{ steps.release.outputs['NinjaCrawler.Companion--sha'] }}

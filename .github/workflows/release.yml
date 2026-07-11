@@ -50,17 +50,18 @@ jobs:
           $version = $Matches.version
           $packageVersion = (Get-Content package.json -Raw | ConvertFrom-Json).version
           $tauriVersion = (Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
-          $companionVersion = (Get-Content NinjaCrawler.Companion/manifest.json -Raw | ConvertFrom-Json).version
           $cargoVersion = (
             Select-String -Path src-tauri/Cargo.toml -Pattern '^version\s*=\s*"([^"]+)"' |
               Select-Object -First 1
           ).Matches[0].Groups[1].Value
 
+          # The Companion has its own release-please track (tag companion-vX.Y.Z),
+          # so its manifest version is intentionally independent of the app tag and
+          # is not validated here.
           $versions = @{
             'package.json' = $packageVersion
             'src-tauri/tauri.conf.json' = $tauriVersion
             'src-tauri/Cargo.toml' = $cargoVersion
-            'NinjaCrawler.Companion/manifest.json' = $companionVersion
           }
           foreach ($entry in $versions.GetEnumerator()) {
             if ($entry.Value -ne $version) {
@@ -121,10 +122,13 @@ jobs:
 
       - name: Package release assets
         shell: pwsh
+        # The Companion ships in its own release (companion-vX.Y.Z); skip it here
+        # so its ZIP is not published twice under different tags.
         run: >
           powershell -ExecutionPolicy Bypass
           -File Tools\Package-NinjaCrawlerRelease.ps1
           -Version ${{ steps.version.outputs.version }}
+          -SkipCompanion
 
       - name: Generate changelog
         shell: pwsh
