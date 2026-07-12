@@ -187,6 +187,10 @@ pub fn pick_source_profile_image(source_id: String) -> Result<WorkspaceSnapshot,
         fs::create_dir_all(&dest_dir).map_err(|error| error.to_string())?;
         let dest_path = dest_dir.join(format!("{}.{}", source_id, extension));
         fs::copy(&file_path, &dest_path).map_err(|error| error.to_string())?;
+        // Drop the stale thumb before regenerating: the picked file can be
+        // older than the previous thumb, which would defeat the mtime check.
+        remove_avatar_thumbnail(layout, &source_id);
+        let _ = ensure_avatar_thumbnail(layout, &source_id, &dest_path);
         let normalized = normalize_media_file_path(&dest_path)?;
         let timestamp = now_timestamp();
         connection
@@ -260,6 +264,11 @@ pub fn reset_source_profile_image(source_id: String) -> Result<WorkspaceSnapshot
             .map_err(|error| error.to_string())?;
 
         remove_source_custom_profile_images(layout, &source_id)?;
+
+        remove_avatar_thumbnail(layout, &source_id);
+        if let Some(avatar_path) = &auto_avatar {
+            let _ = ensure_avatar_thumbnail(layout, &source_id, Path::new(avatar_path));
+        }
 
         load_snapshot(connection, layout)
     })
@@ -659,6 +668,7 @@ pub(super) struct TopSearchUserResult {
 }
 pub(super) fn update_source_profile_image(
     connection: &Connection,
+    layout: &StorageLayout,
     source_id: &str,
     image_path: &str,
     timestamp: &str,
@@ -671,5 +681,192 @@ pub(super) fn update_source_profile_image(
             params![source_id, image_path, timestamp],
         )
         .map_err(|error| error.to_string())?;
+    // The avatar was just downloaded, so the file is hot in the page cache —
+    // refresh the local thumb now instead of on the next batch request.
+    let _ = ensure_avatar_thumbnail(layout, source_id, Path::new(image_path));
     Ok(())
+}
+
+pub(super) const AVATAR_THUMB_MAX_DIMENSION: u32 = 256;
+const AVATAR_THUMB_JPEG_QUALITY: u8 = 80;
+
+pub(super) fn avatar_thumbs_dir(layout: &StorageLayout) -> PathBuf {
+    layout.cache_root.join("avatar-thumbs")
+}
+
+/// Diretório dos thumbs de avatar do layout corrente. Exposto para o setup do
+/// asset protocol liberar explicitamente esta pasta (o escopo estático de
+/// `tauri.conf.json` também a cobre via `$LOCALAPPDATA/NinjaCrawler/**`, mas
+/// liberar em runtime não depende da resolução daquela variável).
+pub fn avatar_thumbnail_dir() -> Result<PathBuf, String> {
+    let layout = storage::ensure_workspace_layout().map_err(|error| error.to_string())?;
+    Ok(avatar_thumbs_dir(&layout))
+}
+
+/// mtime do original em milissegundos — compõe o nome do thumb (`{id}.{mtime}
+/// .jpg`) para servir de cache-buster: quando o avatar troca, o path muda e o
+/// webview não serve o jpg antigo do cache. Query strings (`?v=`) não servem:
+/// o asset protocol do Windows (`http://asset.localhost`) não as ignora e
+/// tenta abrir um arquivo inexistente.
+fn original_mtime_millis(original: &Path) -> Option<u64> {
+    fs::metadata(original)
+        .and_then(|meta| meta.modified())
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|duration| duration.as_millis() as u64)
+}
+
+fn avatar_thumb_path(layout: &StorageLayout, source_id: &str, version: u64) -> PathBuf {
+    avatar_thumbs_dir(layout).join(format!("{source_id}.{version}.jpg"))
+}
+
+/// Devolve `<cache-root>/avatar-thumbs/<source-id>.<mtime>.jpg`, gerando-o se
+/// preciso. Os originais moram no volume de mídia (possivelmente HD externo); a
+/// lista de perfis exibe estes jpgs pequenos no disco local em vez de
+/// decodificar cada `ProfilePicture.jpg` em resolução original. O mtime no nome
+/// invalida o thumb quando o original é substituído. Retorna `None` quando o
+/// original sumiu ou o formato não é decodificável (gif/bmp ficam fora do crate
+/// `image` — o front cai no arquivo original nesses casos).
+pub(super) fn ensure_avatar_thumbnail(
+    layout: &StorageLayout,
+    source_id: &str,
+    original: &Path,
+) -> Option<String> {
+    let version = original_mtime_millis(original)?;
+    let thumbs_dir = avatar_thumbs_dir(layout);
+    fs::create_dir_all(&thumbs_dir).ok()?;
+    let output = avatar_thumb_path(layout, source_id, version);
+    if fs::metadata(&output).is_ok_and(|meta| meta.len() > 0) {
+        return Some(output.to_string_lossy().to_string());
+    }
+    // Versão obsoleta (ou nenhuma): limpa qualquer `{id}.*.jpg` antigo antes de
+    // escrever a nova para o cache não acumular um jpg por sync.
+    remove_avatar_thumbnail(layout, source_id);
+
+    // A extensão mente com frequência (avatares baixados são sempre salvos
+    // como ProfilePicture.jpg, seja qual for o encoding real).
+    let decoded = image::ImageReader::open(original)
+        .ok()?
+        .with_guessed_format()
+        .ok()?
+        .decode()
+        .ok()?;
+    let thumbnail = decoded.thumbnail(AVATAR_THUMB_MAX_DIMENSION, AVATAR_THUMB_MAX_DIMENSION);
+    // JPEG não tem canal alfa; encodar RGBA falha em vez de degradar.
+    let rgb = thumbnail.to_rgb8();
+    let mut encoded: Vec<u8> = Vec::new();
+    let encoder =
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut encoded, AVATAR_THUMB_JPEG_QUALITY);
+    rgb.write_with_encoder(encoder).ok()?;
+    if encoded.is_empty() {
+        return None;
+    }
+
+    static TEMP_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let sequence = TEMP_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let temp_output = thumbs_dir.join(format!(
+        ".{source_id}.{}.{}.tmp.jpg",
+        std::process::id(),
+        sequence
+    ));
+    if fs::write(&temp_output, &encoded).is_err() {
+        let _ = fs::remove_file(&temp_output);
+        return None;
+    }
+    // Outra geração concorrente pode ter vencido; qualquer jpg completo é
+    // equivalente para o mesmo original.
+    if output.is_file() || fs::rename(&temp_output, &output).is_err() {
+        let _ = fs::remove_file(&temp_output);
+    }
+    if output.is_file() {
+        Some(output.to_string_lossy().to_string())
+    } else {
+        None
+    }
+}
+
+/// Remove todos os thumbs versionados de um source (`{id}.*.jpg`). Os arquivos
+/// temporários (`.{id}.…tmp.jpg`) começam com ponto e não casam com o prefixo.
+pub(super) fn remove_avatar_thumbnail(layout: &StorageLayout, source_id: &str) {
+    let Ok(entries) = fs::read_dir(avatar_thumbs_dir(layout)) else {
+        return;
+    };
+    let prefix = format!("{source_id}.");
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.starts_with(&prefix) {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
+}
+
+/// Gera (ou reaproveita) os thumbs de avatar dos perfis pedidos — todos quando
+/// `source_ids` é `None`. Lê os paths do DB e solta a conexão ANTES de tocar
+/// nas imagens: os originais podem morar em volume lento e `with_workspace` é
+/// o gate global do banco.
+pub fn load_avatar_thumbnails(
+    source_ids: Option<Vec<String>>,
+) -> Result<AvatarThumbnailBatch, String> {
+    let (layout, entries) = with_workspace(|connection, layout| {
+        let mut statement = connection
+            .prepare(
+                "SELECT id, profile_image_path FROM source_profiles
+                 WHERE deleted_at IS NULL AND profile_image_path IS NOT NULL",
+            )
+            .map_err(|error| error.to_string())?;
+        let rows: Vec<(String, String)> = statement
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .map_err(|error| error.to_string())?
+            .filter_map(|row| row.ok())
+            .collect();
+        Ok((layout.clone(), rows))
+    })?;
+
+    let requested: Option<HashSet<String>> = source_ids.map(|ids| ids.into_iter().collect());
+    let entries: Vec<(String, String)> = entries
+        .into_iter()
+        .filter(|(id, _)| {
+            requested
+                .as_ref()
+                .is_none_or(|wanted| wanted.contains(id))
+        })
+        .collect();
+
+    // O decode do original é o gargalo (I/O + jpeg full-res): reparte o lote
+    // entre alguns workers para o primeiro paint não esperar a fila inteira.
+    const AVATAR_THUMB_WORKERS: usize = 4;
+    let chunk_size = entries.len().div_ceil(AVATAR_THUMB_WORKERS).max(1);
+    let mut thumbs: Vec<AvatarThumbnail> = Vec::with_capacity(entries.len());
+    std::thread::scope(|scope| {
+        let workers: Vec<_> = entries
+            .chunks(chunk_size)
+            .map(|chunk| {
+                let layout = &layout;
+                scope.spawn(move || {
+                    chunk
+                        .iter()
+                        .filter_map(|(source_id, original)| {
+                            let original_path = Path::new(original);
+                            let version = original_mtime_millis(original_path).unwrap_or(0);
+                            ensure_avatar_thumbnail(layout, source_id, original_path).map(|path| {
+                                AvatarThumbnail {
+                                    source_id: source_id.clone(),
+                                    path,
+                                    version,
+                                }
+                            })
+                        })
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        for worker in workers {
+            if let Ok(results) = worker.join() {
+                thumbs.extend(results);
+            }
+        }
+    });
+
+    Ok(AvatarThumbnailBatch { thumbs })
 }

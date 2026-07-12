@@ -485,6 +485,25 @@ pub struct MediaThumbnailBatch {
     pub thumbs: HashMap<String, String>,
 }
 
+/// Thumbnail de avatar (jpg 256px) em cache local — a lista de perfis exibe
+/// estes arquivos pequenos no disco do sistema em vez dos `ProfilePicture.jpg`
+/// em resolução original no volume de mídia.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AvatarThumbnail {
+    pub source_id: String,
+    pub path: String,
+    /// mtime (ms) do jpg — cache-buster `?v=` no frontend, já que o path do
+    /// thumb é estável por convenção `{source_id}.jpg`.
+    pub version: u64,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AvatarThumbnailBatch {
+    pub thumbs: Vec<AvatarThumbnail>,
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MediaThumbnailQueueItem {

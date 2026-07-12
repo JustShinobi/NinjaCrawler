@@ -352,6 +352,7 @@ where
                 files_total: None,
             })?;
             remove_source_custom_profile_images(layout, &source.id)?;
+            remove_avatar_thumbnail(layout, &source.id);
 
             on_progress(SourceDeleteProgressUpdate {
                 progress_percent: Some(88),
@@ -942,20 +943,41 @@ pub(super) fn compute_source_media_paths(
         );
         // Canonicaliza para a grafia real do disco (Windows é case-insensitive),
         // unificando variações como `instagram` vs `Instagram` no filtro da UI.
-        let display = root
-            .canonicalize()
-            .map(|canonical| {
-                canonical
-                    .display()
-                    .to_string()
-                    .trim_start_matches(r"\\?\")
-                    .to_string()
-            })
-            .unwrap_or_else(|_| root.display().to_string());
+        let display = canonicalized_media_root_display(&root);
         result.insert(source.id.clone(), display);
     }
 
     result
+}
+
+/// Cache do `canonicalize()` por root de mídia. `load_snapshot` (todo comando)
+/// chamava um stat de disco por perfil do Instagram; o resultado é estável para
+/// um dado root, então memoizamos. Só cacheia sucessos: se a pasta ainda não
+/// existe, cai no display sem canonizar e tenta de novo numa próxima vez.
+fn canonicalized_media_root_display(root: &Path) -> String {
+    static CACHE: OnceLock<Mutex<HashMap<PathBuf, String>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(hit) = cache
+        .lock()
+        .ok()
+        .and_then(|guard| guard.get(root).cloned())
+    {
+        return hit;
+    }
+    match root.canonicalize() {
+        Ok(canonical) => {
+            let display = canonical
+                .display()
+                .to_string()
+                .trim_start_matches(r"\\?\")
+                .to_string();
+            if let Ok(mut guard) = cache.lock() {
+                guard.insert(root.to_path_buf(), display.clone());
+            }
+            display
+        }
+        Err(_) => root.display().to_string(),
+    }
 }
 pub(super) fn load_sources(connection: &Connection) -> Result<Vec<SourceProfile>, String> {
     let mut statement = connection

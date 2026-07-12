@@ -568,18 +568,39 @@ pub fn open_source_folder(
     publish_snapshot(&app, workspace_repository::open_source_folder(source_id)?)
 }
 
+// Comandos read-only pesados de disco: varredura de galeria e geração de
+// thumbnails (ffmpeg/decode de imagem). Rodam em `spawn_blocking` para o I/O
+// não prender os workers do runtime e atrasar outros `invoke` (ex.: durante o
+// scroll de um perfil grande num volume lento).
 #[tauri::command]
-pub fn load_source_media_gallery(
+pub async fn load_source_media_gallery(
     source_id: String,
 ) -> Result<crate::domain::models::SourceMediaGallery, String> {
-    workspace_repository::load_source_media_gallery(source_id)
+    tauri::async_runtime::spawn_blocking(move || {
+        workspace_repository::load_source_media_gallery(source_id)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
-pub fn load_media_thumbnails(
+pub async fn load_media_thumbnails(
     paths: Vec<String>,
 ) -> Result<crate::domain::models::MediaThumbnailBatch, String> {
-    workspace_repository::load_media_thumbnails(paths)
+    tauri::async_runtime::spawn_blocking(move || workspace_repository::load_media_thumbnails(paths))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+pub async fn load_avatar_thumbnails(
+    source_ids: Option<Vec<String>>,
+) -> Result<crate::domain::models::AvatarThumbnailBatch, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        workspace_repository::load_avatar_thumbnails(source_ids)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]

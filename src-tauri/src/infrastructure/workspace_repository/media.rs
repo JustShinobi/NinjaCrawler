@@ -115,17 +115,44 @@ pub fn load_media_thumbnails(paths: Vec<String>) -> Result<MediaThumbnailBatch, 
     if let Ok(layout) = storage::ensure_workspace_layout() {
         let _ = fs::remove_dir_all(layout.cache_root.join("video-thumbs"));
     }
-    if !ffmpeg_available() {
-        return Ok(MediaThumbnailBatch {
-            available: false,
-            thumbs: HashMap::new(),
-        });
+    let ffmpeg = ffmpeg_available();
+    // Fotos usam o crate `image` (não dependem de ffmpeg); vídeos usam ffmpeg.
+    let (images, videos): (Vec<String>, Vec<String>) = paths
+        .into_iter()
+        .partition(|path| is_thumbnailable_image(Path::new(path)));
+
+    let mut thumbs = HashMap::new();
+    // Fotos: sempre geram (thumb ~480px ao lado da mídia).
+    for (path, thumb) in generate_media_thumbnails_parallel(&images, ensure_image_thumbnail) {
+        thumbs.insert(path, thumb);
     }
-    // ffmpeg é o gargalo (~100-300ms por frame): reparte o lote entre alguns
-    // workers para o primeiro paint da viewport não esperar a fila inteira.
+    // Vídeos: só quando o ffmpeg está disponível; senão o front cai no <video>.
+    if ffmpeg {
+        for (path, thumb) in generate_media_thumbnails_parallel(&videos, ensure_video_thumbnail) {
+            thumbs.insert(path, thumb);
+        }
+    }
+
+    // `available` reflete apenas a disponibilidade de thumbs de VÍDEO (ffmpeg);
+    // o front usa isso para o fallback de <video>. As fotos não afetam o flag.
+    Ok(MediaThumbnailBatch {
+        available: ffmpeg,
+        thumbs,
+    })
+}
+
+/// Reparte o lote entre alguns workers para o primeiro paint da viewport não
+/// esperar a fila inteira (o gargalo é o decode/ffmpeg por arquivo).
+fn generate_media_thumbnails_parallel(
+    paths: &[String],
+    generate: fn(&Path) -> Option<String>,
+) -> Vec<(String, String)> {
+    if paths.is_empty() {
+        return Vec::new();
+    }
     const THUMBNAIL_WORKERS: usize = 4;
     let chunk_size = paths.len().div_ceil(THUMBNAIL_WORKERS).max(1);
-    let mut thumbs = HashMap::new();
+    let mut results = Vec::new();
     std::thread::scope(|scope| {
         let workers: Vec<_> = paths
             .chunks(chunk_size)
@@ -133,24 +160,18 @@ pub fn load_media_thumbnails(paths: Vec<String>) -> Result<MediaThumbnailBatch, 
                 scope.spawn(move || {
                     chunk
                         .iter()
-                        .filter_map(|path| {
-                            ensure_video_thumbnail(Path::new(path))
-                                .map(|thumb| (path.clone(), thumb))
-                        })
+                        .filter_map(|path| generate(Path::new(path)).map(|thumb| (path.clone(), thumb)))
                         .collect::<Vec<_>>()
                 })
             })
             .collect();
         for worker in workers {
-            if let Ok(results) = worker.join() {
-                thumbs.extend(results);
+            if let Ok(chunk_results) = worker.join() {
+                results.extend(chunk_results);
             }
         }
     });
-    Ok(MediaThumbnailBatch {
-        available: true,
-        thumbs,
-    })
+    results
 }
 /// Backfill assíncrono usado depois de um sync: novos downloads já saem com
 /// thumbnail, e instalações existentes migram gradualmente sem ocupar o C:.
@@ -159,19 +180,24 @@ pub fn prewarm_source_media_thumbnails(source_id: String) -> Result<usize, Strin
     let _guard = PREWARM_LOCK
         .lock()
         .map_err(|_| "Media thumbnail prewarm lock is poisoned.".to_string())?;
-    let gallery = load_source_media_gallery(source_id)?;
-    let mut paths: Vec<String> = gallery
-        .posts
-        .into_iter()
-        .flat_map(|post| post.files)
-        .filter(|file| file.media_type == "video")
-        .map(|file| file.absolute_path)
-        .collect();
+    let mut paths = media_thumbnail_source_paths(&source_id)?;
     paths.sort();
     paths.dedup();
     let requested = paths.len();
     let _ = load_media_thumbnails(paths)?;
     Ok(requested)
+}
+
+/// Extensões de imagem que o crate `image` (features jpeg/png/webp) decodifica.
+/// gif/bmp ficam de fora e caem no arquivo original no front.
+pub(super) fn is_thumbnailable_image(path: &Path) -> bool {
+    matches!(
+        path.extension()
+            .and_then(|ext| ext.to_str())
+            .map(|ext| ext.to_ascii_lowercase())
+            .as_deref(),
+        Some("jpg" | "jpeg" | "png" | "webp")
+    )
 }
 pub fn media_thumbnail_source_seed(source_id: &str) -> Result<(String, String), String> {
     with_workspace(|connection, _| {
@@ -187,13 +213,15 @@ pub fn media_thumbnail_source_seed(source_id: &str) -> Result<(String, String), 
             .ok_or_else(|| format!("Source '{source_id}' does not exist."))
     })
 }
-pub fn media_thumbnail_video_paths(source_id: &str) -> Result<Vec<String>, String> {
+pub fn media_thumbnail_source_paths(source_id: &str) -> Result<Vec<String>, String> {
     let gallery = load_source_media_gallery(source_id.to_string())?;
     let mut paths: Vec<String> = gallery
         .posts
         .into_iter()
         .flat_map(|post| post.files)
-        .filter(|file| file.media_type == "video")
+        .filter(|file| {
+            file.media_type == "video" || is_thumbnailable_image(Path::new(&file.absolute_path))
+        })
         .map(|file| file.absolute_path)
         .collect();
     paths.sort();
@@ -280,6 +308,83 @@ pub(crate) fn ensure_video_thumbnail(source: &Path) -> Option<String> {
     // Não deixa um jpg vazio/parcial envenenar o cache.
     let _ = fs::remove_file(&temp_output);
     None
+}
+const MEDIA_IMAGE_THUMB_MAX_DIMENSION: u32 = 480;
+const MEDIA_IMAGE_THUMB_JPEG_QUALITY: u8 = 80;
+/// Gera (ou reaproveita) um thumb jpg ~480px de uma FOTO, em `.thumbs/` ao lado
+/// da mídia — mesma convenção dos thumbs de vídeo, mas via crate `image` (fotos
+/// não precisam de ffmpeg). Sem os thumbs, o webview decodifica cada foto em
+/// resolução original (5-64 MB de bitmap).
+///
+/// A decisão de gerar é por DIMENSÃO, não por tamanho de arquivo: o custo de
+/// RAM é largura×altura×4 no webview, e JPEGs bem comprimidos (Instagram) têm
+/// dimensões grandes com poucos KB — ex.: 1440×1800 em ~120KB decodifica a
+/// ~10MB, então PRECISA de thumb. Pula só quando ambos os lados já cabem em
+/// 480px (senão `thumbnail()` faria upscale, gerando um thumb maior que o
+/// original). Invalida por mtime; `None` quando o arquivo sumiu ou o formato
+/// não é decodificável (gif/bmp → o front cai no arquivo original).
+pub(crate) fn ensure_image_thumbnail(source: &Path) -> Option<String> {
+    fs::metadata(source).ok()?;
+    let output = video_thumbnail_path(source)?;
+    let thumbs_dir = output.parent()?;
+    fs::create_dir_all(thumbs_dir).ok()?;
+    let source_name = source.file_name()?.to_string_lossy();
+    if media_thumbnail_is_current(source) {
+        return Some(output.to_string_lossy().to_string());
+    }
+    let _ = fs::remove_file(&output);
+
+    // A extensão pode mentir; adivinha o formato pelo conteúdo.
+    let decoded = image::ImageReader::open(source)
+        .ok()?
+        .with_guessed_format()
+        .ok()?
+        .decode()
+        .ok()?;
+    // `thumbnail` faz upscale; se a imagem já cabe no limite, um thumb só
+    // gastaria disco (e seria maior que o original). Devolve None → o front usa
+    // o arquivo original, que já é pequeno.
+    if decoded.width() <= MEDIA_IMAGE_THUMB_MAX_DIMENSION
+        && decoded.height() <= MEDIA_IMAGE_THUMB_MAX_DIMENSION
+    {
+        return None;
+    }
+    let thumbnail = decoded.thumbnail(
+        MEDIA_IMAGE_THUMB_MAX_DIMENSION,
+        MEDIA_IMAGE_THUMB_MAX_DIMENSION,
+    );
+    // JPEG não tem canal alfa; encodar RGBA falha em vez de degradar.
+    let rgb = thumbnail.to_rgb8();
+    let mut encoded: Vec<u8> = Vec::new();
+    let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(
+        &mut encoded,
+        MEDIA_IMAGE_THUMB_JPEG_QUALITY,
+    );
+    rgb.write_with_encoder(encoder).ok()?;
+    if encoded.is_empty() {
+        return None;
+    }
+
+    static TEMP_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let sequence = TEMP_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let temp_output = thumbs_dir.join(format!(
+        ".{source_name}.{}.{}.img.tmp.jpg",
+        std::process::id(),
+        sequence
+    ));
+    if fs::write(&temp_output, &encoded).is_err() {
+        let _ = fs::remove_file(&temp_output);
+        return None;
+    }
+    // Geração concorrente pode ter vencido; qualquer jpg completo serve.
+    if output.is_file() || fs::rename(&temp_output, &output).is_err() {
+        let _ = fs::remove_file(&temp_output);
+    }
+    if output.is_file() {
+        Some(output.to_string_lossy().to_string())
+    } else {
+        None
+    }
 }
 pub(super) fn ensure_provider_deleted_media_table(connection: &Connection) -> Result<(), String> {
     connection

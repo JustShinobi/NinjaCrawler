@@ -2197,9 +2197,12 @@ p {
   box-shadow: inset 0 0 0 1px var(--selection-inner-line);
 }
 
-[data-theme="dark"] .profile-group-framed {
+[data-theme="dark"] .workspace-vframe {
   background: var(--panel-alt);
   border-color: var(--line-strong);
+}
+
+[data-theme="dark"] .workspace-vframe-start {
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
 }
 
@@ -2910,16 +2913,72 @@ p {
   text-transform: uppercase;
 }
 
-.profile-group-framed + .profile-group-framed {
-  margin-top: 0.95rem;
+/* Lista de perfis virtualizada: linhas absolutas (padrão do Profile View) e a
+   moldura de grupo desenhada por segmentos (start/meio/end), já que header e
+   conteúdo viram linhas virtuais irmãs em vez de um box único. */
+.workspace-virtual {
+  position: relative;
+  width: 100%;
 }
 
-.profile-group-framed {
-  border: 1px solid var(--line);
-  border-radius: 12px;
+.workspace-virtual-row {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+}
+
+/* Espaço entre grupos: margens não contam na medição das linhas absolutas,
+   então o respiro vira padding da própria linha. */
+.workspace-virtual-row-group-gap {
+  padding-bottom: 0.95rem;
+}
+
+/* Gap vertical entre fileiras do grid dentro da mesma seção. */
+.workspace-vrow-gap {
+  padding-bottom: 0.7rem;
+}
+
+.workspace-vframe {
+  border-left: 1px solid var(--line);
+  border-right: 1px solid var(--line);
   background: var(--glass-subtle);
+  padding-left: 0.62rem;
+  padding-right: 0.62rem;
+}
+
+.workspace-vframe-start {
+  border-top: 1px solid var(--line);
+  border-top-left-radius: 12px;
+  border-top-right-radius: 12px;
+  padding-top: 0.52rem;
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.45);
-  padding: 0.52rem 0.62rem 0.62rem;
+}
+
+.workspace-vframe-end {
+  border-bottom: 1px solid var(--line);
+  border-bottom-left-radius: 12px;
+  border-bottom-right-radius: 12px;
+  padding-bottom: 0.62rem;
+}
+
+/* Header não-colapsado: o respiro até o conteúdo faz parte do segmento (a
+   margem original do header colapsaria para fora da linha virtual). */
+.workspace-vframe-header-pad {
+  padding-bottom: 0.62rem;
+}
+
+.workspace-virtual-row .profile-group-header-row {
+  margin-bottom: 0;
+}
+
+/* Linhas de lista: margem não conta na medição — vira padding da linha. */
+.workspace-virtual-row .profile-list-row {
+  margin-bottom: 0;
+}
+
+.workspace-vlist-gap {
+  padding-bottom: 0.12rem;
 }
 
 .profile-group-header-row {
@@ -3019,10 +3078,6 @@ p {
 .profile-group-order-button svg {
   width: 8px;
   height: 5px;
-}
-
-.profile-group-content {
-  min-width: 0;
 }
 
 .profile-group-collapsed .profile-group-header-row {

@@ -2599,6 +2599,37 @@ export async function loadMediaThumbnails(paths: string[]): Promise<MediaThumbna
   return { available: value.available !== false, thumbs }
 }
 
+export interface AvatarThumbnail {
+  sourceId: string
+  path: string
+  /** mtime (ms) do jpg — cache-buster `?v=` já que o path do thumb é estável. */
+  version: number
+}
+
+export interface AvatarThumbnailBatch {
+  thumbs: AvatarThumbnail[]
+}
+
+export async function loadAvatarThumbnails(sourceIds?: string[]): Promise<AvatarThumbnailBatch> {
+  const raw = await invoke<unknown>(
+    'load_avatar_thumbnails',
+    buildInvokeArgs({ sourceIds: sourceIds ?? null }),
+  )
+  const value = isRecord(raw) ? raw : {}
+  const thumbs: AvatarThumbnail[] = []
+  const rawThumbs = Array.isArray(value.thumbs) ? value.thumbs : []
+  for (const item of rawThumbs) {
+    if (!isRecord(item)) continue
+    const sourceId = typeof item.sourceId === 'string' ? item.sourceId : ''
+    const path = typeof item.path === 'string' ? item.path : ''
+    const version = typeof item.version === 'number' ? item.version : 0
+    if (sourceId && path) {
+      thumbs.push({ sourceId, path, version })
+    }
+  }
+  return { thumbs }
+}
+
 export async function enqueueMediaThumbnailGeneration(
   sourceIds: string[],
 ): Promise<MediaThumbnailQueueStatus> {

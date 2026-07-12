@@ -19,8 +19,8 @@ use crate::domain::models::{
     default_tiktok_source_sync_options, default_twitter_source_sync_options,
 };
 use crate::domain::models::{
-    AccountSyncRun, AppSetting, AppSettingUpsert, BatchSourceProfilePatch,
-    CloneSyncPlanInput,
+    AccountSyncRun, AppSetting, AppSettingUpsert, AvatarThumbnail, AvatarThumbnailBatch,
+    BatchSourceProfilePatch, CloneSyncPlanInput,
     CompanionAccountCandidate, CompanionAccountCapture, CompanionAccountImportInput,
     CompanionAccountImportResult, CompanionAccountPreview, DesktopRuntimeState,
     ImportMethodDescriptor, ImportPreview, ImportPreviewOptions, ImportPreviewProfile,
@@ -432,11 +432,37 @@ where
 {
     let connection =
         database::open_connection(&layout.db_path).map_err(|error| error.to_string())?;
-    migrate_legacy_setting_keys(&connection)?;
-    seed_missing_app_settings(&connection, &layout)?;
-    migrate_media_root_setting_to_scrawler_pattern(&connection)?;
+    ensure_settings_bootstrap(&connection, &layout)?;
     let effective_layout = resolve_effective_storage_layout(&connection, &layout)?;
     operation(&connection, &effective_layout)
+}
+
+fn settings_bootstrap_paths() -> &'static Mutex<HashSet<PathBuf>> {
+    static DONE: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
+    DONE.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+/// Migrações de chaves legadas + seed de settings padrão rodavam a cada
+/// `with_workspace` (todo comando, todo tick de 5s). São one-time por banco;
+/// roda uma vez por arquivo por processo (chave por path preserva o suite
+/// hermético). `resolve_effective_storage_layout` continua por chamada porque
+/// o media_root pode mudar em runtime.
+fn ensure_settings_bootstrap(connection: &Connection, layout: &StorageLayout) -> Result<(), String> {
+    let key = layout
+        .db_path
+        .canonicalize()
+        .unwrap_or_else(|_| layout.db_path.clone());
+    let mut done = settings_bootstrap_paths()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if done.contains(&key) {
+        return Ok(());
+    }
+    migrate_legacy_setting_keys(connection)?;
+    seed_missing_app_settings(connection, layout)?;
+    migrate_media_root_setting_to_scrawler_pattern(connection)?;
+    done.insert(key);
+    Ok(())
 }
 
 fn resolve_effective_storage_layout(

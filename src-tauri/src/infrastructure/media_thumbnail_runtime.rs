@@ -113,7 +113,7 @@ fn run_worker() {
 }
 
 fn run_job(mut job: MediaThumbnailQueueItem) {
-    let result = workspace_repository::media_thumbnail_video_paths(&job.source_id);
+    let result = workspace_repository::media_thumbnail_source_paths(&job.source_id);
     let paths = match result {
         Ok(paths) => paths,
         Err(error) => {

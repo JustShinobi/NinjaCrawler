@@ -1,4 +1,6 @@
 use chrono::Utc;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
@@ -133,6 +135,11 @@ pub fn apply_asset_scope(app: &tauri::AppHandle) -> Result<(), String> {
             .allow_directory(path, true)
             .map_err(|error| error.to_string())?;
     }
+    // Cache de thumbs de avatar (disco local): a lista de perfis serve estes
+    // jpgs pequenos via convertFileSrc, então precisam estar no escopo.
+    if let Ok(thumbs_dir) = workspace_repository::avatar_thumbnail_dir() {
+        let _ = scope.allow_directory(&thumbs_dir, true);
+    }
     Ok(())
 }
 
@@ -151,7 +158,60 @@ pub fn window_state_plugin<R: Runtime>() -> tauri::plugin::TauriPlugin<R> {
     builder.build()
 }
 
+/// Fingerprint da última publicação de snapshot, por qualquer caminho
+/// (comando ou tick). Guardado fora do controller porque publicações podem
+/// acontecer antes de `app.manage` no setup.
+static LAST_SNAPSHOT_FINGERPRINT: Mutex<Option<u64>> = Mutex::new(None);
+
+fn snapshot_fingerprint(snapshot: &WorkspaceSnapshot) -> Option<u64> {
+    let bytes = serde_json::to_vec(snapshot).ok()?;
+    let mut hasher = DefaultHasher::new();
+    bytes.hash(&mut hasher);
+    Some(hasher.finish())
+}
+
+/// Registra o fingerprint da publicação e devolve se ele mudou desde a
+/// última. Falha de serialização conta como mudança (melhor emitir demais do
+/// que segurar uma atualização real).
+fn register_snapshot_fingerprint(snapshot: &WorkspaceSnapshot) -> bool {
+    let Some(fingerprint) = snapshot_fingerprint(snapshot) else {
+        return true;
+    };
+    let mut guard = match LAST_SNAPSHOT_FINGERPRINT.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    let changed = *guard != Some(fingerprint);
+    *guard = Some(fingerprint);
+    changed
+}
+
 pub fn publish_workspace_runtime(
+    app: &tauri::AppHandle,
+    snapshot: &WorkspaceSnapshot,
+) -> Result<(), String> {
+    // Mesmo publicando incondicionalmente, registra o fingerprint — senão o
+    // tick seguinte re-emitiria um snapshot idêntico ao que um comando acabou
+    // de publicar.
+    let _ = register_snapshot_fingerprint(snapshot);
+    emit_workspace_runtime(app, snapshot)
+}
+
+/// Variante usada pelo tick periódico do scheduler: só emite quando o
+/// snapshot realmente mudou desde a última publicação. Evita que o webview
+/// normalize/clone/re-renderize a lista inteira a cada 5s em idle.
+pub fn publish_workspace_runtime_if_changed(
+    app: &tauri::AppHandle,
+    snapshot: &WorkspaceSnapshot,
+) -> Result<bool, String> {
+    if !register_snapshot_fingerprint(snapshot) {
+        return Ok(false);
+    }
+    emit_workspace_runtime(app, snapshot)?;
+    Ok(true)
+}
+
+fn emit_workspace_runtime(
     app: &tauri::AppHandle,
     snapshot: &WorkspaceSnapshot,
 ) -> Result<(), String> {

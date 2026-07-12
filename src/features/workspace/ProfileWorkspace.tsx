@@ -1,6 +1,11 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { memo, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
+import { useVirtualizer } from '@tanstack/react-virtual'
 import type { SourceProfile, WorkspaceSnapshot } from '../../domain/models'
-import { getPreviewSource } from './thumbnailCache'
+import {
+  getAvatarThumbnailsEpoch,
+  getPreviewSource,
+  subscribeToAvatarThumbnails,
+} from './thumbnailCache'
 import {
   buildServiceTabs,
   filterSourcesForWorkspace,
@@ -22,6 +27,29 @@ const GROUP_MODE_KEY = 'nc-group-mode'
 const SORT_MODE_KEY = 'nc-sort-mode'
 
 type ViewMode = 'grid' | 'list'
+
+// Virtualização da lista de perfis (padrão do ProfileViewPage): grupos são
+// achatados em linhas virtuais — header, fileiras de grid ou linhas de lista.
+// A moldura visual do grupo é desenhada por segmentos (start/meio/end) porque
+// header e conteúdo viram linhas irmãs em vez de um box único.
+type WorkspaceRow =
+  | { type: 'group-header'; key: string; groupIndex: number; collapsed: boolean; frameEnd: boolean }
+  | { type: 'grid-row'; key: string; sources: SourceProfile[]; frameEnd: boolean }
+  | { type: 'list-header'; key: string }
+  | { type: 'list-row'; key: string; source: SourceProfile; frameEnd: boolean }
+
+// Espelha o CSS: .profile-grid tem células fixas de 118px com gap de 0.7rem;
+// .profile-grid-shell tem padding horizontal de 0.6rem; .workspace-vframe usa
+// 0.62rem + 1px de borda por lado.
+const GRID_CELL_WIDTH_PX = 118
+const GRID_GAP_PX = 11.2
+const SHELL_HORIZONTAL_PADDING_PX = 19.2
+const FRAME_HORIZONTAL_PADDING_PX = 21.9
+const ROW_OVERSCAN = 6
+const GROUP_HEADER_ROW_ESTIMATE_PX = 56
+const GRID_ROW_ESTIMATE_PX = 195
+const LIST_HEADER_ROW_ESTIMATE_PX = 30
+const LIST_ROW_ESTIMATE_PX = 42
 
 /** Rótulo compacto e não ambíguo para um path: mantém a raiz (drive) e os dois
  * últimos segmentos, abreviando o meio com "…" apenas quando necessário.
@@ -151,6 +179,19 @@ export function ProfileWorkspace({
     () => sortedGroups.flatMap((group) => group.sources.map((source) => source.id)),
     [sortedGroups],
   )
+  const avatarEpoch = useSyncExternalStore(subscribeToAvatarThumbnails, getAvatarThumbnailsEpoch)
+  const previewSrcBySource = useMemo(() => {
+    // avatarEpoch é a assinatura do cache de thumbs: muda quando um lote de
+    // thumbnails chega do backend e força o recálculo das URLs.
+    void avatarEpoch
+    const map = new Map<string, string | undefined>()
+    for (const group of sortedGroups) {
+      for (const source of group.sources) {
+        map.set(source.id, getPreviewSource(source))
+      }
+    }
+    return map
+  }, [sortedGroups, avatarEpoch])
 
   const sourceGroupMap = useMemo(() => {
     const map = new Map<string, string>()
@@ -173,6 +214,108 @@ export function ProfileWorkspace({
     [selectedSourceIds, sourceGroupMap],
   )
 
+  const hasAnyProfiles = filteredSources.length > 0
+  const showGroupHeaders = groupMode !== 'none' && sortedGroups.length > 0
+  const displayedGroupKeys = useMemo(() => sortedGroups.map((g) => g.key), [sortedGroups])
+
+  // Mede a largura útil do scroll container (clientWidth exclui a barra) para
+  // derivar as colunas do grid; reage a resize via ResizeObserver.
+  const shellRef = useRef<HTMLElement | null>(null)
+  const [containerWidth, setContainerWidth] = useState(0)
+  useEffect(() => {
+    const element = shellRef.current
+    if (!element) return undefined
+    const update = () => setContainerWidth(element.clientWidth - SHELL_HORIZONTAL_PADDING_PX)
+    update()
+    const observer = new ResizeObserver(update)
+    observer.observe(element)
+    return () => observer.disconnect()
+  }, [])
+
+  const gridCols = useMemo(() => {
+    const available = showGroupHeaders
+      ? containerWidth - FRAME_HORIZONTAL_PADDING_PX
+      : containerWidth
+    if (available <= 0) return 1
+    return Math.max(1, Math.floor((available + GRID_GAP_PX) / (GRID_CELL_WIDTH_PX + GRID_GAP_PX)))
+  }, [containerWidth, showGroupHeaders])
+
+  const { workspaceRows, rowIndexBySourceId } = useMemo(() => {
+    const rows: WorkspaceRow[] = []
+    const indexBySource = new Map<string, number>()
+    for (let groupIndex = 0; groupIndex < sortedGroups.length; groupIndex += 1) {
+      const group = sortedGroups[groupIndex]
+      const collapsed = collapsedGroups.has(group.key) && !selectedGroupKeys.has(group.key)
+      if (showGroupHeaders) {
+        rows.push({
+          type: 'group-header',
+          key: `header:${group.key}`,
+          groupIndex,
+          collapsed,
+          frameEnd: collapsed || group.sources.length === 0,
+        })
+        if (collapsed) continue
+      }
+      if (viewMode === 'grid') {
+        for (let start = 0; start < group.sources.length; start += gridCols) {
+          const slice = group.sources.slice(start, start + gridCols)
+          const rowIndex = rows.length
+          for (const source of slice) {
+            if (!indexBySource.has(source.id)) indexBySource.set(source.id, rowIndex)
+          }
+          rows.push({
+            type: 'grid-row',
+            key: `grid:${group.key}:${slice[0]?.id ?? start}`,
+            sources: slice,
+            frameEnd: start + gridCols >= group.sources.length,
+          })
+        }
+      } else {
+        if (group.sources.length > 0) {
+          rows.push({ type: 'list-header', key: `list-header:${group.key}` })
+        }
+        for (let index = 0; index < group.sources.length; index += 1) {
+          const source = group.sources[index]
+          if (!indexBySource.has(source.id)) indexBySource.set(source.id, rows.length)
+          rows.push({
+            type: 'list-row',
+            key: `list:${group.key}:${source.id}`,
+            source,
+            frameEnd: index === group.sources.length - 1,
+          })
+        }
+      }
+    }
+    return { workspaceRows: rows, rowIndexBySourceId: indexBySource }
+  }, [sortedGroups, collapsedGroups, selectedGroupKeys, showGroupHeaders, viewMode, gridCols])
+
+  // eslint-disable-next-line react-hooks/incompatible-library -- TanStack Virtual returns unstable functions by design; same usage pattern as ProfileViewPage.
+  const rowVirtualizer = useVirtualizer({
+    count: workspaceRows.length,
+    getScrollElement: () => shellRef.current,
+    estimateSize: (index) => {
+      const row = workspaceRows[index]
+      switch (row?.type) {
+        case 'group-header':
+          return GROUP_HEADER_ROW_ESTIMATE_PX
+        case 'list-header':
+          return LIST_HEADER_ROW_ESTIMATE_PX
+        case 'list-row':
+          return LIST_ROW_ESTIMATE_PX
+        default:
+          return GRID_ROW_ESTIMATE_PX
+      }
+    },
+    overscan: ROW_OVERSCAN,
+    getItemKey: (index) => workspaceRows[index]?.key ?? index,
+  })
+
+  // Colunas/modo/largura mudam a altura das linhas: descarta as medidas em
+  // cache para o virtualizer re-medir com o novo tamanho.
+  useEffect(() => {
+    rowVirtualizer.measure()
+  }, [rowVirtualizer, gridCols, viewMode, containerWidth])
+
   // Rola até o card apenas quando a SELEÇÃO muda. O snapshot é atualizado o
   // tempo todo durante um sync (novas referências de sortedGroups), e sem este
   // guard cada refresh puxava o scroll de volta ao card selecionado, brigando
@@ -188,13 +331,14 @@ export function ProfileWorkspace({
       return
     }
 
-    const element = Array.from(document.querySelectorAll<HTMLElement>('[data-source-id]'))
-      .find((candidate) => candidate.dataset.sourceId === selectedSourceId)
-    if (element && typeof element.scrollIntoView === 'function') {
-      element.scrollIntoView({ block: 'nearest' })
+    // Com virtualização o card fora da viewport não existe no DOM; rola pela
+    // linha virtual em vez de procurar o elemento.
+    const rowIndex = rowIndexBySourceId.get(selectedSourceId)
+    if (rowIndex !== undefined) {
+      rowVirtualizer.scrollToIndex(rowIndex, { align: 'auto' })
       lastScrolledSelectionRef.current = selectedSourceId
     }
-  }, [collapsedGroups, selectedSourceIds, sortedGroups])
+  }, [selectedSourceIds, rowIndexBySourceId, rowVirtualizer])
 
   function changeGroupMode(next: GroupMode) {
     localStorage.setItem(GROUP_MODE_KEY, next)
@@ -224,41 +368,43 @@ export function ProfileWorkspace({
     setViewModeState(next)
   }
 
-  const handleLetterJump = useCallback(
-    (event: React.KeyboardEvent) => {
-      if (event.key.length !== 1 || event.metaKey || event.ctrlKey || event.altKey) return
-      const letter = event.key.toLowerCase()
-      if (letter < 'a' || letter > 'z') return
+  // Função simples de propósito: vai no onKeyDown da section (não memoizada)
+  // e usar o virtualizer como dep de useCallback dispara o alerta de
+  // memoização do react-hooks (a instância muda a cada render).
+  function handleLetterJump(event: React.KeyboardEvent) {
+    if (event.key.length !== 1 || event.metaKey || event.ctrlKey || event.altKey) return
+    const letter = event.key.toLowerCase()
+    if (letter < 'a' || letter > 'z') return
 
-      const currentId = selectedSourceIds[selectedSourceIds.length - 1]
-      if (!currentId) return
-      const currentGroupKey = sourceGroupMap.get(currentId)
-      if (!currentGroupKey) return
+    const currentId = selectedSourceIds[selectedSourceIds.length - 1]
+    if (!currentId) return
+    const currentGroupKey = sourceGroupMap.get(currentId)
+    if (!currentGroupKey) return
 
-      const group = sortedGroups.find((g) => g.key === currentGroupKey)
-      if (!group) return
+    const group = sortedGroups.find((g) => g.key === currentGroupKey)
+    if (!group) return
 
-      const matches = group.sources.filter((s) => {
-        const name = formatSourceHandleLabel(s.handle).toLowerCase()
-        return name.startsWith(letter)
-      })
-      if (matches.length === 0) return
+    const matches = group.sources.filter((s) => {
+      const name = formatSourceHandleLabel(s.handle).toLowerCase()
+      return name.startsWith(letter)
+    })
+    if (matches.length === 0) return
 
-      const currentIndex = matches.findIndex((s) => s.id === currentId)
-      const nextMatch = matches[(currentIndex + 1) % matches.length]
+    const currentIndex = matches.findIndex((s) => s.id === currentId)
+    const nextMatch = matches[(currentIndex + 1) % matches.length]
 
-      onSelectSource(nextMatch.id)
-      const element = document.querySelector(`[data-source-id="${nextMatch.id}"]`)
-      element?.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
-    },
-    [selectedSourceIds, sourceGroupMap, sortedGroups, onSelectSource],
-  )
+    onSelectSource(nextMatch.id)
+    const rowIndex = rowIndexBySourceId.get(nextMatch.id)
+    if (rowIndex !== undefined) {
+      rowVirtualizer.scrollToIndex(rowIndex, { align: 'auto' })
+    }
+  }
 
-  function handleCardKeyDown(
+  const handleCardKeyDown = useCallback((
     event: React.KeyboardEvent,
     sourceId: string,
     deleting: boolean,
-  ) {
+  ) => {
     if (deleting) return
 
     if (event.key !== 'ContextMenu' && !(event.shiftKey && event.key === 'F10')) {
@@ -272,13 +418,13 @@ export function ProfileWorkspace({
       onSelectSource(sourceId)
     }
     onOpenSourceContextMenu(sourceId, rect.left + 18, rect.top + 18, preserveSelection)
-  }
+  }, [selectedSourceSet, onSelectSource, onOpenSourceContextMenu])
 
-  function handleCardContextMenu(
+  const handleCardContextMenu = useCallback((
     event: React.MouseEvent,
     sourceId: string,
     deleting: boolean,
-  ) {
+  ) => {
     if (deleting) {
       event.preventDefault()
       return
@@ -290,11 +436,20 @@ export function ProfileWorkspace({
       onSelectSource(sourceId)
     }
     onOpenSourceContextMenu(sourceId, event.clientX, event.clientY, preserveSelection)
-  }
+  }, [selectedSourceSet, onSelectSource, onOpenSourceContextMenu])
 
-  const hasAnyProfiles = filteredSources.length > 0
-  const showGroupHeaders = groupMode !== 'none' && sortedGroups.length > 0
-  const displayedGroupKeys = useMemo(() => sortedGroups.map((g) => g.key), [sortedGroups])
+  // Ref em vez de prop: visibleSourceIds é um array novo a cada snapshot e
+  // como prop invalidaria o React.memo dos cards a cada atualização.
+  const visibleSourceIdsRef = useRef(visibleSourceIds)
+  visibleSourceIdsRef.current = visibleSourceIds
+  const handleCardClick = useCallback((sourceId: string, event: React.MouseEvent) => {
+    onSelectSource(sourceId, {
+      append: event.metaKey || event.ctrlKey,
+      range: event.shiftKey,
+      visibleIds: visibleSourceIdsRef.current,
+    })
+  }, [onSelectSource])
+
   const handleGridShellMouseDown = useCallback(
     (event: React.MouseEvent<HTMLElement>) => {
       const target = event.target
@@ -386,111 +541,151 @@ export function ProfileWorkspace({
         </div>
       </nav>
 
-      <section className="profile-grid-shell" onKeyDown={handleLetterJump} onMouseDown={handleGridShellMouseDown}>
+      <section
+        ref={shellRef}
+        className="profile-grid-shell"
+        onKeyDown={handleLetterJump}
+        onMouseDown={handleGridShellMouseDown}
+      >
         {hasAnyProfiles ? (
-          sortedGroups.map((group, groupIndex) => {
-            const collapsed = collapsedGroups.has(group.key) && !selectedGroupKeys.has(group.key)
-            const canReorder = groupMode === 'group' && onReorderGroup && group.key !== 'group:__ungrouped__'
-            const groupClassName = [
-              'profile-group',
-              showGroupHeaders ? 'profile-group-framed' : '',
-              collapsed ? 'profile-group-collapsed' : '',
-            ].filter(Boolean).join(' ')
-            return (
-              <div key={group.key} className={groupClassName}>
-                {showGroupHeaders ? (
-                  <div className="profile-group-header-row">
-                    <button
-                      className="profile-group-header"
-                      onClick={() => toggleGroupCollapse(group.key)}
-                      type="button"
-                    >
-                      <span className={collapsed ? 'profile-group-chevron collapsed' : 'profile-group-chevron'}>&#9656;</span>
-                      <strong>{group.label}</strong>
-                      <span className="profile-group-count">{group.sources.length}</span>
-                    </button>
-                    {canReorder ? (
-                      <div className="profile-group-order-buttons">
-                        <button
-                          aria-label="Move group up"
-                          className="profile-group-order-button"
-                          disabled={groupIndex === 0}
-                          onClick={() => {
-                            const swap = swapGroupSortIndex(snapshot.schedulerGroups ?? [], displayedGroupKeys, group.key, 'up')
-                            if (swap) onReorderGroup(swap)
-                          }}
-                          title="Move up"
-                          type="button"
-                        >
-                          <svg viewBox="0 0 8 5" xmlns="http://www.w3.org/2000/svg"><path d="M4 0L0 5h8z" /></svg>
-                        </button>
-                        <button
-                          aria-label="Move group down"
-                          className="profile-group-order-button"
-                          disabled={groupIndex >= sortedGroups.length - 1 || sortedGroups[groupIndex + 1]?.key === 'group:__ungrouped__'}
-                          onClick={() => {
-                            const swap = swapGroupSortIndex(snapshot.schedulerGroups ?? [], displayedGroupKeys, group.key, 'down')
-                            if (swap) onReorderGroup(swap)
-                          }}
-                          title="Move down"
-                          type="button"
-                        >
-                          <svg viewBox="0 0 8 5" xmlns="http://www.w3.org/2000/svg"><path d="M0 0l4 5 4-5z" /></svg>
-                        </button>
+          // Somente as linhas visíveis (+ overscan) são montadas; a altura
+          // total é reservada para a barra de rolagem ser fiel.
+          <div
+            className="workspace-virtual"
+            style={{ height: `${rowVirtualizer.getTotalSize()}px` }}
+          >
+            {rowVirtualizer.getVirtualItems().map((virtualItem) => {
+              const row = workspaceRows[virtualItem.index]
+              if (!row) return null
+              const groupGap = showGroupHeaders && row.type !== 'list-header' && row.frameEnd
+              return (
+                <div
+                  key={row.key}
+                  className={groupGap ? 'workspace-virtual-row workspace-virtual-row-group-gap' : 'workspace-virtual-row'}
+                  data-index={virtualItem.index}
+                  ref={rowVirtualizer.measureElement}
+                  style={{ transform: `translateY(${virtualItem.start}px)` }}
+                >
+                  {row.type === 'group-header' ? (() => {
+                    const group = sortedGroups[row.groupIndex]
+                    if (!group) return null
+                    const canReorder = groupMode === 'group' && onReorderGroup && group.key !== 'group:__ungrouped__'
+                    const frameClassName = [
+                      'workspace-vframe',
+                      'workspace-vframe-start',
+                      row.frameEnd ? 'workspace-vframe-end' : 'workspace-vframe-header-pad',
+                      row.collapsed ? 'profile-group-collapsed' : '',
+                    ].filter(Boolean).join(' ')
+                    return (
+                      <div className={frameClassName}>
+                        <div className="profile-group-header-row">
+                          <button
+                            className="profile-group-header"
+                            onClick={() => toggleGroupCollapse(group.key)}
+                            type="button"
+                          >
+                            <span className={row.collapsed ? 'profile-group-chevron collapsed' : 'profile-group-chevron'}>&#9656;</span>
+                            <strong>{group.label}</strong>
+                            <span className="profile-group-count">{group.sources.length}</span>
+                          </button>
+                          {canReorder ? (
+                            <div className="profile-group-order-buttons">
+                              <button
+                                aria-label="Move group up"
+                                className="profile-group-order-button"
+                                disabled={row.groupIndex === 0}
+                                onClick={() => {
+                                  const swap = swapGroupSortIndex(snapshot.schedulerGroups ?? [], displayedGroupKeys, group.key, 'up')
+                                  if (swap) onReorderGroup(swap)
+                                }}
+                                title="Move up"
+                                type="button"
+                              >
+                                <svg viewBox="0 0 8 5" xmlns="http://www.w3.org/2000/svg"><path d="M4 0L0 5h8z" /></svg>
+                              </button>
+                              <button
+                                aria-label="Move group down"
+                                className="profile-group-order-button"
+                                disabled={row.groupIndex >= sortedGroups.length - 1 || sortedGroups[row.groupIndex + 1]?.key === 'group:__ungrouped__'}
+                                onClick={() => {
+                                  const swap = swapGroupSortIndex(snapshot.schedulerGroups ?? [], displayedGroupKeys, group.key, 'down')
+                                  if (swap) onReorderGroup(swap)
+                                }}
+                                title="Move down"
+                                type="button"
+                              >
+                                <svg viewBox="0 0 8 5" xmlns="http://www.w3.org/2000/svg"><path d="M0 0l4 5 4-5z" /></svg>
+                              </button>
+                            </div>
+                          ) : null}
+                        </div>
                       </div>
-                    ) : null}
-                  </div>
-                ) : null}
-                {!collapsed ? (
-                  <div className="profile-group-content">
-                    {viewMode === 'grid' ? (
-                      <div className="profile-grid" role="list">
-                        {group.sources.map((source) => (
+                    )
+                  })() : row.type === 'grid-row' ? (
+                    <div
+                      className={[
+                        showGroupHeaders ? 'workspace-vframe' : '',
+                        showGroupHeaders && row.frameEnd ? 'workspace-vframe-end' : '',
+                        row.frameEnd ? '' : 'workspace-vrow-gap',
+                      ].filter(Boolean).join(' ') || undefined}
+                    >
+                      <div
+                        className="profile-grid"
+                        role="list"
+                        style={{ gridTemplateColumns: `repeat(${gridCols}, ${GRID_CELL_WIDTH_PX}px)` }}
+                      >
+                        {row.sources.map((source) => (
                           <GridCard
                             key={source.id}
                             deleting={deletingSourceSet.has(source.id)}
                             now={now}
+                            onCardClick={handleCardClick}
                             onCardContextMenu={handleCardContextMenu}
                             onCardKeyDown={handleCardKeyDown}
                             onEditSource={onEditSource}
-                            onSelectSource={onSelectSource}
+                            previewSrc={previewSrcBySource.get(source.id)}
                             providerLabel={providerLabels.get(source.provider) ?? source.provider}
                             selected={selectedSourceSet.has(source.id)}
                             source={source}
-                            visibleSourceIds={visibleSourceIds}
                           />
                         ))}
                       </div>
-                    ) : (
-                      <div className="profile-list" role="list">
-                        <div aria-hidden="true" className="profile-list-header">
-                          <span className="profile-list-col-thumb" />
-                          <span className="profile-list-col-name">Handle</span>
-                          <span className="profile-list-col-provider">Provider</span>
-                          <span className="profile-list-col-status">Status</span>
-                        </div>
-                        {group.sources.map((source) => (
-                          <ListRow
-                            key={source.id}
-                            deleting={deletingSourceSet.has(source.id)}
-                            now={now}
-                            onCardContextMenu={handleCardContextMenu}
-                            onCardKeyDown={handleCardKeyDown}
-                            onEditSource={onEditSource}
-                            onSelectSource={onSelectSource}
-                            providerLabel={providerLabels.get(source.provider) ?? source.provider}
-                            selected={selectedSourceSet.has(source.id)}
-                            source={source}
-                            visibleSourceIds={visibleSourceIds}
-                          />
-                        ))}
+                    </div>
+                  ) : row.type === 'list-header' ? (
+                    <div className={showGroupHeaders ? 'workspace-vframe' : undefined}>
+                      <div aria-hidden="true" className="profile-list-header">
+                        <span className="profile-list-col-thumb" />
+                        <span className="profile-list-col-name">Handle</span>
+                        <span className="profile-list-col-provider">Provider</span>
+                        <span className="profile-list-col-status">Status</span>
                       </div>
-                    )}
-                  </div>
-                ) : null}
-              </div>
-            )
-          })
+                    </div>
+                  ) : (
+                    <div
+                      className={[
+                        showGroupHeaders ? 'workspace-vframe' : '',
+                        showGroupHeaders && row.frameEnd ? 'workspace-vframe-end' : '',
+                        row.frameEnd ? '' : 'workspace-vlist-gap',
+                      ].filter(Boolean).join(' ') || undefined}
+                    >
+                      <ListRow
+                        deleting={deletingSourceSet.has(row.source.id)}
+                        now={now}
+                        onCardClick={handleCardClick}
+                        onCardContextMenu={handleCardContextMenu}
+                        onCardKeyDown={handleCardKeyDown}
+                        onEditSource={onEditSource}
+                        previewSrc={previewSrcBySource.get(row.source.id)}
+                        providerLabel={providerLabels.get(row.source.provider) ?? row.source.provider}
+                        selected={selectedSourceSet.has(row.source.id)}
+                        source={row.source}
+                      />
+                    </div>
+                  )}
+                </div>
+              )
+            })}
+          </div>
         ) : (
           <div className="workspace-empty-state">
             <strong>No profiles in this view.</strong>
@@ -509,9 +704,9 @@ interface CardProps {
   selected: boolean
   deleting: boolean
   now: number
+  previewSrc: string | undefined
   providerLabel: string
-  visibleSourceIds: string[]
-  onSelectSource: (id: string, options?: SourceSelectionOptions) => void
+  onCardClick: (id: string, event: React.MouseEvent) => void
   onEditSource: (id: string) => void
   onCardContextMenu: (event: React.MouseEvent, sourceId: string, deleting: boolean) => void
   onCardKeyDown: (event: React.KeyboardEvent, sourceId: string, deleting: boolean) => void
@@ -519,19 +714,20 @@ interface CardProps {
 
 // -- Grid card --
 
-function GridCard({
+// React.memo: durante a rolagem o virtualizer re-renderiza o pai a cada
+// mudança de viewport; cards com props inalteradas não re-renderizam.
+const GridCard = memo(function GridCard({
   source,
   selected,
   deleting,
   now,
+  previewSrc,
   providerLabel,
-  visibleSourceIds,
-  onSelectSource,
+  onCardClick,
   onEditSource,
   onCardContextMenu,
   onCardKeyDown,
 }: CardProps) {
-  const previewSrc = getPreviewSource(source)
   const displayHandle = formatSourceHandleLabel(source.handle)
   const syncIssueLabel = source.syncProblemMessage ?? source.syncProblemCode
   const syncIssueBadge = syncProblemBadgeLabel(source.syncProblemCode)
@@ -547,12 +743,7 @@ function GridCard({
         source.syncProblemCode ? 'profile-card-has-sync-issue' : '',
       ].filter(Boolean).join(' ')}
       data-source-id={source.id}
-      onClick={(event) =>
-        onSelectSource(source.id, {
-          append: event.metaKey || event.ctrlKey,
-          range: event.shiftKey,
-          visibleIds: visibleSourceIds,
-        })}
+      onClick={(event) => onCardClick(source.id, event)}
       onContextMenu={(event) => onCardContextMenu(event, source.id, deleting)}
       onDoubleClick={() => { if (!deleting) onEditSource(source.id) }}
       onKeyDown={(event) => onCardKeyDown(event, source.id, deleting)}
@@ -561,7 +752,7 @@ function GridCard({
     >
       <div className="profile-thumb-frame">
         {previewSrc ? (
-          <img alt={displayHandle} className="profile-thumb"src={previewSrc} />
+          <img alt={displayHandle} className="profile-thumb" decoding="async" loading="lazy" src={previewSrc} />
         ) : (
           <div className={`profile-thumb profile-thumb-fallback provider-${source.provider}`}>
             <span>{providerLabel.slice(0, 2).toUpperCase()}</span>
@@ -592,23 +783,22 @@ function GridCard({
       </span>
     </button>
   )
-}
+})
 
 // -- List row --
 
-function ListRow({
+const ListRow = memo(function ListRow({
   source,
   selected,
   deleting,
   now,
+  previewSrc,
   providerLabel,
-  visibleSourceIds,
-  onSelectSource,
+  onCardClick,
   onEditSource,
   onCardContextMenu,
   onCardKeyDown,
 }: CardProps) {
-  const previewSrc = getPreviewSource(source)
   const displayHandle = formatSourceHandleLabel(source.handle)
   const syncIssueLabel = source.syncProblemMessage ?? source.syncProblemCode
   const syncIssueBadge = syncProblemBadgeLabel(source.syncProblemCode)
@@ -624,12 +814,7 @@ function ListRow({
         source.syncProblemCode ? 'profile-list-row-has-sync-issue' : '',
       ].filter(Boolean).join(' ')}
       data-source-id={source.id}
-      onClick={(event) =>
-        onSelectSource(source.id, {
-          append: event.metaKey || event.ctrlKey,
-          range: event.shiftKey,
-          visibleIds: visibleSourceIds,
-        })}
+      onClick={(event) => onCardClick(source.id, event)}
       onContextMenu={(event) => onCardContextMenu(event, source.id, deleting)}
       onDoubleClick={() => { if (!deleting) onEditSource(source.id) }}
       onKeyDown={(event) => onCardKeyDown(event, source.id, deleting)}
@@ -638,7 +823,7 @@ function ListRow({
     >
       <div className="profile-list-col-thumb">
         {previewSrc ? (
-          <img alt={displayHandle} className="profile-list-thumb"src={previewSrc} />
+          <img alt={displayHandle} className="profile-list-thumb" decoding="async" loading="lazy" src={previewSrc} />
         ) : (
           <div className={`profile-list-thumb profile-list-thumb-fallback provider-${source.provider}`}>
             <span>{providerLabel.slice(0, 2).toUpperCase()}</span>
@@ -675,5 +860,5 @@ function ListRow({
       </div>
     </button>
   )
-}
+})
 

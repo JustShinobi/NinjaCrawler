@@ -44,7 +44,7 @@ import { AccountsMenu } from './features/workspace/AccountsMenu'
 import { InternalDialog } from './features/workspace/InternalDialog'
 import { ProfileWorkspace, type SourceSelectionOptions } from './features/workspace/ProfileWorkspace'
 import { RuntimeLogWindowPage } from './features/workspace/RuntimeLogWindowPage'
-import { invalidateSource, preloadAllThumbnails } from './features/workspace/thumbnailCache'
+import { invalidateSource, refreshAvatarThumbnails } from './features/workspace/thumbnailCache'
 import {
   buildSourceProfileUrl,
   buildServiceTabs,
@@ -222,7 +222,7 @@ function App() {
 
     void Promise.resolve(bootstrap()).then((snapshot) => {
       if (snapshot?.sources) {
-        void preloadAllThumbnails(snapshot.sources)
+        void refreshAvatarThumbnails()
       }
     }).catch(() => undefined)
   }, [bootstrap, windowKind])
@@ -258,12 +258,12 @@ function App() {
     let unsubscribe: (() => void) | undefined
 
     void subscribeToDesktopRuntimeEvents({
-      onSchedulerTick: () => {
-        void refreshSnapshot().catch(() => undefined)
-      },
+      // Sem handler de onSchedulerTick: o backend agora empurra o snapshot
+      // (evento abaixo) somente quando algo mudou; re-buscar tudo a cada tick
+      // era trabalho dobrado a cada 5s.
       onWorkspaceSnapshotChanged: (nextSnapshot) => {
         applySnapshot(nextSnapshot)
-        void preloadAllThumbnails(nextSnapshot.sources)
+        void refreshAvatarThumbnails()
       },
       onRouteActivation: (actionRoute) => {
         if (actionRoute === 'scheduler') {
@@ -1312,10 +1312,7 @@ function App() {
     setProfileContextMenu(undefined)
     await pickProfileImage(sourceId)
     invalidateSource(sourceId)
-    const updatedSource = useAppStore.getState().snapshot?.sources.find((s) => s.id === sourceId)
-    if (updatedSource) {
-      void preloadAllThumbnails([updatedSource])
-    }
+    void refreshAvatarThumbnails([sourceId])
   }
 
   async function handleResetProfileImage(sourceId: string) {
@@ -1326,10 +1323,7 @@ function App() {
     setProfileContextMenu(undefined)
     await resetProfileImage(sourceId)
     invalidateSource(sourceId)
-    const updatedSource = useAppStore.getState().snapshot?.sources.find((s) => s.id === sourceId)
-    if (updatedSource) {
-      void preloadAllThumbnails([updatedSource])
-    }
+    void refreshAvatarThumbnails([sourceId])
   }
 
   async function handleOpenSourceFolder(sourceId: string) {

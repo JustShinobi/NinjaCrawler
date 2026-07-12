@@ -1098,6 +1098,7 @@ pub(super) fn execute_source_sync_with_connection(
                 if let Some(avatar_path) = resolved_avatar {
                     let _ = update_source_profile_image(
                         connection,
+                        layout,
                         &context.source.id,
                         &avatar_path,
                         &finished_at,
@@ -1600,6 +1601,7 @@ pub(super) fn execute_twitter_source_sync_with_connection(
                 if let Some(avatar_path) = resolved_avatar {
                     let _ = update_source_profile_image(
                         connection,
+                        layout,
                         &context.source.id,
                         &avatar_path,
                         &finished_at,
@@ -2702,6 +2704,7 @@ pub(super) fn execute_tiktok_source_sync_with_connection(
                 if let Some(avatar_path) = resolved_avatar {
                     let _ = update_source_profile_image(
                         connection,
+                        layout,
                         &context.source.id,
                         &avatar_path,
                         &finished_at,
@@ -4204,6 +4207,7 @@ pub(super) fn execute_instagram_source_sync_with_connection(
                 if let Some(avatar_path) = resolved_avatar {
                     let _ = update_source_profile_image(
                         connection,
+                        layout,
                         &context.source.id,
                         &avatar_path,
                         &finished_at,
@@ -5078,6 +5082,13 @@ pub(super) fn ensure_instagram_sync_post_ledger_table(
         )
         .map_err(|error| error.to_string())
 }
+/// Máximo de runs de histórico por entidade (source/account/plan) carregadas
+/// no snapshot. As tabelas crescem sem poda e todo snapshot ia inteiro para o
+/// webview a cada publicação; a UI mostra no máximo ~10 runs por entidade. O
+/// cap é POR ENTIDADE (window function) — um LIMIT global apagaria o histórico
+/// de perfis raramente sincronizados.
+pub(super) const SYNC_RUN_HISTORY_CAP_PER_ENTITY: u32 = 20;
+
 pub(super) fn load_source_sync_runs(connection: &Connection) -> Result<Vec<SourceSyncRun>, String> {
     let mut statement = connection
         .prepare(
@@ -5095,12 +5106,21 @@ pub(super) fn load_source_sync_runs(connection: &Connection) -> Result<Vec<Sourc
                 degraded_capabilities_json,
                 started_at,
                 finished_at
-             FROM source_sync_runs
+             FROM (
+                SELECT
+                    r.*,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY source_id
+                        ORDER BY finished_at DESC, created_at DESC
+                    ) AS recency_rank
+                FROM source_sync_runs r
+             )
+             WHERE recency_rank <= ?1
              ORDER BY finished_at DESC, created_at DESC",
         )
         .map_err(|error| error.to_string())?;
     let rows = statement
-        .query_map([], |row| {
+        .query_map(params![SYNC_RUN_HISTORY_CAP_PER_ENTITY], |row| {
             Ok(SourceSyncRun {
                 id: row.get(0)?,
                 source_id: row.get(1)?,
@@ -5138,12 +5158,21 @@ pub(super) fn load_account_sync_runs(
                 command_preview,
                 started_at,
                 finished_at
-             FROM account_sync_runs
+             FROM (
+                SELECT
+                    r.*,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY account_id
+                        ORDER BY finished_at DESC, created_at DESC
+                    ) AS recency_rank
+                FROM account_sync_runs r
+             )
+             WHERE recency_rank <= ?1
              ORDER BY finished_at DESC, created_at DESC",
         )
         .map_err(|error| error.to_string())?;
     let rows = statement
-        .query_map([], |row| {
+        .query_map(params![SYNC_RUN_HISTORY_CAP_PER_ENTITY], |row| {
             Ok(AccountSyncRun {
                 id: row.get(0)?,
                 account_id: row.get(1)?,

@@ -108,6 +108,7 @@ pub fn run() {
             application::commands::open_source_folder,
             application::commands::load_source_media_gallery,
             application::commands::load_media_thumbnails,
+            application::commands::load_avatar_thumbnails,
             application::commands::enqueue_media_thumbnail_generation,
             application::commands::media_thumbnail_queue_status,
             application::commands::enqueue_single_video_download,
