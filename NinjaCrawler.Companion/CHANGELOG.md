@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.15.0](https://github.com/MetalDevOps/NinjaCrawler/compare/companion-v0.14.0...companion-v0.15.0) (2026-07-11)
+
+
+### Features
+
+* **companion:** harden account capture and block incomplete session imports ([#102](https://github.com/MetalDevOps/NinjaCrawler/issues/102)) ([5e53316](https://github.com/MetalDevOps/NinjaCrawler/commit/5e53316b94b2ea1191add5f1a551a5924987af94))
+
 ## [0.14.0](https://github.com/MetalDevOps/NinjaCrawler/compare/companion-v0.13.0...companion-v0.14.0) (2026-07-11)
 
 

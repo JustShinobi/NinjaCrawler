@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.15.0](https://github.com/MetalDevOps/NinjaCrawler/compare/v0.14.0...v0.15.0) (2026-07-11)
+
+
+### Features
+
+* **companion:** harden account capture and block incomplete session imports ([#102](https://github.com/MetalDevOps/NinjaCrawler/issues/102)) ([5e53316](https://github.com/MetalDevOps/NinjaCrawler/commit/5e53316b94b2ea1191add5f1a551a5924987af94))
+* **connectors:** implement Twitter incremental sync and rate limit holds ([#112](https://github.com/MetalDevOps/NinjaCrawler/issues/112)) ([3b8992c](https://github.com/MetalDevOps/NinjaCrawler/commit/3b8992c11e28fac153afd247616bb571e46b76ee))
+
 ## [0.14.0](https://github.com/MetalDevOps/NinjaCrawler/compare/v0.13.0...v0.14.0) (2026-07-11)
 
 
