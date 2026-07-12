@@ -56,6 +56,15 @@ pub(super) fn reconcile_tiktok_provider_ledgers_from_disk(
     source_handle: &str,
     timestamp: &str,
 ) -> Result<usize, String> {
+    // Purge liked media that earlier builds wrongly reconciled as "timeline".
+    // Those rows share the physical file (and therefore the gallery's relative
+    // path key) with the likes runtime's own "likes" row, so leaving them behind
+    // keeps leaking liked media into the Timeline tab even after this reconcile
+    // stopped producing them. The likes runtime's row (media_section = "likes")
+    // is untouched; if no likes row exists the gallery falls back to the on-disk
+    // `Liked/` folder and still classifies it correctly.
+    purge_reconciled_tiktok_liked_timeline_rows(connection, source_id)?;
+
     let files = collect_media_file_paths(profile_root)?;
     let mut observed_by_post: HashMap<String, twitter_connector::ObservedTwitterPost> =
         HashMap::new();
@@ -128,16 +137,47 @@ pub(super) fn reconcile_tiktok_provider_ledgers_from_disk(
     Ok(recovered_media.len())
 }
 
+/// Removes the bogus `media_section = "timeline"` rows that older builds wrote
+/// for liked media (keyed by file name, with a lowercased `liked/...` relative
+/// path). SQLite's `LIKE` is ASCII case-insensitive, so `'liked/%'` also matches
+/// the likes runtime's own `Liked/...` path — the `media_section = 'timeline'`
+/// filter is what keeps that legitimate `"likes"` row intact.
+fn purge_reconciled_tiktok_liked_timeline_rows(
+    connection: &Connection,
+    source_id: &str,
+) -> Result<(), String> {
+    connection
+        .execute(
+            "DELETE FROM provider_sync_media_ledger
+             WHERE provider = 'tiktok'
+               AND source_id = ?1
+               AND media_section = 'timeline'
+               AND (relative_path LIKE 'liked/%' OR relative_path LIKE 'likes/%')",
+            params![source_id],
+        )
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
 fn is_recoverable_tiktok_media_path(profile_root: &Path, path: &Path, file_name: &str) -> bool {
     if is_profile_image_file(file_name) {
         return false;
     }
     let relative = path.strip_prefix(profile_root).unwrap_or(path);
+    // This reconcile only recovers timeline media that is on disk but missing
+    // from the ledger, so it hard-codes `media_section = "timeline"`. Liked
+    // videos live under `Liked/` (new) or `Likes/` (legacy) and are owned by
+    // the likes runtime, which already writes them with `media_section =
+    // "likes"`. Recovering them here would emit a competing ledger row (keyed by
+    // file name instead of `liked_<id>`) that shadows the "likes" section on the
+    // same `relative_path`, leaking liked media into the Timeline tab.
     if relative.components().any(|component| {
         let segment = component.as_os_str().to_string_lossy();
         segment.eq_ignore_ascii_case(".thumbs")
             || segment.eq_ignore_ascii_case("cover")
             || segment.eq_ignore_ascii_case("settings")
+            || segment.eq_ignore_ascii_case("liked")
+            || segment.eq_ignore_ascii_case("likes")
     }) {
         return false;
     }

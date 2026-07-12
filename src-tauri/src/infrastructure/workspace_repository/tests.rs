@@ -739,7 +739,7 @@ fn is_profile_image_file_excludes_avatar_and_profile_picture() {
 fn reconcile_tiktok_provider_ledgers_from_disk_seeds_existing_files() {
     let (_temp_dir, layout) = create_test_layout();
 
-    let (recovered, post_count, media_count, thumbnail_count) =
+    let (recovered, post_count, media_count, thumbnail_count, liked_timeline_count, liked_likes_count) =
         with_workspace_layout(layout, |connection, test_layout| {
             upsert_provider_account_with_connection(
                 connection,
@@ -779,6 +779,37 @@ fn reconcile_tiktok_provider_ledgers_from_disk_seeds_existing_files() {
                 b"settings",
             )
             .map_err(|error| error.to_string())?;
+            // Liked videos are owned by the likes runtime (section "likes"); the
+            // timeline reconcile must skip them so it never shadows that section
+            // with a competing "timeline" row on the same relative path.
+            fs::create_dir_all(profile_root.join("Liked")).map_err(|error| error.to_string())?;
+            fs::write(
+                profile_root
+                    .join("Liked")
+                    .join("eujhulys_1743950164_7490208900055190789.mp4"),
+                b"liked video",
+            )
+            .map_err(|error| error.to_string())?;
+            // Simulate a database left behind by an older build: the same liked
+            // file has both the likes runtime's legitimate "likes" row and the
+            // bogus "timeline" row a previous reconcile wrote (keyed by file name,
+            // lowercased path). The reconcile must purge the latter and keep the
+            // former.
+            connection
+                .execute_batch(
+                    "INSERT INTO provider_sync_media_ledger
+                        (provider, source_id, account_id, source_handle,
+                         provider_media_key, media_type, media_section, relative_path,
+                         first_seen_at, last_seen_at)
+                     VALUES
+                        ('tiktok','source-1','account-1','@archangelszxx',
+                         'liked_7490208900055190789','video','likes',
+                         'Liked/eujhulys_1743950164_7490208900055190789.mp4','t0','t0'),
+                        ('tiktok','source-1','account-1','@archangelszxx',
+                         'eujhulys_1743950164_7490208900055190789.mp4','video','timeline',
+                         'liked/eujhulys_1743950164_7490208900055190789.mp4','t0','t0');",
+                )
+                .map_err(|error| error.to_string())?;
 
             let recovered = reconcile_tiktok_provider_ledgers_from_disk(
                 connection,
@@ -813,14 +844,46 @@ fn reconcile_tiktok_provider_ledgers_from_disk_seeds_existing_files() {
                     |row| row.get(0),
                 )
                 .map_err(|error| error.to_string())?;
-            Ok((recovered, post_count, media_count, thumbnail_count))
+            // Bogus reconciled row (lowercased `liked/...`, section "timeline").
+            let liked_timeline_count: i64 = connection
+                .query_row(
+                    "SELECT COUNT(*) FROM provider_sync_media_ledger
+                     WHERE provider = 'tiktok' AND source_id = 'source-1'
+                       AND media_section = 'timeline'
+                       AND relative_path LIKE 'liked/%'",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(|error| error.to_string())?;
+            // Legitimate likes runtime row (keyed by `liked_<id>`, section "likes").
+            let liked_likes_count: i64 = connection
+                .query_row(
+                    "SELECT COUNT(*) FROM provider_sync_media_ledger
+                     WHERE provider = 'tiktok' AND source_id = 'source-1'
+                       AND media_section = 'likes'",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(|error| error.to_string())?;
+            Ok((
+                recovered,
+                post_count,
+                media_count,
+                thumbnail_count,
+                liked_timeline_count,
+                liked_likes_count,
+            ))
         })
         .expect("existing TikTok files should seed provider ledgers");
 
     assert_eq!(recovered, 2);
     assert_eq!(post_count, 2);
-    assert_eq!(media_count, 2);
+    // Two reconciled timeline files plus the preserved likes runtime row.
+    assert_eq!(media_count, 3);
     assert_eq!(thumbnail_count, 0);
+    // The bogus liked "timeline" row must be purged, and the real likes row kept.
+    assert_eq!(liked_timeline_count, 0);
+    assert_eq!(liked_likes_count, 1);
 }
 
 fn create_test_layout() -> (TempDir, StorageLayout) {
