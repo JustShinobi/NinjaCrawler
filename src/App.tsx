@@ -48,8 +48,6 @@ import { invalidateSource, refreshAvatarThumbnails } from './features/workspace/
 import {
   buildSourceProfileUrl,
   buildServiceTabs,
-  filterSourcesForWorkspace,
-  mediaPathBaseDir,
   parseClipboardProfileSeed,
   type ClipboardProfileSeed,
   type GroupSortSwap,
@@ -146,6 +144,7 @@ function App() {
   const [profileContextMenu, setProfileContextMenu] = useState<ProfileContextMenuState>()
   const [searchText, setSearchText] = useState('')
   const [savePathFilter, setSavePathFilter] = useState<string>('')
+  const [visibleSourceIds, setVisibleSourceIds] = useState<string[]>()
   const [mediaPathChange, setMediaPathChange] = useState<{ sourceIds: string[]; basePath: string } | undefined>()
   const [mediaPathSubmitting, setMediaPathSubmitting] = useState(false)
   const [mediaPathError, setMediaPathError] = useState<string>()
@@ -365,13 +364,12 @@ function App() {
     if (!snapshot) {
       return []
     }
-    let result = filterSourcesForWorkspace(snapshot.sources, serviceTab, searchText)
-    if (savePathFilter) {
-      const paths = snapshot.sourceMediaPaths ?? {}
-      result = result.filter((source) => mediaPathBaseDir(paths[source.id] ?? '') === savePathFilter)
+    if (!visibleSourceIds) {
+      return snapshot.sources
     }
-    return result
-  }, [searchText, serviceTab, savePathFilter, snapshot])
+    const visibleIdSet = new Set(visibleSourceIds)
+    return snapshot.sources.filter((source) => visibleIdSet.has(source.id))
+  }, [snapshot, visibleSourceIds])
   const providerLabels = useMemo(
     () => (snapshot ? new Map(snapshot.providerCatalog.map((provider) => [provider.key, provider.displayName])) : new Map()),
     [snapshot],
@@ -1505,6 +1503,11 @@ function App() {
           onSelectSource={handleSelectSource}
           onServiceTabChange={setServiceTab}
           onSavePathFilterChange={setSavePathFilter}
+          onVisibleSourceIdsChange={(sourceIds) => {
+            setVisibleSourceIds((current) => (
+              arraysEqual(current ?? [], sourceIds) ? current : sourceIds
+            ))
+          }}
           onOpenSourceContextMenu={handleOpenSourceContextMenu}
           searchText={searchText}
           savePathFilter={savePathFilter}

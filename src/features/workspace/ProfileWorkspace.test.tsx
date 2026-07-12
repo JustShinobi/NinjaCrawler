@@ -107,6 +107,94 @@ describe('ProfileWorkspace', () => {
     expect(onOpenSourceContextMenu).toHaveBeenCalledWith('source-1', 164, 212, false)
   })
 
+  it('filters profiles from different providers by their save path', () => {
+    const onSavePathFilterChange = vi.fn()
+    const snapshot = buildSnapshot()
+    snapshot.sources = [
+      snapshot.sources[0],
+      {
+        ...snapshot.sources[0],
+        id: 'source-2',
+        provider: 'tiktok',
+        handle: '@short_video',
+        displayName: 'short_video',
+      },
+      {
+        ...snapshot.sources[0],
+        id: 'source-3',
+        provider: 'twitter',
+        handle: '@news_feed',
+        displayName: 'news_feed',
+      },
+    ]
+    snapshot.sourceMediaPaths = {
+      'source-1': 'D:\\Media\\Instagram\\visual_lab',
+      'source-2': 'E:\\Media\\TikTok\\short_video',
+      'source-3': 'E:\\Media\\TikTok\\news_feed',
+    }
+
+    render(
+      <ProfileWorkspace
+        onClearSelection={vi.fn()}
+        onEditSource={vi.fn()}
+        onOpenSourceContextMenu={vi.fn()}
+        onSavePathFilterChange={onSavePathFilterChange}
+        onSelectSource={vi.fn()}
+        onServiceTabChange={vi.fn()}
+        savePathFilter={'E:\\Media\\TikTok'}
+        searchText=""
+        selectedSourceIds={[]}
+        serviceTab="all"
+        snapshot={snapshot}
+      />,
+    )
+
+    const savePathFilter = screen.getByRole('combobox', { name: 'Filter by save path' })
+    expect(savePathFilter).toBeTruthy()
+    expect(screen.queryByText('visual_lab')).toBeNull()
+    expect(screen.getByText('short_video')).toBeTruthy()
+    expect(screen.getByText('news_feed')).toBeTruthy()
+
+    fireEvent.change(savePathFilter, { target: { value: 'D:\\Media\\Instagram' } })
+    expect(onSavePathFilterChange).toHaveBeenCalledWith('D:\\Media\\Instagram')
+  })
+
+  it('hides the save-path filter when every profile has the same base directory', () => {
+    const snapshot = buildSnapshot()
+    snapshot.sources = [
+      snapshot.sources[0],
+      {
+        ...snapshot.sources[0],
+        id: 'source-2',
+        provider: 'tiktok',
+        handle: '@short_video',
+        displayName: 'short_video',
+      },
+    ]
+    snapshot.sourceMediaPaths = {
+      'source-1': 'D:\\Media\\Shared\\visual_lab',
+      'source-2': 'D:\\Media\\Shared\\short_video',
+    }
+
+    render(
+      <ProfileWorkspace
+        onClearSelection={vi.fn()}
+        onEditSource={vi.fn()}
+        onOpenSourceContextMenu={vi.fn()}
+        onSavePathFilterChange={vi.fn()}
+        onSelectSource={vi.fn()}
+        onServiceTabChange={vi.fn()}
+        savePathFilter=""
+        searchText=""
+        selectedSourceIds={[]}
+        serviceTab="all"
+        snapshot={snapshot}
+      />,
+    )
+
+    expect(screen.queryByRole('combobox', { name: 'Filter by save path' })).toBeNull()
+  })
+
   it('shows a selected marker in grid cards', () => {
     const { container } = render(
       <ProfileWorkspace

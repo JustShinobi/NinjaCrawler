@@ -941,7 +941,6 @@ fn change_source_media_path_internal(
         load_snapshot(connection, layout)
     })
 }
-
 /// Minimal immutable data needed by the asynchronous media-path worker.
 pub fn media_path_migration_seed(source_id: String) -> Result<(String, String, String), String> {
     let snapshot = bootstrap_workspace()?;
@@ -1016,8 +1015,9 @@ pub fn remove_media_path_migration_job(job_id: &str) -> Result<(), String> {
             .map_err(|error| error.to_string())
     })
 }
-/// Resolves each profile's absolute media path using the same logic as sync.
-/// Settings lookup failures fall back to the global media root.
+/// Resolves the absolute media output path for every profile using the same
+/// precedence as sync. Setting read failures fall back to the provider's global
+/// media root.
 pub(super) fn compute_source_media_paths(
     connection: &Connection,
     layout: &StorageLayout,
@@ -1037,8 +1037,8 @@ pub(super) fn compute_source_media_paths(
         });
 
         let root = resolved_source_media_output_root(layout, source, settings.as_ref());
-        // Canonicaliza para a grafia real do disco (Windows é case-insensitive),
-        // unificando variações como `instagram` vs `Instagram` no filtro da UI.
+        // Use the on-disk spelling on case-insensitive Windows filesystems so the
+        // filter merges variants such as `instagram` and `Instagram`.
         let display = canonicalized_media_root_display(&root);
         result.insert(source.id.clone(), display);
     }

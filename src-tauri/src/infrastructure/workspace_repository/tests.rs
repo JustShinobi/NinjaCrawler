@@ -2677,6 +2677,92 @@ fn resolved_source_media_output_root_uses_instagram_account_media_path_setting()
 }
 
 #[test]
+fn snapshot_exposes_save_paths_for_all_supported_providers() {
+    let (temp_dir, layout) = create_test_layout();
+    let instagram_base = temp_dir.path().join("instagram-account");
+    let twitter_base = temp_dir.path().join("twitter-account");
+    let tiktok_special_path = temp_dir.path().join("tiktok-special");
+
+    let paths = with_workspace_layout(layout, |connection, test_layout| {
+        for (id, provider) in [
+            ("instagram-account", "instagram"),
+            ("twitter-account", "twitter"),
+            ("tiktok-account", "tiktok"),
+        ] {
+            upsert_provider_account_with_connection(
+                connection,
+                test_layout,
+                sample_account(id, provider),
+            )?;
+        }
+
+        save_provider_account_settings_with_connection(
+            connection,
+            test_layout,
+            "instagram-account".to_string(),
+            vec![ProviderAccountSettingValue {
+                setting_key: "instagram.account.mediaPath".to_string(),
+                value_kind: ProviderAccountSettingValueKind::String,
+                string_value: Some(instagram_base.display().to_string()),
+                json_value: None,
+            }],
+        )?;
+        save_provider_account_settings_with_connection(
+            connection,
+            test_layout,
+            "twitter-account".to_string(),
+            vec![ProviderAccountSettingValue {
+                setting_key: "twitter.account.mediaPath".to_string(),
+                value_kind: ProviderAccountSettingValueKind::String,
+                string_value: Some(twitter_base.display().to_string()),
+                json_value: None,
+            }],
+        )?;
+
+        upsert_source_profile_with_connection(
+            connection,
+            test_layout,
+            sample_source("instagram-source", "instagram", Some("instagram-account")),
+        )?;
+        upsert_source_profile_with_connection(
+            connection,
+            test_layout,
+            sample_source("twitter-source", "twitter", Some("twitter-account")),
+        )?;
+        let mut tiktok_source = sample_source("tiktok-source", "tiktok", Some("tiktok-account"));
+        tiktok_source
+            .sync_options
+            .tiktok
+            .as_mut()
+            .expect("TikTok source should have default options")
+            .special_path = Some(tiktok_special_path.display().to_string());
+        upsert_source_profile_with_connection(connection, test_layout, tiktok_source)?;
+
+        Ok(load_snapshot(connection, test_layout)?.source_media_paths)
+    })
+    .expect("snapshot should expose every provider save path");
+
+    assert_eq!(
+        paths.get("instagram-source"),
+        Some(
+            &instagram_base
+                .join("instagram-source")
+                .display()
+                .to_string()
+        )
+    );
+    assert_eq!(
+        paths.get("twitter-source"),
+        Some(&twitter_base.join("twitter-source").display().to_string())
+    );
+    assert_eq!(
+        paths.get("tiktok-source"),
+        Some(&tiktok_special_path.display().to_string()),
+        "a per-profile special path must take precedence over the account and global roots"
+    );
+}
+
+#[test]
 fn instagram_media_identity_keys_backfill_from_legacy_file_names() {
     let (_temp_dir, layout) = create_test_layout();
 

@@ -99,6 +99,7 @@ interface ProfileWorkspaceProps {
   onClearSelection: () => void
   onServiceTabChange: (value: ServiceTabKey) => void
   onSavePathFilterChange: (value: string) => void
+  onVisibleSourceIdsChange?: (sourceIds: string[]) => void
   onEditSource: (id: string) => void
   onOpenSourceContextMenu: (id: string, x: number, y: number, preserveSelection: boolean) => void
   onReorderGroup?: (swap: GroupSortSwap) => void
@@ -115,6 +116,7 @@ export function ProfileWorkspace({
   onClearSelection,
   onServiceTabChange,
   onSavePathFilterChange,
+  onVisibleSourceIdsChange,
   onEditSource,
   onOpenSourceContextMenu,
   onReorderGroup,
@@ -156,6 +158,9 @@ export function ProfileWorkspace({
     }
     return result
   }, [searchText, serviceTab, savePathFilter, snapshot.sources, snapshot.sourceMediaPaths])
+  useEffect(() => {
+    onVisibleSourceIdsChange?.(filteredSources.map((source) => source.id))
+  }, [filteredSources, onVisibleSourceIdsChange])
   useEffect(() => {
     if (savePathFilter && !savePathOptions.some((option) => option.path === savePathFilter)) {
       onSavePathFilterChange('')
@@ -784,7 +789,6 @@ const GridCard = memo(function GridCard({
     </button>
   )
 })
-
 // -- List row --
 
 const ListRow = memo(function ListRow({
@@ -861,4 +865,3 @@ const ListRow = memo(function ListRow({
     </button>
   )
 })
-
