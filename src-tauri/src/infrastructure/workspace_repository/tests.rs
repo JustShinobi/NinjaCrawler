@@ -739,7 +739,7 @@ fn is_profile_image_file_excludes_avatar_and_profile_picture() {
 fn reconcile_tiktok_provider_ledgers_from_disk_seeds_existing_files() {
     let (_temp_dir, layout) = create_test_layout();
 
-    let (recovered, post_count, media_count, thumbnail_count) =
+    let (recovered, post_count, media_count, thumbnail_count, liked_timeline_count, liked_likes_count) =
         with_workspace_layout(layout, |connection, test_layout| {
             upsert_provider_account_with_connection(
                 connection,
@@ -779,6 +779,37 @@ fn reconcile_tiktok_provider_ledgers_from_disk_seeds_existing_files() {
                 b"settings",
             )
             .map_err(|error| error.to_string())?;
+            // Liked videos are owned by the likes runtime (section "likes"); the
+            // timeline reconcile must skip them so it never shadows that section
+            // with a competing "timeline" row on the same relative path.
+            fs::create_dir_all(profile_root.join("Liked")).map_err(|error| error.to_string())?;
+            fs::write(
+                profile_root
+                    .join("Liked")
+                    .join("eujhulys_1743950164_7490208900055190789.mp4"),
+                b"liked video",
+            )
+            .map_err(|error| error.to_string())?;
+            // Simulate a database left behind by an older build: the same liked
+            // file has both the likes runtime's legitimate "likes" row and the
+            // bogus "timeline" row a previous reconcile wrote (keyed by file name,
+            // lowercased path). The reconcile must purge the latter and keep the
+            // former.
+            connection
+                .execute_batch(
+                    "INSERT INTO provider_sync_media_ledger
+                        (provider, source_id, account_id, source_handle,
+                         provider_media_key, media_type, media_section, relative_path,
+                         first_seen_at, last_seen_at)
+                     VALUES
+                        ('tiktok','source-1','account-1','@archangelszxx',
+                         'liked_7490208900055190789','video','likes',
+                         'Liked/eujhulys_1743950164_7490208900055190789.mp4','t0','t0'),
+                        ('tiktok','source-1','account-1','@archangelszxx',
+                         'eujhulys_1743950164_7490208900055190789.mp4','video','timeline',
+                         'liked/eujhulys_1743950164_7490208900055190789.mp4','t0','t0');",
+                )
+                .map_err(|error| error.to_string())?;
 
             let recovered = reconcile_tiktok_provider_ledgers_from_disk(
                 connection,
@@ -813,14 +844,46 @@ fn reconcile_tiktok_provider_ledgers_from_disk_seeds_existing_files() {
                     |row| row.get(0),
                 )
                 .map_err(|error| error.to_string())?;
-            Ok((recovered, post_count, media_count, thumbnail_count))
+            // Bogus reconciled row (lowercased `liked/...`, section "timeline").
+            let liked_timeline_count: i64 = connection
+                .query_row(
+                    "SELECT COUNT(*) FROM provider_sync_media_ledger
+                     WHERE provider = 'tiktok' AND source_id = 'source-1'
+                       AND media_section = 'timeline'
+                       AND relative_path LIKE 'liked/%'",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(|error| error.to_string())?;
+            // Legitimate likes runtime row (keyed by `liked_<id>`, section "likes").
+            let liked_likes_count: i64 = connection
+                .query_row(
+                    "SELECT COUNT(*) FROM provider_sync_media_ledger
+                     WHERE provider = 'tiktok' AND source_id = 'source-1'
+                       AND media_section = 'likes'",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(|error| error.to_string())?;
+            Ok((
+                recovered,
+                post_count,
+                media_count,
+                thumbnail_count,
+                liked_timeline_count,
+                liked_likes_count,
+            ))
         })
         .expect("existing TikTok files should seed provider ledgers");
 
     assert_eq!(recovered, 2);
     assert_eq!(post_count, 2);
-    assert_eq!(media_count, 2);
+    // Two reconciled timeline files plus the preserved likes runtime row.
+    assert_eq!(media_count, 3);
     assert_eq!(thumbnail_count, 0);
+    // The bogus liked "timeline" row must be purged, and the real likes row kept.
+    assert_eq!(liked_timeline_count, 0);
+    assert_eq!(liked_likes_count, 1);
 }
 
 fn create_test_layout() -> (TempDir, StorageLayout) {
@@ -1245,6 +1308,79 @@ fn manual_handle_change_is_supported_for_every_provider() {
             .iter()
             .any(|handle| handle == "source-instagram"),
         "manual Instagram rename should preserve the previous handle"
+    );
+}
+
+#[test]
+fn load_source_sync_runs_caps_history_per_source() {
+    let (_temp_dir, layout) = create_test_layout();
+    let connection = database::open_connection(&layout.db_path).expect("connection");
+    upsert_provider_account_with_connection(
+        &connection,
+        &layout,
+        sample_account("account-1", "instagram"),
+    )
+    .expect("account should upsert");
+    upsert_source_profile_with_connection(
+        &connection,
+        &layout,
+        sample_source("source-1", "instagram", Some("account-1")),
+    )
+    .expect("source should upsert");
+    upsert_source_profile_with_connection(
+        &connection,
+        &layout,
+        sample_source("source-2", "instagram", Some("account-1")),
+    )
+    .expect("source should upsert");
+
+    let insert_run = |run_id: &str, source_id: &str, minute: u32| {
+        let timestamp = format!("2026-07-01T10:{minute:02}:00Z");
+        connection
+            .execute(
+                "INSERT INTO source_sync_runs (
+                    id, source_id, account_id, provider, tool, trigger, status,
+                    summary, command_preview, manifest_summary_json,
+                    degraded_capabilities_json, started_at, finished_at, created_at
+                 ) VALUES (
+                    ?1, ?2, 'account-1', 'instagram', 'internal.instagram',
+                    'manual', 'succeeded', 'ok', 'test', NULL, '[]', ?3, ?3, ?3
+                 )",
+                params![run_id, source_id, timestamp],
+            )
+            .expect("run should insert");
+    };
+    for minute in 0..25 {
+        insert_run(&format!("run-a-{minute:02}"), "source-1", minute);
+    }
+    for minute in 0..3 {
+        insert_run(&format!("run-b-{minute:02}"), "source-2", minute);
+    }
+
+    let runs = load_source_sync_runs(&connection).expect("runs should load");
+    let source_1_runs: Vec<_> = runs
+        .iter()
+        .filter(|run| run.source_id == "source-1")
+        .collect();
+    let source_2_runs: Vec<_> = runs
+        .iter()
+        .filter(|run| run.source_id == "source-2")
+        .collect();
+    assert_eq!(
+        source_1_runs.len(),
+        SYNC_RUN_HISTORY_CAP_PER_ENTITY as usize,
+        "history above the cap should be trimmed per source"
+    );
+    assert_eq!(
+        source_2_runs.len(),
+        3,
+        "sources below the cap keep their full history"
+    );
+    assert!(
+        source_1_runs
+            .iter()
+            .all(|run| run.finished_at.as_str() >= "2026-07-01T10:05:00Z"),
+        "the most recent runs are the ones kept"
     );
 }
 
@@ -2541,6 +2677,92 @@ fn resolved_source_media_output_root_uses_instagram_account_media_path_setting()
 }
 
 #[test]
+fn snapshot_exposes_save_paths_for_all_supported_providers() {
+    let (temp_dir, layout) = create_test_layout();
+    let instagram_base = temp_dir.path().join("instagram-account");
+    let twitter_base = temp_dir.path().join("twitter-account");
+    let tiktok_special_path = temp_dir.path().join("tiktok-special");
+
+    let paths = with_workspace_layout(layout, |connection, test_layout| {
+        for (id, provider) in [
+            ("instagram-account", "instagram"),
+            ("twitter-account", "twitter"),
+            ("tiktok-account", "tiktok"),
+        ] {
+            upsert_provider_account_with_connection(
+                connection,
+                test_layout,
+                sample_account(id, provider),
+            )?;
+        }
+
+        save_provider_account_settings_with_connection(
+            connection,
+            test_layout,
+            "instagram-account".to_string(),
+            vec![ProviderAccountSettingValue {
+                setting_key: "instagram.account.mediaPath".to_string(),
+                value_kind: ProviderAccountSettingValueKind::String,
+                string_value: Some(instagram_base.display().to_string()),
+                json_value: None,
+            }],
+        )?;
+        save_provider_account_settings_with_connection(
+            connection,
+            test_layout,
+            "twitter-account".to_string(),
+            vec![ProviderAccountSettingValue {
+                setting_key: "twitter.account.mediaPath".to_string(),
+                value_kind: ProviderAccountSettingValueKind::String,
+                string_value: Some(twitter_base.display().to_string()),
+                json_value: None,
+            }],
+        )?;
+
+        upsert_source_profile_with_connection(
+            connection,
+            test_layout,
+            sample_source("instagram-source", "instagram", Some("instagram-account")),
+        )?;
+        upsert_source_profile_with_connection(
+            connection,
+            test_layout,
+            sample_source("twitter-source", "twitter", Some("twitter-account")),
+        )?;
+        let mut tiktok_source = sample_source("tiktok-source", "tiktok", Some("tiktok-account"));
+        tiktok_source
+            .sync_options
+            .tiktok
+            .as_mut()
+            .expect("TikTok source should have default options")
+            .special_path = Some(tiktok_special_path.display().to_string());
+        upsert_source_profile_with_connection(connection, test_layout, tiktok_source)?;
+
+        Ok(load_snapshot(connection, test_layout)?.source_media_paths)
+    })
+    .expect("snapshot should expose every provider save path");
+
+    assert_eq!(
+        paths.get("instagram-source"),
+        Some(
+            &instagram_base
+                .join("instagram-source")
+                .display()
+                .to_string()
+        )
+    );
+    assert_eq!(
+        paths.get("twitter-source"),
+        Some(&twitter_base.join("twitter-source").display().to_string())
+    );
+    assert_eq!(
+        paths.get("tiktok-source"),
+        Some(&tiktok_special_path.display().to_string()),
+        "a per-profile special path must take precedence over the account and global roots"
+    );
+}
+
+#[test]
 fn instagram_media_identity_keys_backfill_from_legacy_file_names() {
     let (_temp_dir, layout) = create_test_layout();
 
@@ -3321,6 +3543,191 @@ fn running_source_sync_cancellation_preserves_account_health() {
         snapshot.account_sessions[0].last_validation_error.is_none(),
         "manual cancellation should not mark account session as degraded"
     );
+}
+
+#[test]
+fn ensure_avatar_thumbnail_generates_and_invalidates_by_mtime() {
+    let (_temp_dir, layout) = create_test_layout();
+    let original_path = layout.media_root.join(PROFILE_PICTURE_FILE_NAME);
+    // PNG RGBA gravado com extensão .jpg de propósito: o decoder deve
+    // adivinhar o formato pelo conteúdo e o encoder achatar o canal alfa.
+    let original = image::RgbaImage::from_pixel(800, 600, image::Rgba([200, 30, 30, 128]));
+    original
+        .save_with_format(&original_path, image::ImageFormat::Png)
+        .expect("original avatar");
+
+    let thumbs_dir = layout.cache_root.join("avatar-thumbs");
+    let count_thumbs = || {
+        fs::read_dir(&thumbs_dir)
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .filter(|entry| {
+                        entry.file_name().to_string_lossy().starts_with("source-1.")
+                    })
+                    .count()
+            })
+            .unwrap_or(0)
+    };
+
+    let thumb_path = ensure_avatar_thumbnail(&layout, "source-1", &original_path)
+        .expect("thumbnail should generate");
+    let thumb_name = Path::new(&thumb_path)
+        .file_name()
+        .expect("thumb file name")
+        .to_string_lossy()
+        .to_string();
+    assert_eq!(Path::new(&thumb_path).parent(), Some(thumbs_dir.as_path()));
+    // O nome carrega o mtime (cache-buster no path, não em query string).
+    assert!(
+        thumb_name.starts_with("source-1.") && thumb_name.ends_with(".jpg"),
+        "thumb name should be source-1.<mtime>.jpg, got {thumb_name}"
+    );
+    let decoded = image::open(&thumb_path).expect("thumb should decode as jpeg");
+    assert_eq!(
+        (decoded.width(), decoded.height()),
+        (AVATAR_THUMB_MAX_DIMENSION, 192),
+        "800x600 should downscale preserving aspect ratio"
+    );
+
+    // Original inalterado: a segunda chamada reaproveita o mesmo jpg.
+    let reused = ensure_avatar_thumbnail(&layout, "source-1", &original_path)
+        .expect("thumbnail should be reused");
+    assert_eq!(reused, thumb_path);
+    assert_eq!(count_thumbs(), 1);
+
+    // Original substituído (mtime mais novo) → novo path e o antigo é removido.
+    std::thread::sleep(StdDuration::from_millis(50));
+    let replacement = image::RgbaImage::from_pixel(300, 300, image::Rgba([10, 10, 200, 255]));
+    replacement
+        .save_with_format(&original_path, image::ImageFormat::Png)
+        .expect("replacement avatar");
+    let regenerated = ensure_avatar_thumbnail(&layout, "source-1", &original_path)
+        .expect("thumbnail should regenerate");
+    assert_ne!(regenerated, thumb_path, "a changed avatar yields a new thumb path");
+    assert!(!Path::new(&thumb_path).exists(), "the stale thumb is removed");
+    assert_eq!(count_thumbs(), 1, "old versions must not accumulate");
+    let decoded = image::open(&regenerated).expect("regenerated thumb should decode");
+    assert_eq!(
+        (decoded.width(), decoded.height()),
+        (AVATAR_THUMB_MAX_DIMENSION, AVATAR_THUMB_MAX_DIMENSION)
+    );
+
+    remove_avatar_thumbnail(&layout, "source-1");
+    assert!(!Path::new(&regenerated).exists());
+    assert_eq!(count_thumbs(), 0);
+}
+
+#[test]
+fn ensure_image_thumbnail_generates_beside_media_and_invalidates_by_mtime() {
+    let temp_dir = tempfile::tempdir().expect("temp dir");
+    let media_dir = temp_dir.path().join("instagram").join("someone");
+    fs::create_dir_all(&media_dir).expect("media dir");
+    let photo = media_dir.join("2026-05-19_photo.jpg");
+    // PNG salvo com extensão .jpg de propósito: decode adivinha o formato e o
+    // encoder achata o alfa. 1440x1800 espelha uma foto grande do Instagram (a
+    // decisão de gerar é por dimensão, não por tamanho de arquivo).
+    image::RgbaImage::from_pixel(1440, 1800, image::Rgba([40, 160, 220, 200]))
+        .save_with_format(&photo, image::ImageFormat::Png)
+        .expect("source photo");
+
+    let thumb = ensure_image_thumbnail(&photo).expect("thumbnail should generate");
+    let thumb_path = PathBuf::from(&thumb);
+    // Convenção `.thumbs/<arquivo>.jpg` ao lado da mídia (mesma dos vídeos).
+    assert_eq!(thumb_path.parent(), Some(media_dir.join(".thumbs").as_path()));
+    assert_eq!(
+        thumb_path.file_name().and_then(|n| n.to_str()),
+        Some("2026-05-19_photo.jpg.jpg")
+    );
+    let decoded = image::open(&thumb_path).expect("thumb decodes as jpeg");
+    assert_eq!(
+        (decoded.width(), decoded.height()),
+        (384, 480),
+        "1440x1800 deve reduzir para caber em 480px preservando o aspecto"
+    );
+
+    // Reaproveita quando o original não mudou.
+    let first_mtime = fs::metadata(&thumb_path)
+        .and_then(|m| m.modified())
+        .expect("mtime");
+    assert_eq!(ensure_image_thumbnail(&photo).as_deref(), Some(thumb.as_str()));
+    assert_eq!(
+        fs::metadata(&thumb_path).and_then(|m| m.modified()).unwrap(),
+        first_mtime,
+        "thumb atual não deve ser reescrito"
+    );
+
+    // Original substituído (mtime maior) → regenera com o novo aspecto (prova a
+    // invalidação por mtime).
+    std::thread::sleep(StdDuration::from_millis(50));
+    image::RgbaImage::from_pixel(800, 800, image::Rgba([10, 10, 10, 255]))
+        .save_with_format(&photo, image::ImageFormat::Png)
+        .expect("replacement photo");
+    let regenerated = ensure_image_thumbnail(&photo).expect("regenerates");
+    let decoded = image::open(&regenerated).expect("regenerated decodes");
+    assert_eq!(
+        (decoded.width(), decoded.height()),
+        (480, 480),
+        "800x800 deve reduzir para 480x480"
+    );
+
+    // Caso-chave: dimensões grandes mas arquivo minúsculo (cor sólida comprime
+    // a poucos KB, como um JPEG bem comprimido do Instagram) AINDA gera thumb —
+    // a decisão é por dimensão, não por bytes.
+    let compressed = media_dir.join("compressed.jpg");
+    image::RgbaImage::from_pixel(2000, 2000, image::Rgba([7, 7, 7, 255]))
+        .save_with_format(&compressed, image::ImageFormat::Png)
+        .expect("compressed photo");
+    assert!(
+        fs::metadata(&compressed).unwrap().len() < 150 * 1024,
+        "cor sólida deve comprimir a poucos KB"
+    );
+    assert!(
+        ensure_image_thumbnail(&compressed).is_some(),
+        "dimensão grande gera thumb mesmo com arquivo pequeno"
+    );
+
+    // Dimensões pequenas (≤480px): sem thumb (o `thumbnail()` faria upscale); o
+    // front usa o original, que já é leve.
+    let small = media_dir.join("small.png");
+    image::RgbaImage::from_pixel(320, 240, image::Rgba([1, 2, 3, 255]))
+        .save_with_format(&small, image::ImageFormat::Png)
+        .expect("small photo");
+    assert!(
+        ensure_image_thumbnail(&small).is_none(),
+        "imagem ≤480px não deve gerar thumb (upscale)"
+    );
+    assert!(!video_thumbnail_path(&small).unwrap().exists());
+}
+
+#[test]
+fn is_thumbnailable_image_covers_supported_formats_only() {
+    assert!(is_thumbnailable_image(Path::new("a/b/photo.JPG")));
+    assert!(is_thumbnailable_image(Path::new("x.jpeg")));
+    assert!(is_thumbnailable_image(Path::new("x.png")));
+    assert!(is_thumbnailable_image(Path::new("x.webp")));
+    assert!(!is_thumbnailable_image(Path::new("x.gif")));
+    assert!(!is_thumbnailable_image(Path::new("x.bmp")));
+    assert!(!is_thumbnailable_image(Path::new("x.mp4")));
+}
+
+#[test]
+fn ensure_avatar_thumbnail_returns_none_for_undecodable_input() {
+    let (_temp_dir, layout) = create_test_layout();
+    let original_path = layout.media_root.join(PROFILE_PICTURE_FILE_NAME);
+    fs::write(&original_path, b"not an image at all").expect("bogus avatar");
+
+    let result = ensure_avatar_thumbnail(&layout, "source-1", &original_path);
+    assert!(result.is_none(), "undecodable input should not produce a thumb");
+    let thumbs_dir = layout.cache_root.join("avatar-thumbs");
+    let generated = fs::read_dir(&thumbs_dir)
+        .map(|entries| {
+            entries
+                .flatten()
+                .any(|entry| entry.file_name().to_string_lossy().starts_with("source-1."))
+        })
+        .unwrap_or(false);
+    assert!(!generated, "no thumb file should be written for undecodable input");
 }
 
 #[test]

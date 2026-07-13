@@ -170,6 +170,24 @@ describe('ProfileViewPage', () => {
     expect(screen.getAllByRole('button', { name: /open preview/i }).length).toBe(2)
   })
 
+  it('uses the generated thumbnail for a photo card, falling back to the original', async () => {
+    // Thumb pronto só para o 1º frame do slideshow; o vídeo continua sem thumb.
+    bridgeMocks.loadMediaThumbnails.mockResolvedValue({
+      available: true,
+      thumbs: { 'S:/x/b_0.jpeg': 'S:/x/.thumbs/b_0.jpeg.jpg' },
+    })
+    const { container } = render(<ProfileViewPage initialSourceId="src-1" />)
+    await screen.findByRole('heading', { name: /gaaby\.tls/i })
+
+    await waitFor(() => {
+      const imgs = Array.from(
+        container.querySelectorAll('.profile-view-thumb img'),
+      ) as HTMLImageElement[]
+      const photo = imgs.find((img) => img.getAttribute('src')?.includes('b_0'))
+      expect(photo?.getAttribute('src')).toBe('asset://S:/x/.thumbs/b_0.jpeg.jpg')
+    })
+  })
+
   it('opens the original post link online', async () => {
     render(<ProfileViewPage initialSourceId="src-1" />)
     const onlineButtons = await screen.findAllByRole('button', { name: 'Online' })

@@ -761,6 +761,51 @@ export interface SourceDeleteQueueStatus {
   updatedAt: string
 }
 
+export interface MediaPathMigrationQueueJob {
+  jobId: string
+  sourceId: string
+  provider: ProviderKey
+  handle: string
+  sourcePath: string
+  targetPath: string
+  state: 'queued' | 'running'
+  queuedAt: string
+  startedAt?: string
+  progressPercent?: number
+  progressStage: 'queued' | 'scanning' | 'moving' | 'updating_profile' | 'finalizing'
+  progressIndeterminate: boolean
+  progressLabel?: string
+  progressDetail?: string
+  filesProcessed: number
+  filesTotal: number
+  bytesProcessed: number
+  bytesTotal: number
+  currentFile?: string
+}
+export interface MediaPathMigrationQueueRecentResult {
+  jobId: string
+  sourceId: string
+  provider: ProviderKey
+  handle: string
+  sourcePath: string
+  targetPath: string
+  status: 'succeeded' | 'failed' | 'cancelled'
+  summary: string
+  finishedAt: string
+  error?: string
+}
+export interface MediaPathMigrationQueueStatus {
+  queuedCount: number
+  runningCount: number
+  completedCount: number
+  failedCount: number
+  totalCount: number
+  queuedItems: MediaPathMigrationQueueJob[]
+  runningItems: MediaPathMigrationQueueJob[]
+  recentResults: MediaPathMigrationQueueRecentResult[]
+  updatedAt: string
+}
+
 export interface SourceProfile {
   id: string
   provider: ProviderKey

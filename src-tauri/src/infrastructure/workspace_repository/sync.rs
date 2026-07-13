@@ -56,6 +56,15 @@ pub(super) fn reconcile_tiktok_provider_ledgers_from_disk(
     source_handle: &str,
     timestamp: &str,
 ) -> Result<usize, String> {
+    // Purge liked media that earlier builds wrongly reconciled as "timeline".
+    // Those rows share the physical file (and therefore the gallery's relative
+    // path key) with the likes runtime's own "likes" row, so leaving them behind
+    // keeps leaking liked media into the Timeline tab even after this reconcile
+    // stopped producing them. The likes runtime's row (media_section = "likes")
+    // is untouched; if no likes row exists the gallery falls back to the on-disk
+    // `Liked/` folder and still classifies it correctly.
+    purge_reconciled_tiktok_liked_timeline_rows(connection, source_id)?;
+
     let files = collect_media_file_paths(profile_root)?;
     let mut observed_by_post: HashMap<String, twitter_connector::ObservedTwitterPost> =
         HashMap::new();
@@ -128,16 +137,47 @@ pub(super) fn reconcile_tiktok_provider_ledgers_from_disk(
     Ok(recovered_media.len())
 }
 
+/// Removes the bogus `media_section = "timeline"` rows that older builds wrote
+/// for liked media (keyed by file name, with a lowercased `liked/...` relative
+/// path). SQLite's `LIKE` is ASCII case-insensitive, so `'liked/%'` also matches
+/// the likes runtime's own `Liked/...` path — the `media_section = 'timeline'`
+/// filter is what keeps that legitimate `"likes"` row intact.
+fn purge_reconciled_tiktok_liked_timeline_rows(
+    connection: &Connection,
+    source_id: &str,
+) -> Result<(), String> {
+    connection
+        .execute(
+            "DELETE FROM provider_sync_media_ledger
+             WHERE provider = 'tiktok'
+               AND source_id = ?1
+               AND media_section = 'timeline'
+               AND (relative_path LIKE 'liked/%' OR relative_path LIKE 'likes/%')",
+            params![source_id],
+        )
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
 fn is_recoverable_tiktok_media_path(profile_root: &Path, path: &Path, file_name: &str) -> bool {
     if is_profile_image_file(file_name) {
         return false;
     }
     let relative = path.strip_prefix(profile_root).unwrap_or(path);
+    // This reconcile only recovers timeline media that is on disk but missing
+    // from the ledger, so it hard-codes `media_section = "timeline"`. Liked
+    // videos live under `Liked/` (new) or `Likes/` (legacy) and are owned by
+    // the likes runtime, which already writes them with `media_section =
+    // "likes"`. Recovering them here would emit a competing ledger row (keyed by
+    // file name instead of `liked_<id>`) that shadows the "likes" section on the
+    // same `relative_path`, leaking liked media into the Timeline tab.
     if relative.components().any(|component| {
         let segment = component.as_os_str().to_string_lossy();
         segment.eq_ignore_ascii_case(".thumbs")
             || segment.eq_ignore_ascii_case("cover")
             || segment.eq_ignore_ascii_case("settings")
+            || segment.eq_ignore_ascii_case("liked")
+            || segment.eq_ignore_ascii_case("likes")
     }) {
         return false;
     }
@@ -1058,6 +1098,7 @@ pub(super) fn execute_source_sync_with_connection(
                 if let Some(avatar_path) = resolved_avatar {
                     let _ = update_source_profile_image(
                         connection,
+                        layout,
                         &context.source.id,
                         &avatar_path,
                         &finished_at,
@@ -1560,6 +1601,7 @@ pub(super) fn execute_twitter_source_sync_with_connection(
                 if let Some(avatar_path) = resolved_avatar {
                     let _ = update_source_profile_image(
                         connection,
+                        layout,
                         &context.source.id,
                         &avatar_path,
                         &finished_at,
@@ -2662,6 +2704,7 @@ pub(super) fn execute_tiktok_source_sync_with_connection(
                 if let Some(avatar_path) = resolved_avatar {
                     let _ = update_source_profile_image(
                         connection,
+                        layout,
                         &context.source.id,
                         &avatar_path,
                         &finished_at,
@@ -4164,6 +4207,7 @@ pub(super) fn execute_instagram_source_sync_with_connection(
                 if let Some(avatar_path) = resolved_avatar {
                     let _ = update_source_profile_image(
                         connection,
+                        layout,
                         &context.source.id,
                         &avatar_path,
                         &finished_at,
@@ -5038,6 +5082,13 @@ pub(super) fn ensure_instagram_sync_post_ledger_table(
         )
         .map_err(|error| error.to_string())
 }
+/// Máximo de runs de histórico por entidade (source/account/plan) carregadas
+/// no snapshot. As tabelas crescem sem poda e todo snapshot ia inteiro para o
+/// webview a cada publicação; a UI mostra no máximo ~10 runs por entidade. O
+/// cap é POR ENTIDADE (window function) — um LIMIT global apagaria o histórico
+/// de perfis raramente sincronizados.
+pub(super) const SYNC_RUN_HISTORY_CAP_PER_ENTITY: u32 = 20;
+
 pub(super) fn load_source_sync_runs(connection: &Connection) -> Result<Vec<SourceSyncRun>, String> {
     let mut statement = connection
         .prepare(
@@ -5055,12 +5106,21 @@ pub(super) fn load_source_sync_runs(connection: &Connection) -> Result<Vec<Sourc
                 degraded_capabilities_json,
                 started_at,
                 finished_at
-             FROM source_sync_runs
+             FROM (
+                SELECT
+                    r.*,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY source_id
+                        ORDER BY finished_at DESC, created_at DESC
+                    ) AS recency_rank
+                FROM source_sync_runs r
+             )
+             WHERE recency_rank <= ?1
              ORDER BY finished_at DESC, created_at DESC",
         )
         .map_err(|error| error.to_string())?;
     let rows = statement
-        .query_map([], |row| {
+        .query_map(params![SYNC_RUN_HISTORY_CAP_PER_ENTITY], |row| {
             Ok(SourceSyncRun {
                 id: row.get(0)?,
                 source_id: row.get(1)?,
@@ -5098,12 +5158,21 @@ pub(super) fn load_account_sync_runs(
                 command_preview,
                 started_at,
                 finished_at
-             FROM account_sync_runs
+             FROM (
+                SELECT
+                    r.*,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY account_id
+                        ORDER BY finished_at DESC, created_at DESC
+                    ) AS recency_rank
+                FROM account_sync_runs r
+             )
+             WHERE recency_rank <= ?1
              ORDER BY finished_at DESC, created_at DESC",
         )
         .map_err(|error| error.to_string())?;
     let rows = statement
-        .query_map([], |row| {
+        .query_map(params![SYNC_RUN_HISTORY_CAP_PER_ENTITY], |row| {
             Ok(AccountSyncRun {
                 id: row.get(0)?,
                 account_id: row.get(1)?,

@@ -12,8 +12,9 @@ use crate::domain::models::{
     SyncPlanTargetPreview, SyncPlanTargetPreviewInput, SyncPlanUpsert, WorkspaceSnapshot,
 };
 use crate::infrastructure::{
-    connector_debug, connector_runtime, desktop_runtime, import_runtime, media_thumbnail_runtime,
-    single_video_runtime, source_delete_runtime, source_sync_runtime, workspace_repository,
+    connector_debug, connector_runtime, desktop_runtime, import_runtime,
+    media_path_migration_runtime, media_thumbnail_runtime, single_video_runtime,
+    source_delete_runtime, source_sync_runtime, workspace_repository,
 };
 
 fn publish_snapshot(
@@ -267,6 +268,28 @@ pub fn change_source_media_path(
 }
 
 #[tauri::command]
+pub fn enqueue_source_media_path_migration(
+    app: tauri::AppHandle,
+    source_ids: Vec<String>,
+    target_base_path: String,
+) -> Result<crate::domain::models::MediaPathMigrationQueueStatus, String> {
+    media_path_migration_runtime::enqueue(&app, source_ids, target_base_path)
+}
+
+#[tauri::command]
+pub fn media_path_migration_queue_status(
+) -> Result<crate::domain::models::MediaPathMigrationQueueStatus, String> {
+    media_path_migration_runtime::status()
+}
+
+#[tauri::command]
+pub fn cancel_media_path_migrations(
+    app: tauri::AppHandle,
+) -> Result<crate::domain::models::MediaPathMigrationQueueStatus, String> {
+    media_path_migration_runtime::cancel_all(&app)
+}
+
+#[tauri::command]
 pub fn open_batch_editor_window(
     app: tauri::AppHandle,
     source_ids: Vec<String>,
@@ -279,6 +302,9 @@ pub fn delete_source_profile(
     app: tauri::AppHandle,
     input: SourceProfileDeleteInput,
 ) -> Result<WorkspaceSnapshot, String> {
+    if media_path_migration_runtime::is_source_migrating(&input.id) {
+        return Err("This profile has a media-path migration queued or running.".to_string());
+    }
     let status = source_sync_runtime::source_sync_queue_status()?;
     let blocked = status
         .queued_items
@@ -303,6 +329,9 @@ pub fn enqueue_source_delete(
     app: tauri::AppHandle,
     input: SourceProfileDeleteInput,
 ) -> Result<SourceDeleteQueueStatus, String> {
+    if media_path_migration_runtime::is_source_migrating(&input.id) {
+        return Err("This profile has a media-path migration queued or running.".to_string());
+    }
     source_delete_runtime::enqueue_source_delete(&app, input)
 }
 
@@ -568,18 +597,39 @@ pub fn open_source_folder(
     publish_snapshot(&app, workspace_repository::open_source_folder(source_id)?)
 }
 
+// Comandos read-only pesados de disco: varredura de galeria e geração de
+// thumbnails (ffmpeg/decode de imagem). Rodam em `spawn_blocking` para o I/O
+// não prender os workers do runtime e atrasar outros `invoke` (ex.: durante o
+// scroll de um perfil grande num volume lento).
 #[tauri::command]
-pub fn load_source_media_gallery(
+pub async fn load_source_media_gallery(
     source_id: String,
 ) -> Result<crate::domain::models::SourceMediaGallery, String> {
-    workspace_repository::load_source_media_gallery(source_id)
+    tauri::async_runtime::spawn_blocking(move || {
+        workspace_repository::load_source_media_gallery(source_id)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
-pub fn load_media_thumbnails(
+pub async fn load_media_thumbnails(
     paths: Vec<String>,
 ) -> Result<crate::domain::models::MediaThumbnailBatch, String> {
-    workspace_repository::load_media_thumbnails(paths)
+    tauri::async_runtime::spawn_blocking(move || workspace_repository::load_media_thumbnails(paths))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+pub async fn load_avatar_thumbnails(
+    source_ids: Option<Vec<String>>,
+) -> Result<crate::domain::models::AvatarThumbnailBatch, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        workspace_repository::load_avatar_thumbnails(source_ids)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]

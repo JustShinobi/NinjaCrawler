@@ -1,6 +1,7 @@
 use rusqlite::{Connection, OptionalExtension};
 use std::collections::HashSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 
 const MIGRATIONS: &[(i64, &str)] = &[
     (1, include_str!("../../migrations/0001_initial.sql")),
@@ -150,6 +151,10 @@ const MIGRATIONS: &[(i64, &str)] = &[
         39,
         include_str!("../../migrations/0039_provider_sync_resume_schema_repair.sql"),
     ),
+    (
+        40,
+        include_str!("../../migrations/0040_media_path_migration_queue.sql"),
+    ),
 ];
 
 const PROVIDER_SYNC_RESUME_SCHEMA: &str =
@@ -218,6 +223,40 @@ pub fn open_connection(path: &Path) -> rusqlite::Result<Connection> {
     connection.busy_timeout(std::time::Duration::from_secs(15))?;
     let _ = connection.pragma_update(None, "journal_mode", "WAL");
     let _ = connection.pragma_update(None, "synchronous", "NORMAL");
+
+    // As migrations são versionadas e idempotentes, mas revalidá-las (1 SELECT
+    // por migration) em TODA abertura de conexão é puro overhead — cada comando
+    // e cada tick de 5s reabrem conexão. Roda uma vez por arquivo de banco por
+    // processo. A chave por path preserva o suite hermético dos testes (um
+    // banco temporário por teste, cada um migrado na 1ª abertura).
+    ensure_migrations(&mut connection, path)?;
+
+    // Invariante operacional: migrations de branches de desenvolvimento podem
+    // colidir por versao. A fila nao deve falhar só porque o ledger diz que a
+    // migration passou enquanto as tabelas requeridas estao ausentes. Reparo
+    // barato, mantido por-abertura de propósito.
+    ensure_provider_sync_resume_schema(&connection)?;
+
+    Ok(connection)
+}
+
+fn migrated_db_paths() -> &'static Mutex<HashSet<PathBuf>> {
+    static APPLIED: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
+    APPLIED.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+fn ensure_migrations(connection: &mut Connection, path: &Path) -> rusqlite::Result<()> {
+    let key = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    // Segura o lock durante a corrida: só a primeira abertura de cada banco
+    // paga as migrations; aberturas concorrentes do mesmo banco esperam em vez
+    // de rodar o loop duas vezes.
+    let mut applied = migrated_db_paths()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if applied.contains(&key) {
+        return Ok(());
+    }
+
     connection.execute_batch(
         "CREATE TABLE IF NOT EXISTS schema_migrations (
             version INTEGER PRIMARY KEY,
@@ -248,12 +287,8 @@ pub fn open_connection(path: &Path) -> rusqlite::Result<Connection> {
         transaction.commit()?;
     }
 
-    // Invariante operacional: migrations de branches de desenvolvimento podem
-    // colidir por versao. A fila nao deve falhar só porque o ledger diz que a
-    // migration passou enquanto as tabelas requeridas estao ausentes.
-    ensure_provider_sync_resume_schema(&connection)?;
-
-    Ok(connection)
+    applied.insert(key);
+    Ok(())
 }
 
 #[cfg(test)]
@@ -288,6 +323,45 @@ mod tests {
         assert!(resume.contains("scope"));
         assert!(resume.contains("state"));
         assert!(holds.contains("hold_until"));
+    }
+
+    #[test]
+    fn open_connection_migrates_once_per_path_and_serves_reopens() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("once.db");
+
+        // 1ª abertura roda as migrations.
+        {
+            let connection = open_connection(&path).expect("first open");
+            let applied: i64 = connection
+                .query_row("SELECT count(*) FROM schema_migrations", [], |row| {
+                    row.get(0)
+                })
+                .expect("migration ledger populated");
+            assert!(applied >= 1, "migrations should run on the first open");
+        }
+
+        // 2ª abertura do MESMO path pula o loop (guard), mas o schema migrado
+        // persiste no arquivo — a conexão continua funcional.
+        {
+            let connection = open_connection(&path).expect("reopen same path");
+            connection
+                .query_row("SELECT count(*) FROM source_profiles", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .expect("migrated table still queryable after reopen");
+        }
+
+        // Um path NOVO migra de forma independente — o guard é por-arquivo, não
+        // global (garante que o suite hermético, com um banco por teste, não
+        // fica sem migrations).
+        let other = temp.path().join("other.db");
+        let connection = open_connection(&other).expect("second path open");
+        connection
+            .query_row("SELECT count(*) FROM source_profiles", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .expect("a fresh db path migrates on its own first open");
     }
 
     #[test]

@@ -24,6 +24,9 @@ pub fn run() {
                 let app_handle = app.handle().clone();
                 thread::spawn(move || {
                     thread::sleep(Duration::from_millis(2000));
+                    infrastructure::media_path_migration_runtime::restore_persisted_queue(
+                        &app_handle,
+                    );
                     infrastructure::source_sync_runtime::restore_persisted_queue(&app_handle);
                 });
             }
@@ -74,6 +77,9 @@ pub fn run() {
             application::commands::upsert_source_profile,
             application::commands::batch_update_source_profiles,
             application::commands::change_source_media_path,
+            application::commands::enqueue_source_media_path_migration,
+            application::commands::media_path_migration_queue_status,
+            application::commands::cancel_media_path_migrations,
             application::commands::open_batch_editor_window,
             application::commands::delete_source_profile,
             application::commands::enqueue_source_delete,
@@ -108,6 +114,7 @@ pub fn run() {
             application::commands::open_source_folder,
             application::commands::load_source_media_gallery,
             application::commands::load_media_thumbnails,
+            application::commands::load_avatar_thumbnails,
             application::commands::enqueue_media_thumbnail_generation,
             application::commands::media_thumbnail_queue_status,
             application::commands::enqueue_single_video_download,

@@ -13,7 +13,13 @@ pub fn start(app: AppHandle) -> Result<(), String> {
     thread::spawn(move || loop {
         match workspace_repository::process_scheduler_tick() {
             Ok((snapshot, requests)) => {
-                let _ = desktop_runtime::publish_workspace_runtime(&app, &snapshot);
+                // O snapshot só vem quando o tick mudou algo (plano rodou/estado
+                // alterado). Em ociosidade é None e nem montamos o snapshot; o
+                // evento de tick abaixo ainda sai para as janelas de scheduler
+                // fazerem o próprio refresh (countdowns de plano).
+                if let Some(snapshot) = snapshot {
+                    let _ = desktop_runtime::publish_workspace_runtime_if_changed(&app, &snapshot);
+                }
                 // Os planos vencidos enfileiram suas fontes na fila sequencial
                 // de sync; nada roda inline aqui (evita travar a UI).
                 for request in requests {

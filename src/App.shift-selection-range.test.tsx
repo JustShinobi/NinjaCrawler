@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { useEffect } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import App from './App'
 import type { WorkspaceSnapshot } from './domain/models'
@@ -51,8 +52,26 @@ vi.mock('./features/workspace/AccountsMenu', () => ({
   AccountsMenu: () => <div>AccountsMenu</div>,
 }))
 vi.mock('./features/workspace/ProfileWorkspace', () => ({
-  ProfileWorkspace: ({ onSelectSource, selectedSourceIds }: { onSelectSource: (id: string, options?: { append?: boolean; range?: boolean; visibleIds?: string[] }) => void; selectedSourceIds: string[] }) => {
+  ProfileWorkspace: ({
+    onSelectSource,
+    onVisibleSourceIdsChange,
+    searchText,
+    selectedSourceIds,
+  }: {
+    onSelectSource: (id: string, options?: { append?: boolean; range?: boolean; visibleIds?: string[] }) => void
+    onVisibleSourceIdsChange?: (ids: string[]) => void
+    searchText: string
+    selectedSourceIds: string[]
+  }) => {
     const visibleIds = ['source-a', 'source-e', 'source-b', 'source-c', 'source-d']
+
+    useEffect(() => {
+      const query = searchText.trim().toLowerCase()
+      const filteredIds = currentSnapshot.sources
+        .filter((source) => source.handle.toLowerCase().includes(query))
+        .map((source) => source.id)
+      onVisibleSourceIdsChange?.(filteredIds)
+    }, [onVisibleSourceIdsChange, searchText])
 
     return (
       <div>

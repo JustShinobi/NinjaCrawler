@@ -8,6 +8,7 @@ import { SourceSyncQueueWindowPage } from './SourceSyncQueueWindowPage'
 const bridgeMocks = vi.hoisted(() => ({
   cancelSourceSyncProfile: vi.fn(),
   cancelSourceSyncProvider: vi.fn(),
+  cancelMediaPathMigrations: vi.fn(),
   pauseSourceSyncProvider: vi.fn(),
   resumeSourceSyncProvider: vi.fn(),
   reorderSourceSyncProviderQueue: vi.fn(),
@@ -16,6 +17,7 @@ const bridgeMocks = vi.hoisted(() => ({
   loadSourceSyncQueueStatus: vi.fn(),
   loadWorkspaceSnapshot: vi.fn(),
   loadMediaThumbnailQueueStatus: vi.fn(),
+  loadMediaPathMigrationQueueStatus: vi.fn(),
   enqueueMediaThumbnailGeneration: vi.fn(),
   openConnectorDebugWindow: vi.fn(),
   subscribeToDesktopRuntimeEvents: vi.fn(),
@@ -105,6 +107,10 @@ describe('SourceSyncQueueWindowPage', () => {
     }
     bridgeMocks.cancelSourceSyncProfile.mockResolvedValue({})
     bridgeMocks.cancelSourceSyncProvider.mockResolvedValue({})
+    bridgeMocks.cancelMediaPathMigrations.mockResolvedValue({
+      queuedCount: 0, runningCount: 1, completedCount: 0, failedCount: 0, totalCount: 1,
+      queuedItems: [], runningItems: [], recentResults: [], updatedAt: '',
+    })
     bridgeMocks.pauseSourceSyncProvider.mockResolvedValue({})
     bridgeMocks.resumeSourceSyncProvider.mockResolvedValue({})
     bridgeMocks.reorderSourceSyncProviderQueue.mockResolvedValue({})
@@ -118,6 +124,17 @@ describe('SourceSyncQueueWindowPage', () => {
       completedCount: 0,
       failedCount: 0,
       queuedItems: [],
+      recentResults: [],
+      updatedAt: '',
+    })
+    bridgeMocks.loadMediaPathMigrationQueueStatus.mockResolvedValue({
+      queuedCount: 0,
+      runningCount: 0,
+      completedCount: 0,
+      failedCount: 0,
+      totalCount: 0,
+      queuedItems: [],
+      runningItems: [],
       recentResults: [],
       updatedAt: '',
     })
@@ -201,6 +218,26 @@ describe('SourceSyncQueueWindowPage', () => {
     expect(await screen.findByText('Account hold')).toBeTruthy()
     expect(screen.getByText(/On hold.*retry after/i)).toBeTruthy()
     expect(screen.getByText(/Twitter Account rate limit/i)).toBeTruthy()
+  })
+
+  it('shows sync jobs waiting for a media-path migration as Migration hold', async () => {
+    bridgeMocks.loadSourceSyncQueueStatus.mockResolvedValue(
+      statusFixture({
+        queuedCount: 1,
+        runningCount: 0,
+        providers: [{ provider: 'twitter', displayName: 'X / Twitter', queued: 1, running: 0, completed: 0, failed: 0, total: 1, paused: false }],
+        queuedItems: [{
+          sourceId: 'twitter-migrating', provider: 'twitter', handle: '@moving', state: 'held',
+          queuedAt: '2026-07-12T00:00:00Z', progressLabel: 'Waiting for media move',
+          progressDetail: "This sync will start automatically after the profile's media-path migration finishes.",
+        }],
+        runningItems: [],
+      }),
+    )
+    render(<SourceSyncQueueWindowPage />)
+
+    expect(await screen.findByText('Migration hold')).toBeTruthy()
+    expect(screen.getByText(/start automatically after.*migration finishes/i)).toBeTruthy()
   })
 
   it('opens the realtime backend debugger from the queue window', async () => {
@@ -372,6 +409,7 @@ describe('SourceSyncQueueWindowPage', () => {
     })
     render(<SourceSyncQueueWindowPage />)
 
+    fireEvent.click(await screen.findByRole('button', { name: /^maintenance/i }))
     fireEvent.change(await screen.findByLabelText('Scope'), { target: { value: 'provider' } })
     fireEvent.change(screen.getByLabelText('Provider'), { target: { value: 'tiktok' } })
     fireEvent.click(screen.getByRole('button', { name: /generate missing thumbnails/i }))
@@ -379,5 +417,83 @@ describe('SourceSyncQueueWindowPage', () => {
     await waitFor(() => {
       expect(bridgeMocks.enqueueMediaThumbnailGeneration).toHaveBeenCalledWith(['tk-1', 'tk-2'])
     })
+  })
+
+  it('keeps maintenance controls collapsed until requested', async () => {
+    render(<SourceSyncQueueWindowPage />)
+
+    const toggle = await screen.findByRole('button', { name: /^maintenance/i })
+    expect(toggle.getAttribute('aria-expanded')).toBe('false')
+    expect(screen.queryByRole('region', { name: /maintenance controls/i })).toBeNull()
+
+    fireEvent.click(toggle)
+    expect(toggle.getAttribute('aria-expanded')).toBe('true')
+    expect(screen.getByRole('region', { name: /maintenance controls/i })).toBeTruthy()
+  })
+
+  it('shows real migration progress outside the collapsed maintenance panel', async () => {
+    bridgeMocks.loadMediaPathMigrationQueueStatus.mockResolvedValue({
+      queuedCount: 2,
+      runningCount: 1,
+      completedCount: 0,
+      failedCount: 0,
+      totalCount: 3,
+      queuedItems: [],
+      runningItems: [{
+        jobId: 'migration-1', sourceId: 'tk-1', provider: 'tiktok', handle: '@moving',
+        sourcePath: 'F:\\old', targetPath: 'S:\\new', state: 'running', queuedAt: '2026-07-12T12:00:00Z',
+        progressPercent: 42, progressStage: 'moving', progressIndeterminate: false,
+        filesProcessed: 42, filesTotal: 100, bytesProcessed: 4200, bytesTotal: 10000,
+      }],
+      recentResults: [],
+      updatedAt: '2026-07-12T12:00:05Z',
+    })
+
+    render(<SourceSyncQueueWindowPage />)
+
+    const progress = await screen.findByRole('progressbar', { name: /moving media migration/i })
+    expect(progress.getAttribute('aria-valuenow')).toBe('42')
+    expect(screen.getByText('Files').parentElement?.textContent).toContain('42 of 100')
+    expect(screen.queryByRole('region', { name: /maintenance controls/i })).toBeNull()
+  })
+
+  it('cancels queued and active path migrations without affecting completed work', async () => {
+    bridgeMocks.loadMediaPathMigrationQueueStatus.mockResolvedValue({
+      queuedCount: 2, runningCount: 1, completedCount: 4, failedCount: 0, totalCount: 7,
+      queuedItems: [],
+      runningItems: [{
+        jobId: 'migration-1', sourceId: 'tk-1', provider: 'tiktok', handle: '@moving',
+        sourcePath: 'F:\\old', targetPath: 'S:\\new', state: 'running', queuedAt: '2026-07-12T12:00:00Z',
+        progressPercent: 42, progressStage: 'moving', progressIndeterminate: false,
+        filesProcessed: 42, filesTotal: 100, bytesProcessed: 4200, bytesTotal: 10000,
+      }],
+      recentResults: [], updatedAt: '',
+    })
+    render(<SourceSyncQueueWindowPage />)
+
+    fireEvent.click(await screen.findByRole('button', { name: /cancel migrations/i }))
+
+    await waitFor(() => expect(bridgeMocks.cancelMediaPathMigrations).toHaveBeenCalledTimes(1))
+  })
+
+  it('uses the refreshed profile avatar for completed migrations in Recent', async () => {
+    bridgeMocks.loadWorkspaceSnapshot.mockResolvedValue({
+      sources: [{ id: 'tw-1', provider: 'twitter', handle: '@moved', profileImagePath: 'S:\\moved\\ProfilePicture.jpg' }],
+      schedulerGroups: [],
+    })
+    bridgeMocks.loadMediaPathMigrationQueueStatus.mockResolvedValue({
+      queuedCount: 0, runningCount: 0, completedCount: 1, failedCount: 0, totalCount: 1,
+      queuedItems: [], runningItems: [],
+      recentResults: [{
+        jobId: 'migration-done', sourceId: 'tw-1', provider: 'twitter', handle: '@moved',
+        sourcePath: 'F:\\old', targetPath: 'S:\\moved', status: 'succeeded',
+        summary: 'Moved 10 files.', finishedAt: '2026-07-12T12:05:00Z',
+      }], updatedAt: '',
+    })
+
+    const { container } = render(<SourceSyncQueueWindowPage />)
+    await screen.findByText('@moved')
+
+    await waitFor(() => expect(container.querySelector('.queue-recent-item img')?.getAttribute('src')).toBe('S:\\moved\\ProfilePicture.jpg'))
   })
 })

@@ -11,15 +11,36 @@ vi.mock('@tauri-apps/api/core', () => ({
 }))
 
 vi.mock('./thumbnailCache', () => ({
-  getPreviewSource: (source: { profileImagePath?: string; profileImageCustom: boolean; lastSyncedAt?: string }) => {
-    if (!source.profileImagePath) return undefined
-    if (!source.profileImageCustom && source.lastSyncedAt) {
-      const version = encodeURIComponent(source.lastSyncedAt)
-      return `${source.profileImagePath}?sync=${version}`
-    }
-    return source.profileImagePath
-  },
+  // Espelha o fallback real: asset URL direta, sem query string (o
+  // cache-buster mora no nome do arquivo do thumb, testado no Rust).
+  getPreviewSource: (source: { profileImagePath?: string }) =>
+    source.profileImagePath ?? undefined,
+  subscribeToAvatarThumbnails: () => () => undefined,
+  getAvatarThumbnailsEpoch: () => 0,
 }))
+
+// jsdom não faz layout, então a virtualização real (que depende de medir a
+// viewport/linhas) renderizaria zero linhas. Trocamos o virtualizer por um que
+// renderiza todas as linhas — os testes checam conteúdo, não o windowing.
+vi.mock('@tanstack/react-virtual', () => ({
+  useVirtualizer: ({ count }: { count: number }) => ({
+    getTotalSize: () => count * 100,
+    getVirtualItems: () =>
+      Array.from({ length: count }, (_, index) => ({ index, key: index, start: index * 100 })),
+    measureElement: () => undefined,
+    measure: () => undefined,
+    scrollToIndex: () => undefined,
+    isScrolling: false,
+  }),
+}))
+
+// O componente usa ResizeObserver p/ medir a largura; jsdom não o tem.
+class ResizeObserverStub {
+  observe() {}
+  unobserve() {}
+  disconnect() {}
+}
+vi.stubGlobal('ResizeObserver', ResizeObserverStub)
 
 describe('ProfileWorkspace', () => {
   afterEach(() => {
@@ -84,6 +105,94 @@ describe('ProfileWorkspace', () => {
     expect(screen.queryByText('@visual_lab')).toBeNull()
     expect(onSelectSource).toHaveBeenCalledWith('source-1')
     expect(onOpenSourceContextMenu).toHaveBeenCalledWith('source-1', 164, 212, false)
+  })
+
+  it('filters profiles from different providers by their save path', () => {
+    const onSavePathFilterChange = vi.fn()
+    const snapshot = buildSnapshot()
+    snapshot.sources = [
+      snapshot.sources[0],
+      {
+        ...snapshot.sources[0],
+        id: 'source-2',
+        provider: 'tiktok',
+        handle: '@short_video',
+        displayName: 'short_video',
+      },
+      {
+        ...snapshot.sources[0],
+        id: 'source-3',
+        provider: 'twitter',
+        handle: '@news_feed',
+        displayName: 'news_feed',
+      },
+    ]
+    snapshot.sourceMediaPaths = {
+      'source-1': 'D:\\Media\\Instagram\\visual_lab',
+      'source-2': 'E:\\Media\\TikTok\\short_video',
+      'source-3': 'E:\\Media\\TikTok\\news_feed',
+    }
+
+    render(
+      <ProfileWorkspace
+        onClearSelection={vi.fn()}
+        onEditSource={vi.fn()}
+        onOpenSourceContextMenu={vi.fn()}
+        onSavePathFilterChange={onSavePathFilterChange}
+        onSelectSource={vi.fn()}
+        onServiceTabChange={vi.fn()}
+        savePathFilter={'E:\\Media\\TikTok'}
+        searchText=""
+        selectedSourceIds={[]}
+        serviceTab="all"
+        snapshot={snapshot}
+      />,
+    )
+
+    const savePathFilter = screen.getByRole('combobox', { name: 'Filter by save path' })
+    expect(savePathFilter).toBeTruthy()
+    expect(screen.queryByText('visual_lab')).toBeNull()
+    expect(screen.getByText('short_video')).toBeTruthy()
+    expect(screen.getByText('news_feed')).toBeTruthy()
+
+    fireEvent.change(savePathFilter, { target: { value: 'D:\\Media\\Instagram' } })
+    expect(onSavePathFilterChange).toHaveBeenCalledWith('D:\\Media\\Instagram')
+  })
+
+  it('hides the save-path filter when every profile has the same base directory', () => {
+    const snapshot = buildSnapshot()
+    snapshot.sources = [
+      snapshot.sources[0],
+      {
+        ...snapshot.sources[0],
+        id: 'source-2',
+        provider: 'tiktok',
+        handle: '@short_video',
+        displayName: 'short_video',
+      },
+    ]
+    snapshot.sourceMediaPaths = {
+      'source-1': 'D:\\Media\\Shared\\visual_lab',
+      'source-2': 'D:\\Media\\Shared\\short_video',
+    }
+
+    render(
+      <ProfileWorkspace
+        onClearSelection={vi.fn()}
+        onEditSource={vi.fn()}
+        onOpenSourceContextMenu={vi.fn()}
+        onSavePathFilterChange={vi.fn()}
+        onSelectSource={vi.fn()}
+        onServiceTabChange={vi.fn()}
+        savePathFilter=""
+        searchText=""
+        selectedSourceIds={[]}
+        serviceTab="all"
+        snapshot={snapshot}
+      />,
+    )
+
+    expect(screen.queryByRole('combobox', { name: 'Filter by save path' })).toBeNull()
   })
 
   it('shows a selected marker in grid cards', () => {
@@ -308,8 +417,8 @@ describe('ProfileWorkspace', () => {
       target: { value: 'category' },
     })
 
-    expect(container.querySelector('.profile-group.profile-group-framed')).toBeTruthy()
-    expect(container.querySelector('.profile-group-content')).toBeTruthy()
+    expect(container.querySelector('.workspace-vframe.workspace-vframe-start')).toBeTruthy()
+    expect(container.querySelector('.workspace-vframe .profile-grid')).toBeTruthy()
   })
 
   it('hides group content when the group is collapsed', () => {
@@ -335,11 +444,11 @@ describe('ProfileWorkspace', () => {
 
     fireEvent.click(screen.getByRole('button', { name: /regular/i }))
 
-    expect(container.querySelector('.profile-group.profile-group-collapsed')).toBeTruthy()
+    expect(container.querySelector('.workspace-vframe.profile-group-collapsed')).toBeTruthy()
     expect(screen.queryByRole('listitem')).toBeNull()
   })
 
-  it('uses profile image path directly and cache-busts synced provider avatars', () => {
+  it('renders the avatar image from the preview source', () => {
     ;(window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ = {}
     const snapshot = buildSnapshot()
     snapshot.sources[0] = {
@@ -365,39 +474,10 @@ describe('ProfileWorkspace', () => {
       />,
     )
 
-    const image = screen.getByRole('img', { name: 'visual_lab' })
-    expect(image.getAttribute('src')).toBe(
-      'C:/temp/ProfilePicture.jpg?sync=2026-03-20T10%3A11%3A12Z',
-    )
-  })
-
-  it('does not cache-bust custom profile avatars', () => {
-    ;(window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ = {}
-    const snapshot = buildSnapshot()
-    snapshot.sources[0] = {
-      ...snapshot.sources[0],
-      profileImagePath: 'C:/temp/ProfilePicture.jpg',
-      profileImageCustom: true,
-      lastSyncedAt: '2026-03-20T10:11:12Z',
-    }
-
-    render(
-      <ProfileWorkspace
-        onClearSelection={vi.fn()}
-        onEditSource={vi.fn()}
-        onOpenSourceContextMenu={vi.fn()}
-        onSelectSource={vi.fn()}
-        onServiceTabChange={vi.fn()}
-        onSavePathFilterChange={vi.fn()}
-        savePathFilter=""
-        searchText=""
-        selectedSourceIds={[]}
-        serviceTab="all"
-        snapshot={snapshot}
-      />,
-    )
-
+    // Sem query string: o asset protocol do Windows não a ignora e falharia
+    // ao abrir o arquivo. O cache-buster vive no nome do thumb versionado.
     const image = screen.getByRole('img', { name: 'visual_lab' })
     expect(image.getAttribute('src')).toBe('C:/temp/ProfilePicture.jpg')
+    expect(image.getAttribute('loading')).toBe('lazy')
   })
 })

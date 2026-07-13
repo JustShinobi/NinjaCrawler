@@ -485,6 +485,25 @@ pub struct MediaThumbnailBatch {
     pub thumbs: HashMap<String, String>,
 }
 
+/// Thumbnail de avatar (jpg 256px) em cache local — a lista de perfis exibe
+/// estes arquivos pequenos no disco do sistema em vez dos `ProfilePicture.jpg`
+/// em resolução original no volume de mídia.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AvatarThumbnail {
+    pub source_id: String,
+    pub path: String,
+    /// mtime (ms) do jpg — cache-buster `?v=` no frontend, já que o path do
+    /// thumb é estável por convenção `{source_id}.jpg`.
+    pub version: u64,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AvatarThumbnailBatch {
+    pub thumbs: Vec<AvatarThumbnail>,
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MediaThumbnailQueueItem {
@@ -721,6 +740,59 @@ pub struct SourceDeleteQueueStatus {
     pub queued_items: Vec<SourceDeleteQueueJob>,
     pub running_items: Vec<SourceDeleteQueueJob>,
     pub recent_results: Vec<SourceDeleteQueueRecentResult>,
+    pub updated_at: String,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaPathMigrationQueueJob {
+    pub job_id: String,
+    pub source_id: String,
+    pub provider: String,
+    pub handle: String,
+    pub source_path: String,
+    pub target_path: String,
+    pub state: String,
+    pub queued_at: String,
+    pub started_at: Option<String>,
+    pub progress_percent: Option<u32>,
+    pub progress_stage: String,
+    pub progress_indeterminate: bool,
+    pub progress_label: Option<String>,
+    pub progress_detail: Option<String>,
+    pub files_processed: u64,
+    pub files_total: u64,
+    pub bytes_processed: u64,
+    pub bytes_total: u64,
+    pub current_file: Option<String>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaPathMigrationQueueRecentResult {
+    pub job_id: String,
+    pub source_id: String,
+    pub provider: String,
+    pub handle: String,
+    pub source_path: String,
+    pub target_path: String,
+    pub status: String,
+    pub summary: String,
+    pub finished_at: String,
+    pub error: Option<String>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaPathMigrationQueueStatus {
+    pub queued_count: u32,
+    pub running_count: u32,
+    pub completed_count: u32,
+    pub failed_count: u32,
+    pub total_count: u32,
+    pub queued_items: Vec<MediaPathMigrationQueueJob>,
+    pub running_items: Vec<MediaPathMigrationQueueJob>,
+    pub recent_results: Vec<MediaPathMigrationQueueRecentResult>,
     pub updated_at: String,
 }
 

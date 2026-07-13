@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow'
 import {
-  changeSourceMediaPath,
+  enqueueSourceMediaPathMigration,
   checkSourceAvailability,
   enqueueSourceDelete,
   loadSourceDeleteQueueStatus,
@@ -44,12 +44,10 @@ import { AccountsMenu } from './features/workspace/AccountsMenu'
 import { InternalDialog } from './features/workspace/InternalDialog'
 import { ProfileWorkspace, type SourceSelectionOptions } from './features/workspace/ProfileWorkspace'
 import { RuntimeLogWindowPage } from './features/workspace/RuntimeLogWindowPage'
-import { invalidateSource, preloadAllThumbnails } from './features/workspace/thumbnailCache'
+import { invalidateSource, refreshAvatarThumbnails } from './features/workspace/thumbnailCache'
 import {
   buildSourceProfileUrl,
   buildServiceTabs,
-  filterSourcesForWorkspace,
-  mediaPathBaseDir,
   parseClipboardProfileSeed,
   type ClipboardProfileSeed,
   type GroupSortSwap,
@@ -146,6 +144,7 @@ function App() {
   const [profileContextMenu, setProfileContextMenu] = useState<ProfileContextMenuState>()
   const [searchText, setSearchText] = useState('')
   const [savePathFilter, setSavePathFilter] = useState<string>('')
+  const [visibleSourceIds, setVisibleSourceIds] = useState<string[]>()
   const [mediaPathChange, setMediaPathChange] = useState<{ sourceIds: string[]; basePath: string } | undefined>()
   const [mediaPathSubmitting, setMediaPathSubmitting] = useState(false)
   const [mediaPathError, setMediaPathError] = useState<string>()
@@ -222,7 +221,7 @@ function App() {
 
     void Promise.resolve(bootstrap()).then((snapshot) => {
       if (snapshot?.sources) {
-        void preloadAllThumbnails(snapshot.sources)
+        void refreshAvatarThumbnails()
       }
     }).catch(() => undefined)
   }, [bootstrap, windowKind])
@@ -258,12 +257,12 @@ function App() {
     let unsubscribe: (() => void) | undefined
 
     void subscribeToDesktopRuntimeEvents({
-      onSchedulerTick: () => {
-        void refreshSnapshot().catch(() => undefined)
-      },
+      // Sem handler de onSchedulerTick: o backend agora empurra o snapshot
+      // (evento abaixo) somente quando algo mudou; re-buscar tudo a cada tick
+      // era trabalho dobrado a cada 5s.
       onWorkspaceSnapshotChanged: (nextSnapshot) => {
         applySnapshot(nextSnapshot)
-        void preloadAllThumbnails(nextSnapshot.sources)
+        void refreshAvatarThumbnails()
       },
       onRouteActivation: (actionRoute) => {
         if (actionRoute === 'scheduler') {
@@ -365,13 +364,12 @@ function App() {
     if (!snapshot) {
       return []
     }
-    let result = filterSourcesForWorkspace(snapshot.sources, serviceTab, searchText)
-    if (savePathFilter) {
-      const paths = snapshot.sourceMediaPaths ?? {}
-      result = result.filter((source) => mediaPathBaseDir(paths[source.id] ?? '') === savePathFilter)
+    if (!visibleSourceIds) {
+      return snapshot.sources
     }
-    return result
-  }, [searchText, serviceTab, savePathFilter, snapshot])
+    const visibleIdSet = new Set(visibleSourceIds)
+    return snapshot.sources.filter((source) => visibleIdSet.has(source.id))
+  }, [snapshot, visibleSourceIds])
   const providerLabels = useMemo(
     () => (snapshot ? new Map(snapshot.providerCatalog.map((provider) => [provider.key, provider.displayName])) : new Map()),
     [snapshot],
@@ -1312,10 +1310,7 @@ function App() {
     setProfileContextMenu(undefined)
     await pickProfileImage(sourceId)
     invalidateSource(sourceId)
-    const updatedSource = useAppStore.getState().snapshot?.sources.find((s) => s.id === sourceId)
-    if (updatedSource) {
-      void preloadAllThumbnails([updatedSource])
-    }
+    void refreshAvatarThumbnails([sourceId])
   }
 
   async function handleResetProfileImage(sourceId: string) {
@@ -1326,10 +1321,7 @@ function App() {
     setProfileContextMenu(undefined)
     await resetProfileImage(sourceId)
     invalidateSource(sourceId)
-    const updatedSource = useAppStore.getState().snapshot?.sources.find((s) => s.id === sourceId)
-    if (updatedSource) {
-      void preloadAllThumbnails([updatedSource])
-    }
+    void refreshAvatarThumbnails([sourceId])
   }
 
   async function handleOpenSourceFolder(sourceId: string) {
@@ -1360,8 +1352,9 @@ function App() {
     setMediaPathSubmitting(true)
     setMediaPathError(undefined)
     try {
-      await changeSourceMediaPath(mediaPathChange.sourceIds, mediaPathChange.basePath, true)
+      await enqueueSourceMediaPathMigration(mediaPathChange.sourceIds, mediaPathChange.basePath)
       setMediaPathChange(undefined)
+      await openSourceSyncQueueWindow()
     } catch (error) {
       setMediaPathError(error instanceof Error ? error.message : String(error))
     } finally {
@@ -1510,6 +1503,11 @@ function App() {
           onSelectSource={handleSelectSource}
           onServiceTabChange={setServiceTab}
           onSavePathFilterChange={setSavePathFilter}
+          onVisibleSourceIdsChange={(sourceIds) => {
+            setVisibleSourceIds((current) => (
+              arraysEqual(current ?? [], sourceIds) ? current : sourceIds
+            ))
+          }}
           onOpenSourceContextMenu={handleOpenSourceContextMenu}
           searchText={searchText}
           savePathFilter={savePathFilter}
@@ -1629,7 +1627,7 @@ function App() {
                 onClick={() => void confirmChangeSourceMediaPath()}
                 type="button"
               >
-                {mediaPathSubmitting ? 'Moving…' : 'Move and change path'}
+                {mediaPathSubmitting ? 'Queueing…' : 'Queue migration'}
               </button>
             </div>
           </section>

@@ -653,10 +653,11 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
     if (scrollRef.current) scrollRef.current.scrollTop = 0
   }, [sourceId, sectionFilter])
 
-  // Thumbnails de vídeo gerados pelo backend (ffmpeg): o grid nunca monta
-  // <video> quando eles existem — media elements aos milhares travam o webview.
-  // `''` marca falha de geração (não re-pede). Cache por caminho absoluto,
-  // válido entre perfis/abas.
+  // Thumbnails gerados pelo backend, por caminho absoluto: vídeo via ffmpeg
+  // (o grid nunca monta <video> quando existem — media elements aos milhares
+  // travam o webview) e foto via crate image (~480px, evita decodificar a
+  // imagem em resolução original no webview). `''` marca falha de geração (não
+  // re-pede). Cache válido entre perfis/abas.
   const [thumbs, setThumbs] = useState<ReadonlyMap<string, string>>(() => new Map())
   // ffmpeg ausente → cai no thumb por <video> (gated pelo isScrolling).
   const [thumbsUnavailable, setThumbsUnavailable] = useState(false)
@@ -668,15 +669,18 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
     : ''
   useEffect(() => {
     // Durante a rolagem não adianta pedir: a viewport ainda está mudando.
-    if (isScrolling || thumbsUnavailable || !isVirtualized) return
+    if (isScrolling || !isVirtualized) return
     const wanted: string[] = []
     for (const item of rowVirtualizer.getVirtualItems()) {
       const row = virtualRows[item.index]
       if (!row || row.type !== 'grid') continue
       for (const post of row.posts) {
         const file = post.files[0]
-        if (!file || !isVideo(file.mediaType)) continue
+        if (!file) continue
         if (post.posterPath) continue
+        // Vídeo depende de ffmpeg; se indisponível não adianta pedir (cai no
+        // <video>). Foto gera sempre (crate image, sem ffmpeg).
+        if (isVideo(file.mediaType) && thumbsUnavailable) continue
         const key = file.absolutePath
         if (!thumbs.has(key) && !pendingThumbsRef.current.has(key)) {
           wanted.push(key)
@@ -692,10 +696,9 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
       .then((batch) => {
         for (const key of wanted) pendingThumbsRef.current.delete(key)
         if (cancelled) return
-        if (!batch.available) {
-          setThumbsUnavailable(true)
-          return
-        }
+        // available=false sinaliza só ffmpeg ausente (afeta vídeo); as fotos do
+        // lote ainda vêm no batch, então mesclamos de qualquer forma.
+        if (!batch.available) setThumbsUnavailable(true)
         setThumbs((current) => {
           const next = new Map(current)
           // Sem resultado = falha de geração → '' impede novo pedido.
@@ -959,10 +962,13 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
     const thumb = post.files[0]
     if (!thumb) return null
     const thumbIsVideo = isVideo(thumb.mediaType)
-    // Poster: cover em disco > jpg gerado pelo ffmpeg > (foto) o próprio arquivo.
-    const generatedThumb = thumbIsVideo ? thumbs.get(thumb.absolutePath) : undefined
+    // Poster: cover em disco > thumb gerado (.thumbs) > o próprio arquivo. Foto
+    // sem thumb ainda cai no original full-res (transitório, até o thumb
+    // chegar); vídeo sem thumb cai no <video>. Nunca imagem quebrada.
+    const generatedThumb = thumbs.get(thumb.absolutePath)
     const posterSrc =
-      post.posterPath ?? (thumbIsVideo ? generatedThumb || undefined : thumb.absolutePath)
+      post.posterPath
+      ?? (thumbIsVideo ? generatedThumb || undefined : generatedThumb || thumb.absolutePath)
     // O <video> como thumb é o último recurso (ffmpeg indisponível) e nunca
     // monta durante a rolagem — media elements em massa travam o webview. O
     // modo álbum (Highlights, poucos itens, fora do virtualizer/efeito de
@@ -977,7 +983,9 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
         // Se um jpg derivado estiver corrompido/inacessível, o MediaCard cai
         // para o próprio vídeo apenas naquele card; não deixa ícone quebrado.
         videoThumbAbsPath={
-          allowVideoThumb || Boolean(generatedThumb) ? thumb.absolutePath : undefined
+          thumbIsVideo && (allowVideoThumb || Boolean(generatedThumb))
+            ? thumb.absolutePath
+            : undefined
         }
         isVideo={video}
         slideshowCount={post.mediaType === 'slideshow' ? post.files.length : undefined}

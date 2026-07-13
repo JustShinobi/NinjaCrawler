@@ -124,12 +124,18 @@ pub fn clone_sync_plan(input: CloneSyncPlanInput) -> Result<WorkspaceSnapshot, S
         load_snapshot(connection, layout)
     })
 }
-pub fn process_scheduler_tick() -> Result<(WorkspaceSnapshot, Vec<PlanSyncEnqueueRequest>), String>
-{
+pub fn process_scheduler_tick(
+) -> Result<(Option<WorkspaceSnapshot>, Vec<PlanSyncEnqueueRequest>), String> {
     with_workspace(|connection, layout| {
-        let requests =
+        let (requests, changed) =
             process_scheduler_tick_with_connection(connection, layout, &now_timestamp())?;
-        let snapshot = load_snapshot(connection, layout)?;
+        // Só remonta o snapshot quando o tick mexeu em algo — em ociosidade
+        // nada muda e o `load_snapshot` (caro: canonicalize por perfil) é pulado.
+        let snapshot = if changed {
+            Some(load_snapshot(connection, layout)?)
+        } else {
+            None
+        };
         Ok((snapshot, requests))
     })
 }
@@ -369,19 +375,26 @@ pub(super) fn record_scheduler_launch_with_connection(
 ) -> Result<(), String> {
     upsert_app_setting_value(connection, "runtime.scheduler.launch_at", launched_at)
 }
+/// Devolve `(requests, changed)`. `changed` indica se o tick alterou algo no
+/// banco (um plano rodou, ou o estado de runtime de algum plano mudou) — o
+/// chamador só remonta/publica o snapshot quando `changed`, evitando refazer
+/// `load_snapshot` (com `canonicalize()` por perfil) a cada 5s em ociosidade.
 pub(super) fn process_scheduler_tick_with_connection(
     connection: &Connection,
     layout: &StorageLayout,
     now: &str,
-) -> Result<Vec<PlanSyncEnqueueRequest>, String> {
+) -> Result<(Vec<PlanSyncEnqueueRequest>, bool), String> {
     let launch_at = ensure_scheduler_launch_at(connection, now)?;
     let plans = load_active_automatic_sync_plans(connection)?;
 
     let mut requests = Vec::new();
+    let mut changed = false;
     for plan in plans {
         let next_due_at = compute_sync_plan_next_due_at(&plan, &launch_at, now)?;
         if let Some(next_due_at_value) = next_due_at.as_deref() {
             if is_timestamp_due(next_due_at_value, now)? {
+                // Um plano venceu: roda (grava run + last_run_at) → estado mudou.
+                changed = true;
                 let source_ids = run_sync_plan_now_with_connection(
                     connection,
                     layout,
@@ -398,6 +411,11 @@ pub(super) fn process_scheduler_tick_with_connection(
                         }),
                 );
             } else {
+                // O else-branch só pode alterar next_due_at e paused; o UPDATE
+                // é no-op quando ambos coincidem (ver update_sync_plan_runtime_state).
+                let will_change = next_due_at.as_deref() != plan.next_due_at.as_deref()
+                    || is_sync_plan_paused(&plan, now) != plan.paused;
+                changed = changed || will_change;
                 update_sync_plan_runtime_state(
                     connection,
                     &plan.id,
@@ -413,7 +431,7 @@ pub(super) fn process_scheduler_tick_with_connection(
         }
     }
 
-    Ok(requests)
+    Ok((requests, changed))
 }
 /// Resolve as fontes do plano e devolve os ids a enfileirar — NÃO executa o
 /// sync aqui. Rodar os downloads inline (gallery-dl + reqwest + sleeps de rate
@@ -1146,8 +1164,33 @@ pub(super) fn update_sync_plan_runtime_state(
 ) -> Result<(), String> {
     let current = load_sync_plan(connection, plan_id)?
         .ok_or_else(|| format!("Sync plan '{}' does not exist.", plan_id))?;
-    let now = now_timestamp();
 
+    let next_last_run_at = patch.last_run_at.or(current.last_run_at.as_deref());
+    let next_last_run_status = patch.last_run_status.unwrap_or(&current.last_run_status);
+    let next_last_run_summary = patch
+        .last_run_summary
+        .or(current.last_run_summary.as_deref());
+    let next_skip_until = patch.skip_until.or(current.skip_until.as_deref());
+    let next_due_at = patch.next_due_at.or(current.next_due_at.as_deref());
+    let next_pause_mode = patch.pause_mode.unwrap_or_else(|| current.pause_mode.clone());
+    let next_pause_until = patch.pause_until.or(current.pause_until.as_deref());
+    let next_paused = patch.paused.unwrap_or(current.paused);
+
+    // O tick do scheduler chama isto para cada plano a cada 5s; sem este
+    // guard, cada tick gravava WAL mesmo quando nada mudou.
+    let unchanged = next_last_run_at == current.last_run_at.as_deref()
+        && next_last_run_status == current.last_run_status
+        && next_last_run_summary == current.last_run_summary.as_deref()
+        && next_skip_until == current.skip_until.as_deref()
+        && next_due_at == current.next_due_at.as_deref()
+        && next_pause_mode == current.pause_mode
+        && next_pause_until == current.pause_until.as_deref()
+        && next_paused == current.paused;
+    if unchanged {
+        return Ok(());
+    }
+
+    let now = now_timestamp();
     connection
         .execute(
             "UPDATE sync_plans
@@ -1163,16 +1206,14 @@ pub(super) fn update_sync_plan_runtime_state(
              WHERE id = ?1",
             params![
                 plan_id,
-                patch.last_run_at.or(current.last_run_at.as_deref()),
-                patch.last_run_status.unwrap_or(&current.last_run_status),
-                patch
-                    .last_run_summary
-                    .or(current.last_run_summary.as_deref()),
-                patch.skip_until.or(current.skip_until.as_deref()),
-                patch.next_due_at.or(current.next_due_at.as_deref()),
-                patch.pause_mode.unwrap_or(current.pause_mode),
-                patch.pause_until.or(current.pause_until.as_deref()),
-                bool_to_int(patch.paused.unwrap_or(current.paused)),
+                next_last_run_at,
+                next_last_run_status,
+                next_last_run_summary,
+                next_skip_until,
+                next_due_at,
+                next_pause_mode,
+                next_pause_until,
+                bool_to_int(next_paused),
                 now,
             ],
         )
@@ -1348,12 +1389,21 @@ pub(super) fn load_sync_plan_runs(connection: &Connection) -> Result<Vec<SyncPla
                 source_count,
                 started_at,
                 finished_at
-             FROM sync_plan_runs
+             FROM (
+                SELECT
+                    r.*,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY plan_id
+                        ORDER BY finished_at DESC, created_at DESC
+                    ) AS recency_rank
+                FROM sync_plan_runs r
+             )
+             WHERE recency_rank <= ?1
              ORDER BY finished_at DESC, created_at DESC",
         )
         .map_err(|error| error.to_string())?;
     let rows = statement
-        .query_map([], |row| {
+        .query_map(params![SYNC_RUN_HISTORY_CAP_PER_ENTITY], |row| {
             Ok(SyncPlanRun {
                 id: row.get(0)?,
                 plan_id: row.get(1)?,

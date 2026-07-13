@@ -200,6 +200,7 @@ pub(super) fn save_provider_account_settings_with_connection(
     let account = load_provider_account_by_id(connection, &account_id)?;
     let protect_authorization =
         load_provider_account_import_state(connection, &account_id)?.is_some();
+    let existing_settings = load_provider_account_settings_map(connection, &account_id)?;
 
     let mut seen_keys = HashSet::new();
     let mut serialized_values = Vec::new();
@@ -237,6 +238,15 @@ pub(super) fn save_provider_account_settings_with_connection(
         )?;
     }
 
+    preserve_existing_source_media_paths_for_account_setting_change(
+        connection,
+        layout,
+        &account,
+        &account_id,
+        &existing_settings,
+        &serialized_values,
+    )?;
+
     connection
         .execute(
             "DELETE FROM provider_account_settings WHERE account_id = ?1",
@@ -263,6 +273,96 @@ pub(super) fn save_provider_account_settings_with_connection(
     }
 
     load_provider_account_editor_with_connection(connection, layout, account_id)
+}
+
+/// An account media path is the default for new profiles, not a relocation of
+/// every profile that already uses it.  Before replacing an account's settings,
+/// pin those existing profiles to the root they currently resolve to.  Moving
+/// existing media remains the explicit "Change save path" workflow.
+fn preserve_existing_source_media_paths_for_account_setting_change(
+    connection: &Connection,
+    layout: &StorageLayout,
+    account: &ProviderAccount,
+    account_id: &str,
+    existing_settings: &HashMap<String, String>,
+    incoming_settings: &[(String, &'static str, String)],
+) -> Result<(), String> {
+    let media_path_key = format!(
+        "{}.account.mediaPath",
+        account.provider.to_ascii_lowercase()
+    );
+    let Some((_, _, next_value)) = incoming_settings
+        .iter()
+        .find(|(key, _, _)| key == &media_path_key)
+    else {
+        return Ok(());
+    };
+
+    let current_media_path = setting_value(existing_settings, &media_path_key);
+    let current_value = current_media_path.as_deref().unwrap_or("").trim();
+    if current_value == next_value.trim() {
+        return Ok(());
+    }
+
+    let now = now_timestamp();
+    for source in load_sources(connection)?
+        .into_iter()
+        .filter(|source| source.account_id.as_deref() == Some(account_id))
+    {
+        let has_special_path = if source.provider.eq_ignore_ascii_case("instagram") {
+            source_instagram_sync_options(&source)
+                .special_path
+                .as_deref()
+                .is_some_and(|path| !path.trim().is_empty())
+        } else if source.provider.eq_ignore_ascii_case("twitter") {
+            source_twitter_sync_options(&source)
+                .special_path
+                .as_deref()
+                .is_some_and(|path| !path.trim().is_empty())
+        } else if source.provider.eq_ignore_ascii_case("tiktok") {
+            source_tiktok_sync_options(&source)
+                .special_path
+                .as_deref()
+                .is_some_and(|path| !path.trim().is_empty())
+        } else {
+            true
+        };
+        if has_special_path {
+            continue;
+        }
+
+        let root = resolved_source_media_output_root(layout, &source, Some(existing_settings));
+        let mut options = source.sync_options.clone();
+        let special_path = Some(root.display().to_string());
+        if source.provider.eq_ignore_ascii_case("instagram") {
+            options
+                .instagram
+                .get_or_insert_with(default_instagram_source_sync_options)
+                .special_path = special_path;
+        } else if source.provider.eq_ignore_ascii_case("twitter") {
+            options
+                .twitter
+                .get_or_insert_with(default_twitter_source_sync_options)
+                .special_path = special_path;
+        } else if source.provider.eq_ignore_ascii_case("tiktok") {
+            options
+                .tiktok
+                .get_or_insert_with(default_tiktok_source_sync_options)
+                .special_path = special_path;
+        }
+
+        let serialized = serialize_source_sync_options(&source.provider, &options)?;
+        connection
+            .execute(
+                "UPDATE source_profiles
+                 SET sync_options_json = ?2, updated_at = ?3
+                 WHERE id = ?1 AND deleted_at IS NULL",
+                params![source.id, serialized, now],
+            )
+            .map_err(|error| error.to_string())?;
+    }
+
+    Ok(())
 }
 pub(super) fn clone_provider_account_with_connection(
     connection: &Connection,

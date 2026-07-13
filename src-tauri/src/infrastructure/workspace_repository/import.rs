@@ -537,6 +537,7 @@ pub(super) fn import_instagram_scrawler_profile_with_connection(
                     let normalized_avatar_path = normalize_media_file_path(&avatar_path)?;
                     update_source_profile_image(
                         connection,
+                        layout,
                         &source.id,
                         &normalized_avatar_path,
                         &now_timestamp(),

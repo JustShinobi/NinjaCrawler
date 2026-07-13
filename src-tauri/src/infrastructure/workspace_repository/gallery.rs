@@ -551,18 +551,16 @@ pub fn load_source_media_gallery(source_id: String) -> Result<SourceMediaGallery
                     .filter(|value| !value.trim().is_empty())
                     .unwrap_or(acc.section);
                 let captured_at = acc.ledger_captured_at.or(acc.captured_at);
-                // Poster: o cover (vídeo) ou a 1ª imagem (slideshow).
+                // Poster = capa DISTINTA (cover de vídeo / highlight), quando
+                // houver. Para foto NÃO usamos o próprio arquivo como poster: o
+                // grid gera um thumb (.thumbs) e cai no original só enquanto ele
+                // não chega. Preencher com o arquivo original aqui contornava o
+                // sistema de thumb de foto — o front pulava a geração porque o
+                // `posterPath` já vinha setado (== o próprio arquivo).
                 let poster_path = acc
                     .post_id
                     .as_deref()
-                    .and_then(|id| posters.get(id).cloned())
-                    .or_else(|| {
-                        if !is_video {
-                            files.first().map(|file| file.absolute_path.clone())
-                        } else {
-                            None
-                        }
-                    });
+                    .and_then(|id| posters.get(id).cloned());
                 // Álbuns: o da subpasta física (`Stories/<álbum>/`) unido aos das
                 // associações de highlight (mídia que mora no Feed mas pertence a
                 // um destaque), já resolvidas por media key no loop acima.

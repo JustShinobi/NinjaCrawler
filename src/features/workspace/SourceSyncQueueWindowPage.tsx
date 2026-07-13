@@ -1,10 +1,12 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { convertFileSrc } from '@tauri-apps/api/core'
 import {
   cancelSourceSyncProfile,
   cancelSourceSyncProvider,
+  cancelMediaPathMigrations,
   enqueueMediaThumbnailGeneration,
   loadMediaThumbnailQueueStatus,
+  loadMediaPathMigrationQueueStatus,
   loadSourceDeleteQueueStatus,
   loadSourceSyncQueueStatus,
   loadWorkspaceSnapshot,
@@ -28,13 +30,14 @@ import type {
   SourceSyncQueueRecentResult,
   SourceSyncQueueStatus,
   MediaThumbnailQueueStatus,
+  MediaPathMigrationQueueStatus,
   SchedulerGroup,
   SingleVideoQueueRecentResult,
   SingleVideoQueueStatus,
   SourceProfile,
 } from '../../domain/models'
 
-type QueueOperation = 'Sync' | 'Delete' | 'Single'
+type QueueOperation = 'Sync' | 'Delete' | 'Single' | 'Migration' | 'Thumbnail'
 
 const QUEUED_COLLAPSE_LIMIT = 6
 
@@ -277,6 +280,16 @@ function createSingleVideoResultTask(result: SingleVideoQueueRecentResult): Queu
   }
 }
 
+function migrationStageLabel(stage: string): string {
+  switch (stage) {
+    case 'scanning': return 'Scanning media'
+    case 'updating_profile': return 'Updating profile path'
+    case 'finalizing': return 'Finalizing move'
+    case 'moving': return 'Moving media'
+    default: return 'Waiting to move'
+  }
+}
+
 function avatarInitial(handle: string): string {
   const cleaned = handle.replace(/^@/, '').trim()
   return cleaned ? cleaned[0]!.toUpperCase() : '?'
@@ -319,7 +332,12 @@ export function SourceSyncQueueWindowPage() {
   const [thumbnailScope, setThumbnailScope] = useState<'all' | 'provider' | 'group' | 'profile'>('profile')
   const [thumbnailScopeValue, setThumbnailScopeValue] = useState('')
   const [thumbnailStatus, setThumbnailStatus] = useState<MediaThumbnailQueueStatus>()
+  const [migrationStatus, setMigrationStatus] = useState<MediaPathMigrationQueueStatus>()
   const [queueingThumbnails, setQueueingThumbnails] = useState(false)
+  const [maintenanceOpen, setMaintenanceOpen] = useState(false)
+  const [maintenanceError, setMaintenanceError] = useState<string>()
+  const [cancellingMigrations, setCancellingMigrations] = useState(false)
+  const maintenanceButtonRef = useRef<HTMLButtonElement>(null)
 
   const refreshQueueStatus = useCallback(async (silent = false) => {
     try {
@@ -327,6 +345,7 @@ export function SourceSyncQueueWindowPage() {
         loadSourceSyncQueueStatus(),
         loadSourceDeleteQueueStatus(),
       ])
+      void loadMediaPathMigrationQueueStatus().then(setMigrationStatus).catch(() => undefined)
       setSyncStatus(nextSyncStatus)
       setDeleteStatus(nextDeleteStatus)
       if (!silent) {
@@ -392,11 +411,25 @@ export function SourceSyncQueueWindowPage() {
     setQueueingThumbnails(true)
     try {
       setThumbnailStatus(await enqueueMediaThumbnailGeneration(thumbnailTargetIds))
-      setError(undefined)
+      setMaintenanceError(undefined)
     } catch (queueError) {
-      setError(queueError instanceof Error ? queueError.message : 'Failed to queue thumbnails.')
+      setMaintenanceError(queueError instanceof Error ? queueError.message : 'Failed to queue thumbnails.')
+      setMaintenanceOpen(true)
     } finally {
       setQueueingThumbnails(false)
+    }
+  }
+
+  const handleCancelMigrations = async () => {
+    setCancellingMigrations(true)
+    try {
+      setMigrationStatus(await cancelMediaPathMigrations())
+      setMaintenanceError(undefined)
+    } catch (cancelError) {
+      setMaintenanceError(cancelError instanceof Error ? cancelError.message : 'Failed to cancel media path migrations.')
+      setMaintenanceOpen(true)
+    } finally {
+      setCancellingMigrations(false)
     }
   }
 
@@ -410,6 +443,17 @@ export function SourceSyncQueueWindowPage() {
     }, 0)
     return () => window.clearTimeout(timer)
   }, [refreshQueueStatus, refreshAvatars])
+
+  useEffect(() => {
+    if ((migrationStatus?.recentResults.length ?? 0) > 0) {
+      void refreshAvatars()
+    }
+  }, [migrationStatus?.recentResults.length, refreshAvatars])
+
+  useEffect(() => {
+    const timer = window.setInterval(() => void loadMediaPathMigrationQueueStatus().then(setMigrationStatus).catch(() => undefined), 1000)
+    return () => window.clearInterval(timer)
+  }, [])
 
   useEffect(() => {
     let disposed = false
@@ -438,6 +482,7 @@ export function SourceSyncQueueWindowPage() {
       onSourceDeleteQueueChanged: (next) => {
         if (!disposed) setDeleteStatus(next)
       },
+      onMediaPathMigrationQueueChanged: setMigrationStatus,
     })
       .then((teardown) => {
         if (disposed) {
@@ -570,8 +615,31 @@ export function SourceSyncQueueWindowPage() {
         ...syncStatus.recentResults.map(createSyncResultTask),
         ...deleteStatus.recentResults.map(createDeleteResultTask),
         ...(singleVideoStatus?.recentResults ?? []).map(createSingleVideoResultTask),
+        ...(migrationStatus?.recentResults ?? []).map((result): QueueResultTask => ({
+          key: `migration-result-${result.jobId}-${result.finishedAt}`,
+          sourceId: result.sourceId,
+          provider: result.provider,
+          providerLabel: providerDisplayName(result.provider),
+          handle: result.handle,
+          operation: 'Migration',
+          status: result.status === 'cancelled' ? 'skipped' : result.status,
+          summary: result.summary,
+          finishedAt: result.finishedAt,
+          error: result.error,
+        })),
+        ...(thumbnailStatus?.recentResults ?? []).map((result): QueueResultTask => ({
+          key: `thumbnail-result-${result.sourceId}-${result.finishedAt}`,
+          sourceId: result.sourceId,
+          provider: result.provider,
+          providerLabel: providerDisplayName(result.provider),
+          handle: result.handle,
+          operation: 'Thumbnail',
+          status: result.status,
+          summary: `${result.generated} generated · ${result.skippedExisting} existing · ${result.failed} failed`,
+          finishedAt: result.finishedAt,
+        })),
       ].sort((left, right) => Date.parse(right.finishedAt) - Date.parse(left.finishedAt)),
-    [deleteStatus.recentResults, syncStatus.recentResults, singleVideoStatus?.recentResults],
+    [deleteStatus.recentResults, migrationStatus?.recentResults, syncStatus.recentResults, singleVideoStatus?.recentResults, thumbnailStatus?.recentResults],
   )
 
   const providerStatusByKey = useMemo(() => {
@@ -659,10 +727,10 @@ export function SourceSyncQueueWindowPage() {
 
   const totals = useMemo(
     () => ({
-      queued: syncStatus.queuedCount + deleteStatus.queuedCount,
-      running: syncStatus.runningCount + deleteStatus.runningCount,
-      completed: syncStatus.completedCount + deleteStatus.completedCount,
-      failed: syncStatus.failedCount + deleteStatus.failedCount,
+      queued: syncStatus.queuedCount + deleteStatus.queuedCount + (singleVideoStatus?.queuedCount ?? 0) + (migrationStatus?.queuedCount ?? 0) + (thumbnailStatus?.queuedCount ?? 0),
+      running: syncStatus.runningCount + deleteStatus.runningCount + (singleVideoStatus?.runningCount ?? 0) + (migrationStatus?.runningCount ?? 0) + (thumbnailStatus?.runningCount ?? 0),
+      completed: syncStatus.completedCount + deleteStatus.completedCount + (singleVideoStatus?.completedCount ?? 0) + (migrationStatus?.completedCount ?? 0) + (thumbnailStatus?.completedCount ?? 0),
+      failed: syncStatus.failedCount + deleteStatus.failedCount + (singleVideoStatus?.failedCount ?? 0) + (migrationStatus?.failedCount ?? 0) + (thumbnailStatus?.failedCount ?? 0),
     }),
     [
       deleteStatus.completedCount,
@@ -673,8 +741,28 @@ export function SourceSyncQueueWindowPage() {
       syncStatus.failedCount,
       syncStatus.queuedCount,
       syncStatus.runningCount,
+      singleVideoStatus,
+      migrationStatus,
+      thumbnailStatus,
     ],
   )
+
+  const maintenanceRunning = (migrationStatus?.runningCount ?? 0) + (thumbnailStatus?.runningCount ?? 0)
+  const maintenanceQueued = (migrationStatus?.queuedCount ?? 0) + (thumbnailStatus?.queuedCount ?? 0)
+  const maintenanceActive = maintenanceRunning + maintenanceQueued > 0
+  const globalState = totals.failed > 0 ? 'Needs attention' : totals.running > 0 ? `${totals.running} active` : totals.queued > 0 ? `${totals.queued} queued` : 'Idle'
+
+  useEffect(() => {
+    if (!maintenanceOpen) return
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setMaintenanceOpen(false)
+        maintenanceButtonRef.current?.focus()
+      }
+    }
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [maintenanceOpen])
 
   const activeProviderCount = lanes.filter((lane) => lane.running.length > 0).length
   const queuedProviderCount = lanes.filter((lane) => lane.queued.length > 0).length
@@ -735,7 +823,7 @@ export function SourceSyncQueueWindowPage() {
             {task.operation === 'Delete' ? (
               <span className="queue-tag queue-tag-delete">Delete{task.modeDetail ? ` · ${task.modeDetail}` : ''}</span>
             ) : null}
-            {isHeld ? <span className="queue-tag queue-tag-held">Account hold</span> : null}
+            {isHeld ? <span className="queue-tag queue-tag-held">{task.progressLabel === 'Waiting for media move' ? 'Migration hold' : 'Account hold'}</span> : null}
             {!isRunning && position !== undefined ? (
               <span className="queue-tag queue-tag-position">{position === 1 ? 'Next' : `#${position}`}</span>
             ) : null}
@@ -811,32 +899,75 @@ export function SourceSyncQueueWindowPage() {
   return (
     <div className="queue-status-window-shell">
       <header className="queue-status-toolbar">
-        <div>
+        <div className="queue-status-title">
           <h1>Queue activity</h1>
-          <p>Downloads, deletions, single videos, and media maintenance.</p>
+          <span className={`queue-global-state ${totals.failed > 0 ? 'has-failures' : ''}`}>{globalState}</span>
         </div>
-        <button
-          aria-label="Open realtime debugger"
-          className="ghost-button"
-          disabled={openingDebugger}
-          onClick={() => void handleOpenDebugger()}
-          type="button"
-        >
-          {openingDebugger ? 'Opening…' : 'Realtime debugger'}
-        </button>
+        <div className="queue-status-toolbar-actions">
+          <button
+            ref={maintenanceButtonRef}
+            aria-controls="queue-maintenance-panel"
+            aria-expanded={maintenanceOpen}
+            className="ghost-button"
+            onClick={() => setMaintenanceOpen((open) => !open)}
+            type="button"
+          >
+            Maintenance{maintenanceActive ? ` · ${maintenanceRunning} active · ${maintenanceQueued} queued` : ''}
+          </button>
+          <button
+            aria-label="Open realtime debugger"
+            className="ghost-button"
+            disabled={openingDebugger}
+            onClick={() => void handleOpenDebugger()}
+            type="button"
+          >
+            {openingDebugger ? 'Opening…' : 'Realtime debugger'}
+          </button>
+        </div>
       </header>
 
-      <section className="thumbnail-queue-panel panel">
-        <div className="thumbnail-queue-heading">
-          <div>
-            <h2>Generate thumbnails</h2>
-            <p>Only missing video thumbnails are created. Existing files stay untouched.</p>
+      {maintenanceActive ? <section className="maintenance-activity" aria-label="Maintenance activity">
+        <header className="maintenance-activity-header">
+          <span className="eyebrow">Maintenance activity</span>
+          <div className="maintenance-activity-actions">
+            {maintenanceQueued > 0 ? <span className="pill">{maintenanceQueued} waiting</span> : null}
+            {(migrationStatus?.runningCount ?? 0) + (migrationStatus?.queuedCount ?? 0) > 0 ? <button className="ghost-button queue-icon-button queue-icon-button-danger" disabled={cancellingMigrations} onClick={() => void handleCancelMigrations()} type="button">{cancellingMigrations ? 'Cancelling…' : 'Cancel migrations'}</button> : null}
           </div>
-          <span className="thumbnail-target-count">
-            {thumbnailTargetIds.length} profile{thumbnailTargetIds.length === 1 ? '' : 's'}
-          </span>
+        </header>
+        {migrationStatus?.runningItems.map((job) => (
+          <article className="maintenance-job" key={job.jobId}>
+            <div className="maintenance-job-heading"><span className="queue-tag">Migration</span><strong>{job.handle}</strong><span className="maintenance-percent">{job.progressPercent === undefined ? 'Working…' : `${job.progressPercent}%`}</span></div>
+            <div
+              aria-label={`${job.handle} media migration`}
+              aria-valuemax={job.progressIndeterminate ? undefined : 100}
+              aria-valuemin={job.progressIndeterminate ? undefined : 0}
+              aria-valuenow={job.progressIndeterminate ? undefined : job.progressPercent}
+              aria-valuetext={`${migrationStageLabel(job.progressStage)}${job.progressPercent === undefined ? '' : ` ${job.progressPercent}%`}`}
+              className={`queue-status-progress-track ${job.progressIndeterminate ? 'indeterminate' : ''}`}
+              role="progressbar"
+            ><div className="queue-status-progress-fill" style={job.progressIndeterminate ? undefined : { width: `${job.progressPercent ?? 0}%` }} /></div>
+            <div className="maintenance-metrics">
+              <span><small>Stage</small><strong>{migrationStageLabel(job.progressStage)}</strong></span>
+              <span><small>Files</small><strong>{job.filesProcessed.toLocaleString()} <i>of</i> {job.filesTotal.toLocaleString()}</strong></span>
+              <span><small>Data moved</small><strong>{formatMigrationBytes(job.bytesProcessed)} <i>of</i> {formatMigrationBytes(job.bytesTotal)}</strong></span>
+            </div>
+            {job.currentFile ? <small className="maintenance-current-file" title={`${job.currentFile}\n${job.sourcePath} → ${job.targetPath}`}>Current file · {migrationFileName(job.currentFile)}</small> : null}
+          </article>
+        ))}
+        {thumbnailStatus?.active ? <article className="maintenance-job">
+          <div className="maintenance-job-heading"><span className="queue-tag">Thumbnails</span><strong>{thumbnailStatus.active.handle}</strong><span className="queue-data">{thumbnailStatus.active.filesProcessed}/{thumbnailStatus.active.filesTotal} files</span></div>
+          <div aria-label={`${thumbnailStatus.active.handle} thumbnail generation`} aria-valuemax={100} aria-valuemin={0} aria-valuenow={thumbnailStatus.active.progressPercent ?? 0} className="queue-status-progress-track" role="progressbar"><div className="queue-status-progress-fill" style={{ width: `${thumbnailStatus.active.progressPercent ?? 0}%` }} /></div>
+          <small title={thumbnailStatus.active.currentFile}>Generating missing thumbnails · {thumbnailStatus.active.generated} generated · {thumbnailStatus.active.skippedExisting} existing · {thumbnailStatus.active.failed} failed</small>
+        </article> : null}
+      </section> : null}
+
+      {maintenanceOpen ? <section className="maintenance-panel panel" id="queue-maintenance-panel" aria-label="Maintenance controls">
+        <div className="maintenance-panel-heading">
+          <div><h2>Generate thumbnails</h2><p>Create only missing video previews. Existing thumbnails remain untouched.</p></div>
+          <button aria-label="Close maintenance" className="ghost-button queue-icon-button" onClick={() => { setMaintenanceOpen(false); maintenanceButtonRef.current?.focus() }} type="button">Close</button>
         </div>
-        <div className="thumbnail-queue-controls">
+        {maintenanceError ? <div className="maintenance-error" role="alert">{maintenanceError}</div> : null}
+        <div className="thumbnail-queue-controls thumbnail-generation-controls">
           <label>
             <span>Scope</span>
             <select
@@ -888,59 +1019,19 @@ export function SourceSyncQueueWindowPage() {
             {queueingThumbnails ? 'Adding to queue…' : 'Generate missing thumbnails'}
           </button>
         </div>
-        {thumbnailStatus?.active ? (
-          <div className="thumbnail-queue-progress">
-            <div>
-              <strong>{thumbnailStatus.active.handle}</strong>
-              <span className="queue-data">
-                {thumbnailStatus.active.filesProcessed}/{thumbnailStatus.active.filesTotal} processed
-              </span>
-            </div>
-            <div className="queue-status-progress-track">
-              <div className="queue-status-progress-fill" style={{ width: `${thumbnailStatus.active.progressPercent ?? 0}%` }} />
-            </div>
-            <div className="thumbnail-queue-progress-detail">
-              <small className="muted-text">
-                <span className="queue-data">{thumbnailStatus.active.generated}</span> generated · <span className="queue-data">{thumbnailStatus.active.skippedExisting}</span> existing · <span className="queue-data">{thumbnailStatus.active.failed}</span> failed
-              </small>
-              {thumbnailStatus.active.currentFile ? (
-                <small className="thumbnail-current-file" title={thumbnailStatus.active.currentFile}>
-                  {thumbnailStatus.active.currentFile}
-                </small>
-              ) : null}
-            </div>
-          </div>
-        ) : (
-          <small className="muted-text">
-            {thumbnailStatus?.queuedCount
-              ? `${thumbnailStatus.queuedCount} profile(s) queued`
-              : 'Thumbnail queue is idle.'}
-          </small>
-        )}
-        {thumbnailStatus?.queuedCount ? (
-          <small className="muted-text">{thumbnailStatus.queuedCount} profile(s) waiting</small>
-        ) : null}
-        {thumbnailStatus?.recentResults.length ? (
-          <div className="thumbnail-queue-recent">
-            {thumbnailStatus.recentResults.slice(0, 4).map((result) => (
-              <small key={`${result.sourceId}-${result.finishedAt}`}>
-                <strong>{result.handle}</strong> · <span className="queue-data">{result.generated}</span> generated · <span className="queue-data">{result.skippedExisting}</span> existing · <span className="queue-data">{result.failed}</span> failed
-              </small>
-            ))}
-          </div>
-        ) : null}
-      </section>
+        <div className="thumbnail-queue-state"><span className="queue-tag">Thumbnail queue</span><small>{thumbnailStatus?.queuedCount ? `${thumbnailStatus.queuedCount} profiles waiting` : 'Ready — no thumbnail jobs waiting.'}</small></div>
+      </section> : null}
 
       <section className="queue-status-summary-strip" role="list" aria-label="Queue totals">
         <article className="queue-status-summary-card" role="listitem">
           <span>Running</span>
           <strong>{totals.running}</strong>
-          <small>{totals.running > 0 ? `across ${activeProviderCount} provider${activeProviderCount === 1 ? '' : 's'}` : 'No active work'}</small>
+          <small>{totals.running > 0 ? `${activeProviderCount} provider lane${activeProviderCount === 1 ? '' : 's'} · ${maintenanceRunning} maintenance` : 'No active work'}</small>
         </article>
         <article className="queue-status-summary-card" role="listitem">
           <span>Queued</span>
           <strong>{totals.queued}</strong>
-          <small>{totals.queued > 0 ? `in ${queuedProviderCount} provider lane${queuedProviderCount === 1 ? '' : 's'}` : 'Queue is clear'}</small>
+          <small>{totals.queued > 0 ? `${queuedProviderCount} provider lane${queuedProviderCount === 1 ? '' : 's'} · ${maintenanceQueued} maintenance` : 'Queue is clear'}</small>
         </article>
         <article className="queue-status-summary-card" role="listitem">
           <span>Done</span>
@@ -1117,6 +1208,8 @@ export function SourceSyncQueueWindowPage() {
                       <span className={`queue-provider-pill provider-${task.provider} is-mini`}>{task.providerLabel}</span>
                       {task.operation === 'Delete' ? <span className="queue-tag queue-tag-delete">Delete</span> : null}
                       {task.operation === 'Single' ? <span className="queue-tag">Single</span> : null}
+                      {task.operation === 'Migration' ? <span className="queue-tag">Migration</span> : null}
+                      {task.operation === 'Thumbnail' ? <span className="queue-tag">Thumbnail</span> : null}
                       <span className={resultStatusClassName(task.status)}>{task.status}</span>
                     </div>
                     <small className="queue-task-meta" title={absoluteTimestamp(task.finishedAt)}>
@@ -1143,4 +1236,15 @@ export function SourceSyncQueueWindowPage() {
       </section>
     </div>
   )
+}
+
+function formatMigrationBytes(value: number): string {
+  if (value < 1024) return `${value} B`
+  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`
+  if (value < 1024 * 1024 * 1024) return `${(value / (1024 * 1024)).toFixed(1)} MB`
+  return `${(value / (1024 * 1024 * 1024)).toFixed(2)} GB`
+}
+
+function migrationFileName(path: string): string {
+  return path.split(/[\\/]/).filter(Boolean).pop() ?? path
 }
