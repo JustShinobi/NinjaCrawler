@@ -2411,7 +2411,7 @@ checksum = "650eef8c711430f1a879fdd01d4745a7deea475becfb90269c06775983bbf086"
 
 [[package]]
 name = "ninjacrawler"
-version = "0.8.1"
+version = "0.16.0"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -2420,6 +2420,7 @@ dependencies = [
  "rfd",
  "roxmltree",
  "rusqlite",
+ "semver",
  "serde",
  "serde_json",
  "sha2",

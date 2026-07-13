@@ -28,6 +28,7 @@ tauri-plugin-opener = "2.5.4"
 rfd = "0.15"
 uuid = { version = "1", features = ["v4", "fast-rng"] }
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls", "gzip", "brotli", "deflate"] }
+semver = "1"
 roxmltree = "0.20"
 base64 = "0.22"
 zip = { version = "2", default-features = false, features = ["deflate"] }

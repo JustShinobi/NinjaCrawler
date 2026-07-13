@@ -15,6 +15,8 @@ import type {
   AccountSyncRun,
   AppSetting,
   AppSettingUpsert,
+  AppBuildInfo,
+  AppUpdateStatus,
   AuthMode,
   AuthState,
   ConnectorRuntimeStatus,
@@ -2047,6 +2049,38 @@ function normalizeStringMap(raw: unknown): Record<string, string> {
   return result
 }
 
+function normalizeAppBuildInfo(raw: unknown): AppBuildInfo {
+  const value = isRecord(raw) ? raw : {}
+  const channel = stringValue(value, ['channel'], 'development') === 'release'
+    ? 'release'
+    : 'development'
+  const version = stringValue(value, ['version'], 'unknown')
+  const commitSha = stringValue(value, ['commitSha', 'commit_sha'], 'unknown')
+  const dirty = booleanValue(value, ['dirty'], false)
+  const fallbackDisplay = channel === 'release'
+    ? `v${version}`
+    : `Dev ${commitSha}${dirty ? '-dirty' : ''}`
+
+  return {
+    version,
+    commitSha,
+    dirty,
+    channel,
+    displayVersion: stringValue(value, ['displayVersion', 'display_version'], fallbackDisplay),
+  }
+}
+
+function normalizeAppUpdateStatus(raw: unknown): AppUpdateStatus {
+  const value = isRecord(raw) ? raw : {}
+  return {
+    build: normalizeAppBuildInfo(pick(value, 'build')),
+    latestVersion: stringValue(value, ['latestVersion', 'latest_version'], 'unknown'),
+    releaseUrl: stringValue(value, ['releaseUrl', 'release_url'], ''),
+    publishedAt: optionalStringValue(value, ['publishedAt', 'published_at']),
+    updateAvailable: booleanValue(value, ['updateAvailable', 'update_available'], false),
+  }
+}
+
 async function invokeWorkspaceCommand(
   command: string,
   args?: Record<string, unknown>,
@@ -2067,6 +2101,14 @@ function sanitizeText(value: string, fallback = ''): string {
 
 export async function loadWorkspaceSnapshot(): Promise<WorkspaceSnapshot> {
   return invokeWorkspaceCommand('bootstrap_workspace', undefined)
+}
+
+export async function getAppBuildInfo(): Promise<AppBuildInfo> {
+  return normalizeAppBuildInfo(await invoke<unknown>('get_app_build_info'))
+}
+
+export async function checkAppUpdate(): Promise<AppUpdateStatus> {
+  return normalizeAppUpdateStatus(await invoke<unknown>('check_app_update'))
 }
 
 export async function loadSystemShortDatePattern(): Promise<string> {

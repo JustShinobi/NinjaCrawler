@@ -108,6 +108,9 @@ jobs:
         shell: pwsh
         env:
           GITHUB_TOKEN: ${{ github.token }}
+          NINJACRAWLER_RELEASE_BUILD: "true"
+          NINJACRAWLER_RELEASE_VERSION: ${{ steps.version.outputs.version }}
+          NINJACRAWLER_BUILD_SHA: ${{ inputs.sha || github.sha }}
         run: >
           powershell -ExecutionPolicy Bypass
           -File Tools\Build-NinjaCrawler.ps1

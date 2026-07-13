@@ -888,3 +888,70 @@ describe('loadWorkspaceSnapshot', () => {
     expect(invokeMock).toHaveBeenCalledWith('import_queue_status')
   })
 })
+
+describe('app version bridge', () => {
+  beforeEach(() => {
+    invokeMock.mockReset()
+    vi.resetModules()
+  })
+
+  it('normalizes snake_case build information and update status', async () => {
+    invokeMock
+      .mockResolvedValueOnce({
+        version: '0.15.0',
+        commit_sha: '44ed4e3a',
+        dirty: true,
+        channel: 'development',
+        display_version: 'Dev 44ed4e3a-dirty',
+      })
+      .mockResolvedValueOnce({
+        build: {
+          version: '0.15.0',
+          commit_sha: 'd6a23804',
+          dirty: false,
+          channel: 'release',
+          display_version: 'v0.15.0',
+        },
+        latest_version: '0.16.0',
+        release_url: 'https://github.com/MetalDevOps/NinjaCrawler/releases/tag/v0.16.0',
+        published_at: '2026-07-13T00:00:00Z',
+        update_available: true,
+      })
+
+    const desktop = await import('./desktop')
+
+    await expect(desktop.getAppBuildInfo()).resolves.toEqual({
+      version: '0.15.0',
+      commitSha: '44ed4e3a',
+      dirty: true,
+      channel: 'development',
+      displayVersion: 'Dev 44ed4e3a-dirty',
+    })
+    await expect(desktop.checkAppUpdate()).resolves.toEqual({
+      build: {
+        version: '0.15.0',
+        commitSha: 'd6a23804',
+        dirty: false,
+        channel: 'release',
+        displayVersion: 'v0.15.0',
+      },
+      latestVersion: '0.16.0',
+      releaseUrl: 'https://github.com/MetalDevOps/NinjaCrawler/releases/tag/v0.16.0',
+      publishedAt: '2026-07-13T00:00:00Z',
+      updateAvailable: true,
+    })
+  })
+
+  it('uses safe development defaults for malformed build payloads', async () => {
+    invokeMock.mockResolvedValueOnce({})
+    const desktop = await import('./desktop')
+
+    await expect(desktop.getAppBuildInfo()).resolves.toEqual({
+      version: 'unknown',
+      commitSha: 'unknown',
+      dirty: false,
+      channel: 'development',
+      displayVersion: 'Dev unknown',
+    })
+  })
+})

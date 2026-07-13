@@ -21,6 +21,8 @@ const resetSourceProfileImageMock = vi.fn()
 const upsertSourceProfileMock = vi.fn()
 
 const bridgeMocks = vi.hoisted(() => ({
+  checkAppUpdate: vi.fn(),
+  getAppBuildInfo: vi.fn(),
   loadSourceDeleteQueueStatus: vi.fn(),
   loadSourceSyncQueueStatus: vi.fn(),
   openConnectorRuntimesWindow: vi.fn(),

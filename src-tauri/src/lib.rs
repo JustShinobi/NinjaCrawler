@@ -44,6 +44,8 @@ pub fn run() {
             infrastructure::desktop_runtime::handle_window_event(window, event);
         })
         .invoke_handler(tauri::generate_handler![
+            application::commands::get_app_build_info,
+            application::commands::check_app_update,
             application::commands::bootstrap_workspace,
             application::commands::check_connector_updates,
             application::commands::update_connector_runtime,

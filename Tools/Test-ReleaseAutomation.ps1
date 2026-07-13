@@ -47,6 +47,16 @@ if (-not $appReleaseWorkflow.Contains('Reconcile recovered release PR label')) {
 }
 
 foreach ($requiredFragment in @(
+    'NINJACRAWLER_RELEASE_BUILD:',
+    'NINJACRAWLER_RELEASE_VERSION:',
+    'NINJACRAWLER_BUILD_SHA:'
+)) {
+    if (-not $appReleaseWorkflow.Contains($requiredFragment)) {
+        throw "App release workflow is missing official build identity wiring: $requiredFragment"
+    }
+}
+
+foreach ($requiredFragment in @(
     'Re-anchor Companion release-please',
     'Reconcile recovered Companion release PR label',
     'startswith("release-please--")',
