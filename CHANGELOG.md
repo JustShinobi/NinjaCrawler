@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.16.1](https://github.com/MetalDevOps/NinjaCrawler/compare/v0.16.0...v0.16.1) (2026-07-13)
+
+
+### Bug Fixes
+
+* **companion:** detect initial Instagram story by resolving live tab URL ([#125](https://github.com/MetalDevOps/NinjaCrawler/issues/125)) ([ee036cf](https://github.com/MetalDevOps/NinjaCrawler/commit/ee036cf20388dd278823eb8d92c8494a04c7bddd))
+* **queue:** dispatch image thumbnail generation correctly ([#127](https://github.com/MetalDevOps/NinjaCrawler/issues/127)) ([44ed4e3](https://github.com/MetalDevOps/NinjaCrawler/commit/44ed4e3977eaf5323094cac935bc863b752bef57))
+* **release:** authenticate recovery with repository PAT ([#130](https://github.com/MetalDevOps/NinjaCrawler/issues/130)) ([be6eed0](https://github.com/MetalDevOps/NinjaCrawler/commit/be6eed0618427875cd42053fad3e03a3c6a15b06))
+* **release:** isolate package release flows and add tag recovery ([#128](https://github.com/MetalDevOps/NinjaCrawler/issues/128)) ([0f0f5bc](https://github.com/MetalDevOps/NinjaCrawler/commit/0f0f5bc74a6975abfb3bdb567f44326cf6fb084d))
+
 ## [0.16.0](https://github.com/MetalDevOps/NinjaCrawler/compare/v0.15.0...v0.16.0) (2026-07-13)
 
 
