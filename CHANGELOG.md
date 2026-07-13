@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.16.0](https://github.com/MetalDevOps/NinjaCrawler/compare/v0.15.0...v0.16.0) (2026-07-13)
+
+
+### Features
+
+* **queue:** add media path migration cancellation and detailed progress ([#123](https://github.com/MetalDevOps/NinjaCrawler/issues/123)) ([95b97b7](https://github.com/MetalDevOps/NinjaCrawler/commit/95b97b75def12c4f1f27d53193899e925c897dfd))
+* **workspace:** process media path migrations in a background queue ([#119](https://github.com/MetalDevOps/NinjaCrawler/issues/119)) ([07cc3a2](https://github.com/MetalDevOps/NinjaCrawler/commit/07cc3a2ee5a27536c09b4a8f68f9c8090cef640e))
+
+
+### Bug Fixes
+
+* **tiktok:** purge bogus timeline rows for liked media ([#117](https://github.com/MetalDevOps/NinjaCrawler/issues/117)) ([5474fc4](https://github.com/MetalDevOps/NinjaCrawler/commit/5474fc43bb40a212de050a8bd47801f3d55b0b4a))
+* **workspace:** include all provider save paths in filter ([#120](https://github.com/MetalDevOps/NinjaCrawler/issues/120)) ([a304f09](https://github.com/MetalDevOps/NinjaCrawler/commit/a304f096b04fd06a3e84eecd85eb9d25763f719a))
+* **workspace:** preserve existing media paths on account path change ([#121](https://github.com/MetalDevOps/NinjaCrawler/issues/121)) ([f732637](https://github.com/MetalDevOps/NinjaCrawler/commit/f732637b975fe6c0c3121798e52eef237fb5800d))
+
+
+### Performance Improvements
+
+* **workspace:** optimize profile list virtualization and media memory usage ([#116](https://github.com/MetalDevOps/NinjaCrawler/issues/116)) ([4027f43](https://github.com/MetalDevOps/NinjaCrawler/commit/4027f43230e5b72165aa6c09d1c4743c848e116f))
+
 ## [0.15.0](https://github.com/MetalDevOps/NinjaCrawler/compare/v0.14.0...v0.15.0) (2026-07-11)
 
 
