@@ -26,6 +26,7 @@ foreach ($packagePath in @('.', 'NinjaCrawler.Companion')) {
 foreach ($requiredFragment in @(
     'recover_package:',
     'Recover untagged merged release',
+    'GH_TOKEN: ${{ secrets.GH_TOKEN }}',
     'Reject untagged merged release PRs',
     "--label 'autorelease: pending'"
 )) {
