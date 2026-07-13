@@ -772,12 +772,15 @@ export interface MediaPathMigrationQueueJob {
   queuedAt: string
   startedAt?: string
   progressPercent?: number
+  progressStage: 'queued' | 'scanning' | 'moving' | 'updating_profile' | 'finalizing'
+  progressIndeterminate: boolean
   progressLabel?: string
   progressDetail?: string
   filesProcessed: number
   filesTotal: number
   bytesProcessed: number
   bytesTotal: number
+  currentFile?: string
 }
 export interface MediaPathMigrationQueueRecentResult {
   jobId: string
@@ -786,7 +789,7 @@ export interface MediaPathMigrationQueueRecentResult {
   handle: string
   sourcePath: string
   targetPath: string
-  status: 'succeeded' | 'failed'
+  status: 'succeeded' | 'failed' | 'cancelled'
   summary: string
   finishedAt: string
   error?: string

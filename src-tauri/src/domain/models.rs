@@ -756,12 +756,15 @@ pub struct MediaPathMigrationQueueJob {
     pub queued_at: String,
     pub started_at: Option<String>,
     pub progress_percent: Option<u32>,
+    pub progress_stage: String,
+    pub progress_indeterminate: bool,
     pub progress_label: Option<String>,
     pub progress_detail: Option<String>,
     pub files_processed: u64,
     pub files_total: u64,
     pub bytes_processed: u64,
     pub bytes_total: u64,
+    pub current_file: Option<String>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]

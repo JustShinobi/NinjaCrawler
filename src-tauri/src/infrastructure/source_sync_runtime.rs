@@ -12,7 +12,8 @@ use crate::domain::models::{
 };
 use crate::infrastructure::runtime_log::RuntimeLogAnchor;
 use crate::infrastructure::{
-    desktop_runtime, media_thumbnail_runtime, runtime_log, workspace_repository,
+    desktop_runtime, media_path_migration_runtime, media_thumbnail_runtime, runtime_log,
+    workspace_repository,
 };
 use crate::providers;
 
@@ -76,11 +77,13 @@ struct SourceSyncQueueJob {
     progress_indeterminate: bool,
     downloaded_items: Option<u32>,
     hold_until: Option<String>,
+    hold_reason: Option<String>,
 }
 
 enum DequeueOutcome {
     Job(SourceSyncQueueJob),
     WaitingForAccount,
+    WaitingForMigration,
     Finished,
 }
 
@@ -282,6 +285,7 @@ pub fn enqueue_source_sync(
         progress_indeterminate: false,
         downloaded_items: None,
         hold_until: None,
+        hold_reason: None,
     };
 
     let queued_at = job.queued_at.clone();
@@ -406,6 +410,7 @@ pub fn restore_persisted_queue(app: &AppHandle) {
             progress_indeterminate: false,
             downloaded_items: None,
             hold_until: None,
+            hold_reason: None,
         };
 
         let queue_result = match queue_state().lock() {
@@ -455,6 +460,26 @@ fn provider_has_pending_jobs(provider: &str) -> bool {
         .unwrap_or(false)
 }
 
+fn apply_media_migration_hold(job: &mut SourceSyncQueueJob, is_migrating: bool) -> bool {
+    if !is_migrating {
+        if job.hold_reason.as_deref() == Some("media_path_migration") {
+            job.hold_reason = None;
+            job.progress_label = None;
+            job.progress_detail = None;
+        }
+        return false;
+    }
+    job.hold_until = None;
+    job.hold_reason = Some("media_path_migration".to_string());
+    job.progress_label = Some("Waiting for media move".to_string());
+    job.progress_detail = Some(
+        "This sync will start automatically after the profile's media-path migration finishes."
+            .to_string(),
+    );
+    job.progress_indeterminate = false;
+    true
+}
+
 fn spawn_worker(app: AppHandle, provider: String) {
     thread::spawn(move || loop {
         let job = match dequeue_next(&provider) {
@@ -462,6 +487,11 @@ fn spawn_worker(app: AppHandle, provider: String) {
             Ok(DequeueOutcome::WaitingForAccount) => {
                 publish_queue_status_event(&app);
                 thread::sleep(Duration::from_secs(ACCOUNT_HOLD_CHECK_INTERVAL_SECS));
+                continue;
+            }
+            Ok(DequeueOutcome::WaitingForMigration) => {
+                publish_queue_status_event(&app);
+                thread::sleep(Duration::from_secs(1));
                 continue;
             }
             Ok(DequeueOutcome::Finished) => {
@@ -577,6 +607,7 @@ fn dequeue_next(provider: &str) -> Result<DequeueOutcome, String> {
 
     let queue_len = state.queues.get(provider).map(VecDeque::len).unwrap_or(0);
     let mut next = None;
+    let mut waiting_for_migration = false;
     for _ in 0..queue_len {
         let Some(mut candidate) = state
             .queues
@@ -590,8 +621,19 @@ fn dequeue_next(provider: &str) -> Result<DequeueOutcome, String> {
                 .ok()
                 .flatten()
         });
+        let is_migrating = media_path_migration_runtime::is_source_migrating(&candidate.source_id);
+        if apply_media_migration_hold(&mut candidate, is_migrating) {
+            waiting_for_migration = true;
+            state
+                .queues
+                .entry(provider.to_string())
+                .or_default()
+                .push_back(candidate);
+            continue;
+        }
         if let Some(until) = hold_until {
             candidate.hold_until = Some(until.to_rfc3339());
+            candidate.hold_reason = Some("account_rate_limit".to_string());
             candidate.progress_label = Some("On hold".to_string());
             candidate.progress_detail = Some(format!(
                 "Twitter Account rate limit; automatic retry after {}.",
@@ -618,6 +660,7 @@ fn dequeue_next(provider: &str) -> Result<DequeueOutcome, String> {
             job.progress_percent = Some(0);
             job.downloaded_items = Some(0);
             job.hold_until = None;
+            job.hold_reason = None;
             state.active_jobs.insert(provider.to_string(), job.clone());
             log_source_sync_event(
                 "sync.run",
@@ -635,6 +678,7 @@ fn dequeue_next(provider: &str) -> Result<DequeueOutcome, String> {
             );
             Ok(DequeueOutcome::Job(job))
         }
+        None if waiting_for_migration => Ok(DequeueOutcome::WaitingForMigration),
         None if queue_len > 0 => Ok(DequeueOutcome::WaitingForAccount),
         None => {
             state.active_jobs.remove(provider);
@@ -1226,7 +1270,7 @@ fn build_queue_status(state: &SourceSyncQueueState) -> SourceSyncQueueStatus {
             provider: job.provider.clone(),
             handle: job.handle.clone(),
             account_id: job.account_id.clone(),
-            state: if job.hold_until.is_some() {
+            state: if job.hold_until.is_some() || job.hold_reason.is_some() {
                 "held".to_string()
             } else {
                 "queued".to_string()
@@ -1309,7 +1353,7 @@ fn build_queue_status(state: &SourceSyncQueueState) -> SourceSyncQueueStatus {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_queue_status, enqueue_job, source_sync_job_key, SourceSyncQueueJob,
+        apply_media_migration_hold, build_queue_status, enqueue_job, source_sync_job_key, SourceSyncQueueJob,
         SourceSyncQueueJobResult, SourceSyncQueueState,
     };
     use crate::domain::models::{
@@ -1339,6 +1383,7 @@ mod tests {
             progress_indeterminate: false,
             downloaded_items: None,
             hold_until: None,
+            hold_reason: None,
         }
     }
 
@@ -1368,6 +1413,26 @@ mod tests {
             status.queued_items[0].hold_until.as_deref(),
             Some("2026-07-11T00:15:30Z")
         );
+    }
+
+    #[test]
+    fn media_migration_hold_is_visible_and_releases_without_a_deadline() {
+        let mut job = sample_job(
+            "source-migrating",
+            "twitter",
+            "moving-user",
+            "2026-07-12T00:00:00Z",
+        );
+
+        assert!(apply_media_migration_hold(&mut job, true));
+        assert_eq!(job.hold_until, None);
+        assert_eq!(job.hold_reason.as_deref(), Some("media_path_migration"));
+        assert_eq!(job.progress_label.as_deref(), Some("Waiting for media move"));
+
+        assert!(!apply_media_migration_hold(&mut job, false));
+        assert_eq!(job.hold_reason, None);
+        assert_eq!(job.progress_label, None);
+        assert_eq!(job.progress_detail, None);
     }
 
     #[test]

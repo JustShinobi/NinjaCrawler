@@ -1,7 +1,9 @@
 use chrono::Utc;
 use std::collections::{HashSet, VecDeque};
 use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
+use std::time::{Duration, Instant};
 
 use tauri::{AppHandle, Emitter};
 
@@ -27,6 +29,12 @@ struct QueuedJob {
     started_at: Option<String>,
     files_total: u64,
     bytes_total: u64,
+    files_processed: u64,
+    bytes_processed: u64,
+    progress_stage: String,
+    progress_indeterminate: bool,
+    current_file: Option<String>,
+    cancel_requested: Arc<AtomicBool>,
 }
 #[derive(Default)]
 struct State {
@@ -104,6 +112,12 @@ pub fn enqueue(
                 started_at: None,
                 files_total: 0,
                 bytes_total: 0,
+                files_processed: 0,
+                bytes_processed: 0,
+                progress_stage: "queued".to_string(),
+                progress_indeterminate: true,
+                current_file: None,
+                cancel_requested: Arc::new(AtomicBool::new(false)),
             });
             added = true;
         }
@@ -154,6 +168,12 @@ pub fn restore_persisted_queue(app: &AppHandle) {
             started_at: None,
             files_total: 0,
             bytes_total: 0,
+            files_processed: 0,
+            bytes_processed: 0,
+            progress_stage: "queued".to_string(),
+            progress_indeterminate: true,
+            current_file: None,
+            cancel_requested: Arc::new(AtomicBool::new(false)),
         });
     }
     if !value.queue.is_empty() && !value.worker {
@@ -169,6 +189,32 @@ pub fn status() -> Result<MediaPathMigrationQueueStatus, String> {
         .lock()
         .map_err(|_| "Media migration queue lock is poisoned.".to_string())?;
     Ok(build(&value))
+}
+
+pub fn cancel_all(app: &AppHandle) -> Result<MediaPathMigrationQueueStatus, String> {
+    let queued_job_ids = {
+        let mut value = state()
+            .lock()
+            .map_err(|_| "Media migration queue lock is poisoned.".to_string())?;
+        if let Some(active) = value.active.as_ref() {
+            active.cancel_requested.store(true, Ordering::Release);
+        }
+        let job_ids = value.queue.iter().map(|job| job.job_id.clone()).collect::<Vec<_>>();
+        value.queue.clear();
+        value.ids.clear();
+        job_ids
+    };
+    let mut removal_error = None;
+    for job_id in queued_job_ids {
+        if let Err(error) = workspace_repository::remove_media_path_migration_job(&job_id) {
+            removal_error.get_or_insert(error);
+        }
+    }
+    publish(app);
+    if let Some(error) = removal_error {
+        return Err(error);
+    }
+    status()
 }
 
 fn spawn(app: AppHandle) {
@@ -199,20 +245,71 @@ fn spawn(app: AppHandle) {
             }
         };
         publish(&app);
+        update_active(&app, &job.job_id, |active| {
+            active.progress_stage = "scanning".to_string();
+            active.progress_indeterminate = true;
+        });
         let (files, bytes) = scan_totals(std::path::Path::new(&job.source_path));
-        update_active(
-            &app,
-            &job.job_id,
-            files,
-            bytes,
-            "Moving media",
-            "Moving profile media and updating its save path.",
-        );
+        update_active(&app, &job.job_id, |active| {
+            active.files_total = files;
+            active.bytes_total = bytes;
+            active.progress_stage = "moving".to_string();
+            active.progress_indeterminate = true;
+        });
+        let mut last_publish = Instant::now() - Duration::from_secs(1);
+        let mut last_percent = 0;
+        let app_for_progress = app.clone();
+        let job_id_for_progress = job.job_id.clone();
+        let cancel_requested = job.cancel_requested.clone();
         let outcome = workspace_repository::change_source_media_path_migration(
             job.source_id.clone(),
             job.target_base_path.clone(),
             &job.job_id,
+            move |progress, atomic| {
+                if cancel_requested.load(Ordering::Acquire) {
+                    return Err("Media path migration cancelled.".to_string());
+                }
+                let percent = if files == 0 {
+                    100
+                } else {
+                    ((progress.files_processed * 100) / files).min(100) as u32
+                };
+                let should_publish = atomic
+                    || percent != last_percent
+                    || last_publish.elapsed() >= Duration::from_millis(150);
+                if should_publish {
+                    last_percent = percent;
+                    last_publish = Instant::now();
+                    update_active(&app_for_progress, &job_id_for_progress, |active| {
+                        if !atomic {
+                            active.files_processed = progress.files_processed;
+                            active.bytes_processed = progress.bytes_processed;
+                            active.current_file = (!progress.current_file.is_empty())
+                                .then_some(progress.current_file);
+                        }
+                        active.progress_stage =
+                            if atomic { "finalizing" } else { "moving" }.to_string();
+                        active.progress_indeterminate = atomic;
+                    });
+                }
+                Ok(())
+            },
         );
+        if outcome.is_ok() {
+            update_active(&app, &job.job_id, |active| {
+                active.files_processed = active.files_total;
+                active.bytes_processed = active.bytes_total;
+                active.progress_stage = "updating_profile".to_string();
+                active.progress_indeterminate = true;
+                active.current_file = None;
+            });
+        }
+        let cancelled = job.cancel_requested.load(Ordering::Acquire) && outcome.is_err();
+        if cancelled {
+            let staging_root = std::path::Path::new(&job.target_base_path)
+                .join(format!(".ninjacrawler-moving-{}", job.job_id));
+            let _ = std::fs::remove_dir_all(staging_root);
+        }
         let (status_value, summary, error) = match outcome {
             Ok(snapshot) => {
                 let _ = desktop_runtime::publish_workspace_runtime(&app, &snapshot);
@@ -222,6 +319,11 @@ fn spawn(app: AppHandle) {
                     None,
                 )
             }
+            Err(_error) if cancelled => (
+                "cancelled",
+                "Media path migration cancelled. The original folder was preserved.".to_string(),
+                None,
+            ),
             Err(error) => (
                 "failed",
                 "Media path migration failed.".to_string(),
@@ -232,7 +334,7 @@ fn spawn(app: AppHandle) {
         if let Ok(mut value) = state().lock() {
             if status_value == "succeeded" {
                 value.completed = value.completed.saturating_add(1)
-            } else {
+            } else if status_value == "failed" {
                 value.failed = value.failed.saturating_add(1)
             };
             value
@@ -279,19 +381,11 @@ fn scan_totals(path: &std::path::Path) -> (u64, u64) {
     };
     counts
 }
-fn update_active(
-    app: &AppHandle,
-    job_id: &str,
-    files: u64,
-    bytes: u64,
-    _label: &str,
-    _detail: &str,
-) {
+fn update_active(app: &AppHandle, job_id: &str, update: impl FnOnce(&mut QueuedJob)) {
     if let Ok(mut value) = state().lock() {
         if let Some(job) = value.active.as_mut() {
             if job.job_id == job_id {
-                job.files_total = files;
-                job.bytes_total = bytes;
+                update(job);
             }
         }
     }
@@ -308,11 +402,25 @@ fn model(job: &QueuedJob, state_name: &str, done: bool) -> MediaPathMigrationQue
         state: state_name.to_string(),
         queued_at: job.queued_at.clone(),
         started_at: job.started_at.clone(),
-        progress_percent: if done { Some(100) } else { Some(0) },
+        progress_percent: if done {
+            Some(100)
+        } else if job.progress_indeterminate || job.files_total == 0 {
+            None
+        } else {
+            Some(((job.files_processed * 100) / job.files_total).min(100) as u32)
+        },
+        progress_stage: job.progress_stage.clone(),
+        progress_indeterminate: job.progress_indeterminate,
         progress_label: Some(if done {
             "Completed".to_string()
         } else if state_name == "running" {
-            "Moving media".to_string()
+            match job.progress_stage.as_str() {
+                "scanning" => "Scanning media",
+                "updating_profile" => "Updating profile path",
+                "finalizing" => "Finalizing move",
+                _ => "Moving media",
+            }
+            .to_string()
         } else {
             "Queued for migration".to_string()
         }),
@@ -321,10 +429,19 @@ fn model(job: &QueuedJob, state_name: &str, done: bool) -> MediaPathMigrationQue
         } else {
             "Waiting for the media migration worker.".to_string()
         }),
-        files_processed: if done { job.files_total } else { 0 },
+        files_processed: if done {
+            job.files_total
+        } else {
+            job.files_processed
+        },
         files_total: job.files_total,
-        bytes_processed: if done { job.bytes_total } else { 0 },
+        bytes_processed: if done {
+            job.bytes_total
+        } else {
+            job.bytes_processed
+        },
         bytes_total: job.bytes_total,
+        current_file: job.current_file.clone(),
     }
 }
 fn build(value: &State) -> MediaPathMigrationQueueStatus {

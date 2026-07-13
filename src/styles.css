@@ -5489,6 +5489,155 @@ p {
   flex: 0 0 auto;
 }
 
+.queue-status-title,
+.queue-status-toolbar-actions,
+.maintenance-activity-header,
+.maintenance-panel-heading,
+.maintenance-job-heading {
+  align-items: center;
+  display: flex;
+  gap: 0.55rem;
+}
+
+.queue-status-toolbar-actions {
+  justify-content: flex-end;
+}
+
+.queue-global-state {
+  background: color-mix(in srgb, var(--signal) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--signal) 28%, transparent);
+  border-radius: 999px;
+  color: var(--signal);
+  font: 0.68rem var(--font-data);
+  padding: 0.18rem 0.48rem;
+}
+
+.queue-global-state.has-failures {
+  color: var(--accent);
+}
+
+.maintenance-activity {
+  background: color-mix(in srgb, var(--panel-alt) 88%, var(--signal) 12%);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  display: grid;
+  gap: 0.48rem;
+  padding: 0.58rem 0.72rem;
+}
+
+.maintenance-activity-header,
+.maintenance-panel-heading,
+.maintenance-job-heading {
+  justify-content: space-between;
+}
+
+.maintenance-activity-actions,
+.thumbnail-queue-state {
+  align-items: center;
+  display: flex;
+  gap: 0.5rem;
+}
+
+.maintenance-job {
+  display: grid;
+  gap: 0.32rem;
+  min-width: 0;
+}
+
+.maintenance-job-heading strong {
+  margin-right: auto;
+}
+
+.maintenance-percent {
+  color: var(--ink);
+  font: 700 0.88rem var(--font-data);
+}
+
+.maintenance-metrics {
+  display: grid;
+  gap: 0.45rem;
+  grid-template-columns: minmax(130px, 0.8fr) repeat(2, minmax(150px, 1fr));
+}
+
+.maintenance-metrics > span {
+  background: color-mix(in srgb, var(--panel-alt) 72%, transparent);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  display: grid;
+  gap: 0.08rem;
+  padding: 0.38rem 0.5rem;
+}
+
+.maintenance-metrics small {
+  color: var(--text-muted);
+  font-size: 0.62rem;
+  text-transform: uppercase;
+}
+
+.maintenance-metrics strong {
+  color: var(--ink);
+  font: 0.75rem var(--font-data);
+}
+
+.maintenance-metrics i {
+  color: var(--text-muted);
+  font-style: normal;
+}
+
+.maintenance-job small {
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.maintenance-current-file {
+  font-family: var(--font-data);
+}
+
+.maintenance-panel {
+  display: grid;
+  gap: 0.65rem;
+  padding: 0.72rem 0.82rem;
+}
+
+.thumbnail-generation-controls {
+  background: var(--panel-alt);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 0.65rem;
+}
+
+.thumbnail-queue-state {
+  border-top: 1px solid var(--line);
+  color: var(--text-muted);
+  padding-top: 0.55rem;
+}
+
+.maintenance-panel h2,
+.maintenance-panel p {
+  margin: 0;
+}
+
+.maintenance-error {
+  background: color-mix(in srgb, var(--accent) 9%, transparent);
+  border-left: 3px solid var(--accent);
+  color: var(--ink);
+  font-size: 0.74rem;
+  padding: 0.45rem 0.58rem;
+}
+
+.maintenance-panel h2 {
+  font-family: var(--font-body);
+  font-size: 0.9rem;
+}
+
+.maintenance-panel p {
+  color: var(--text-muted);
+  font-size: 0.72rem;
+  margin-top: 0.12rem;
+}
+
 .thumbnail-queue-panel {
   display: grid;
   gap: 0.7rem;
@@ -5624,7 +5773,9 @@ p {
     flex-direction: column;
   }
 
-  .queue-status-toolbar .ghost-button {
+  .queue-status-toolbar-actions {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
     width: 100%;
   }
 
@@ -5635,6 +5786,27 @@ p {
   .thumbnail-queue-progress-detail {
     flex-direction: column;
     gap: 0.18rem;
+  }
+
+  .maintenance-panel-heading,
+  .maintenance-job-heading {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .maintenance-metrics {
+    grid-template-columns: 1fr;
+  }
+
+  .maintenance-activity-actions {
+    align-items: flex-end;
+    flex-direction: column;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .queue-status-progress-track.indeterminate .queue-status-progress-fill {
+    animation: none;
   }
 }
 

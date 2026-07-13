@@ -283,6 +283,13 @@ pub fn media_path_migration_queue_status(
 }
 
 #[tauri::command]
+pub fn cancel_media_path_migrations(
+    app: tauri::AppHandle,
+) -> Result<crate::domain::models::MediaPathMigrationQueueStatus, String> {
+    media_path_migration_runtime::cancel_all(&app)
+}
+
+#[tauri::command]
 pub fn open_batch_editor_window(
     app: tauri::AppHandle,
     source_ids: Vec<String>,
@@ -338,9 +345,6 @@ pub fn run_source_sync(
     app: tauri::AppHandle,
     input: RunSourceSyncInput,
 ) -> Result<WorkspaceSnapshot, String> {
-    if media_path_migration_runtime::is_source_migrating(&input.id) {
-        return Err("This profile has a media-path migration queued or running.".to_string());
-    }
     publish_snapshot(&app, source_sync_runtime::enqueue_source_sync(&app, input)?)
 }
 

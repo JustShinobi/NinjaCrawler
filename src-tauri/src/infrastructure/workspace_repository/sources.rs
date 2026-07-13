@@ -756,6 +756,20 @@ pub(super) fn source_target_url(provider: &str, handle: &str) -> String {
 /// volume. Os relative_path dos ledgers são relativos à pasta do perfil, então
 /// mover a pasta mantém o histórico de downloads consistente.
 pub(super) fn move_media_directory(from: &Path, to: &Path) -> Result<(), String> {
+    move_media_directory_with_progress(from, to, &mut |_, _| Ok(()))
+}
+
+pub struct MediaMoveProgress {
+    pub files_processed: u64,
+    pub bytes_processed: u64,
+    pub current_file: String,
+}
+
+pub fn move_media_directory_with_progress(
+    from: &Path,
+    to: &Path,
+    progress: &mut dyn FnMut(MediaMoveProgress, bool) -> Result<(), String>,
+) -> Result<(), String> {
     if to.exists() {
         return Err(format!(
             "Destino de mídia já existe: {}. Mova ou remova-o antes.",
@@ -766,11 +780,33 @@ pub(super) fn move_media_directory(from: &Path, to: &Path) -> Result<(), String>
         fs::create_dir_all(parent).map_err(|error| error.to_string())?;
     }
 
+    progress(
+        MediaMoveProgress {
+            files_processed: 0,
+            bytes_processed: 0,
+            current_file: String::new(),
+        },
+        true,
+    )?;
     if fs::rename(from, to).is_ok() {
         return Ok(());
     }
 
-    copy_dir_recursive(from, to)?;
+    let mut files_processed = 0;
+    let mut bytes_processed = 0;
+    copy_dir_recursive_with_progress(from, to, &mut |path, bytes| {
+        files_processed += 1;
+        bytes_processed += bytes;
+        progress(
+            MediaMoveProgress {
+                files_processed,
+                bytes_processed,
+                current_file: path.display().to_string(),
+            },
+            false,
+        )?;
+        Ok(())
+    })?;
     fs::remove_dir_all(from).map_err(|error| {
         format!(
             "Mídia copiada para '{}', mas falhou ao remover a pasta antiga '{}': {}",
@@ -780,7 +816,73 @@ pub(super) fn move_media_directory(from: &Path, to: &Path) -> Result<(), String>
         )
     })
 }
-pub(super) fn copy_dir_recursive(from: &Path, to: &Path) -> Result<(), String> {
+
+fn move_media_directory_for_migration(
+    from: &Path,
+    staging: &Path,
+    to: &Path,
+    progress: &mut dyn FnMut(MediaMoveProgress, bool) -> Result<(), String>,
+) -> Result<(), String> {
+    if to.exists() {
+        return Err(format!("Destino de mídia já existe: {}", to.display()));
+    }
+    if let Some(parent) = to.parent() {
+        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    progress(
+        MediaMoveProgress {
+            files_processed: 0,
+            bytes_processed: 0,
+            current_file: String::new(),
+        },
+        true,
+    )?;
+    if fs::rename(from, to).is_ok() {
+        return Ok(());
+    }
+
+    if staging.exists() {
+        fs::remove_dir_all(staging).map_err(|error| error.to_string())?;
+    }
+    let mut files_processed = 0;
+    let mut bytes_processed = 0;
+    copy_dir_recursive_with_progress(from, staging, &mut |path, bytes| {
+        files_processed += 1;
+        bytes_processed += bytes;
+        progress(
+            MediaMoveProgress {
+                files_processed,
+                bytes_processed,
+                current_file: path.display().to_string(),
+            },
+            false,
+        )
+    })?;
+    progress(
+        MediaMoveProgress {
+            files_processed,
+            bytes_processed,
+            current_file: String::new(),
+        },
+        true,
+    )?;
+    fs::rename(staging, to).map_err(|error| {
+        format!("Falha ao promover staging '{}': {}", staging.display(), error)
+    })?;
+    fs::remove_dir_all(from).map_err(|error| {
+        format!(
+            "Mídia movida para '{}', mas falhou ao remover a origem '{}': {}",
+            to.display(),
+            from.display(),
+            error
+        )
+    })
+}
+fn copy_dir_recursive_with_progress(
+    from: &Path,
+    to: &Path,
+    progress: &mut dyn FnMut(&Path, u64) -> Result<(), String>,
+) -> Result<(), String> {
     fs::create_dir_all(to).map_err(|error| error.to_string())?;
     for entry in fs::read_dir(from).map_err(|error| error.to_string())? {
         let entry = entry.map_err(|error| error.to_string())?;
@@ -788,14 +890,72 @@ pub(super) fn copy_dir_recursive(from: &Path, to: &Path) -> Result<(), String> {
         let target_path = to.join(entry.file_name());
         let file_type = entry.file_type().map_err(|error| error.to_string())?;
         if file_type.is_dir() {
-            copy_dir_recursive(&source_path, &target_path)?;
+            copy_dir_recursive_with_progress(&source_path, &target_path, progress)?;
         } else {
-            fs::copy(&source_path, &target_path).map_err(|error| {
+            let bytes = fs::copy(&source_path, &target_path).map_err(|error| {
                 format!("Falha ao copiar '{}': {}", source_path.display(), error)
             })?;
+            progress(&source_path, bytes)?;
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod media_move_progress_tests {
+    use super::*;
+
+    #[test]
+    fn recursive_copy_reports_each_completed_file() {
+        let root =
+            std::env::temp_dir().join(format!("ninjacrawler-progress-{}", uuid::Uuid::new_v4()));
+        let source = root.join("source");
+        let target = root.join("target");
+        fs::create_dir_all(source.join("nested")).unwrap();
+        fs::write(source.join("one.bin"), [1_u8, 2, 3]).unwrap();
+        fs::write(source.join("nested").join("two.bin"), [4_u8, 5]).unwrap();
+        let mut updates = Vec::new();
+
+        copy_dir_recursive_with_progress(&source, &target, &mut |path, bytes| {
+            updates.push((
+                path.file_name().unwrap().to_string_lossy().to_string(),
+                bytes,
+            ));
+            Ok(())
+        })
+        .unwrap();
+
+        assert_eq!(updates.len(), 2);
+        assert_eq!(updates.iter().map(|(_, bytes)| bytes).sum::<u64>(), 5);
+        assert_eq!(
+            fs::read(target.join("nested").join("two.bin")).unwrap(),
+            [4_u8, 5]
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn recursive_copy_stops_when_progress_requests_cancellation() {
+        let root =
+            std::env::temp_dir().join(format!("ninjacrawler-cancel-{}", uuid::Uuid::new_v4()));
+        let source = root.join("source");
+        let target = root.join("target");
+        fs::create_dir_all(&source).unwrap();
+        fs::write(source.join("one.bin"), [1_u8]).unwrap();
+        fs::write(source.join("two.bin"), [2_u8]).unwrap();
+        let mut copied = 0;
+
+        let result = copy_dir_recursive_with_progress(&source, &target, &mut |_, _| {
+            copied += 1;
+            Err("cancelled".to_string())
+        });
+
+        assert_eq!(result, Err("cancelled".to_string()));
+        assert_eq!(copied, 1);
+        assert!(source.exists(), "the original folder must be preserved");
+        fs::remove_dir_all(root).unwrap();
+    }
+
 }
 /// Changes the save path for one or more supported profiles to
 /// `target_base_path/<handle>`, optionally moving already-downloaded media.
@@ -811,15 +971,21 @@ pub fn change_source_media_path_migration(
     source_id: String,
     target_base_path: String,
     job_id: &str,
+    mut progress: impl FnMut(MediaMoveProgress, bool) -> Result<(), String>,
 ) -> Result<WorkspaceSnapshot, String> {
-    change_source_media_path_internal(vec![source_id], target_base_path, true, Some(job_id))
+    change_source_media_path_internal(
+        vec![source_id],
+        target_base_path,
+        true,
+        Some((job_id, &mut progress)),
+    )
 }
 
 fn change_source_media_path_internal(
     source_ids: Vec<String>,
     target_base_path: String,
     move_media: bool,
-    migration_job_id: Option<&str>,
+    mut migration: Option<(&str, &mut dyn FnMut(MediaMoveProgress, bool) -> Result<(), String>)>,
 ) -> Result<WorkspaceSnapshot, String> {
     with_workspace(|connection, layout| {
         let base = PathBuf::from(target_base_path.trim());
@@ -861,7 +1027,7 @@ fn change_source_media_path_internal(
             };
 
             if move_media && !same_physical_dir {
-                if let Some(job_id) = migration_job_id {
+                if let Some((job_id, progress)) = migration.as_mut() {
                     // A staging directory is owned by this durable job. It makes a
                     // cross-volume copy resumable: on restart, promote the staging
                     // directory instead of mistaking it for a user's destination.
@@ -873,10 +1039,25 @@ fn change_source_media_path_internal(
                                 new_root.display()
                             ));
                         }
-                        move_media_directory(&staging_root, &new_root)?;
+                        if old_root.exists() {
+                            move_media_directory_for_migration(
+                                &old_root,
+                                &staging_root,
+                                &new_root,
+                                *progress,
+                            )?;
+                        } else {
+                            // A legacy/recovered staging folder may already be the
+                            // only complete copy. Promotion is atomic and must finish.
+                            fs::rename(&staging_root, &new_root).map_err(|error| error.to_string())?;
+                        }
                     } else if old_root.exists() {
-                        move_media_directory(&old_root, &staging_root)?;
-                        move_media_directory(&staging_root, &new_root)?;
+                        move_media_directory_for_migration(
+                            &old_root,
+                            &staging_root,
+                            &new_root,
+                            *progress,
+                        )?;
                     }
                 } else if old_root.exists() {
                     move_media_directory(&old_root, &new_root)?;

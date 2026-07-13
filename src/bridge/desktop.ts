@@ -78,6 +78,7 @@ import type {
   MediaGalleryPost,
   MediaThumbnailQueueStatus,
   MediaPathMigrationQueueStatus,
+  MediaPathMigrationQueueJob,
   SchedulerSet,
   SchedulerGroup,
   SchedulerGroupUpsert,
@@ -1240,8 +1241,8 @@ function createEmptySourceDeleteQueueStatus(): SourceDeleteQueueStatus {
 function normalizeMediaPathMigrationQueueStatus(value: unknown): MediaPathMigrationQueueStatus {
   const empty: MediaPathMigrationQueueStatus = { queuedCount: 0, runningCount: 0, completedCount: 0, failedCount: 0, totalCount: 0, queuedItems: [], runningItems: [], recentResults: [], updatedAt: new Date().toISOString() }
   if (!isRecord(value)) return empty
-  const job = (entry: unknown) => isRecord(entry) ? ({ jobId: stringValue(entry, ['jobId', 'job_id'], ''), sourceId: stringValue(entry, ['sourceId', 'source_id'], ''), provider: normalizeProviderKey(pick(entry, 'provider')), handle: stringValue(entry, ['handle'], ''), sourcePath: stringValue(entry, ['sourcePath', 'source_path'], ''), targetPath: stringValue(entry, ['targetPath', 'target_path'], ''), state: stringValue(entry, ['state'], 'queued') as 'queued' | 'running', queuedAt: stringValue(entry, ['queuedAt', 'queued_at'], ''), startedAt: optionalStringValue(entry, ['startedAt', 'started_at']), progressPercent: optionalNumberValue(entry, ['progressPercent', 'progress_percent']), progressLabel: optionalStringValue(entry, ['progressLabel', 'progress_label']), progressDetail: optionalStringValue(entry, ['progressDetail', 'progress_detail']), filesProcessed: numberValue(entry, ['filesProcessed', 'files_processed'], 0), filesTotal: numberValue(entry, ['filesTotal', 'files_total'], 0), bytesProcessed: numberValue(entry, ['bytesProcessed', 'bytes_processed'], 0), bytesTotal: numberValue(entry, ['bytesTotal', 'bytes_total'], 0) }) : null
-  const result = (entry: unknown) => isRecord(entry) ? ({ ...job(entry)!, status: stringValue(entry, ['status'], 'failed') as 'succeeded' | 'failed', summary: stringValue(entry, ['summary'], ''), finishedAt: stringValue(entry, ['finishedAt', 'finished_at'], ''), error: optionalStringValue(entry, ['error']) }) : null
+  const job = (entry: unknown) => isRecord(entry) ? ({ jobId: stringValue(entry, ['jobId', 'job_id'], ''), sourceId: stringValue(entry, ['sourceId', 'source_id'], ''), provider: normalizeProviderKey(pick(entry, 'provider')), handle: stringValue(entry, ['handle'], ''), sourcePath: stringValue(entry, ['sourcePath', 'source_path'], ''), targetPath: stringValue(entry, ['targetPath', 'target_path'], ''), state: stringValue(entry, ['state'], 'queued') as 'queued' | 'running', queuedAt: stringValue(entry, ['queuedAt', 'queued_at'], ''), startedAt: optionalStringValue(entry, ['startedAt', 'started_at']), progressPercent: optionalNumberValue(entry, ['progressPercent', 'progress_percent']), progressStage: stringValue(entry, ['progressStage', 'progress_stage'], 'queued') as MediaPathMigrationQueueJob['progressStage'], progressIndeterminate: booleanValue(entry, ['progressIndeterminate', 'progress_indeterminate'], true), progressLabel: optionalStringValue(entry, ['progressLabel', 'progress_label']), progressDetail: optionalStringValue(entry, ['progressDetail', 'progress_detail']), filesProcessed: numberValue(entry, ['filesProcessed', 'files_processed'], 0), filesTotal: numberValue(entry, ['filesTotal', 'files_total'], 0), bytesProcessed: numberValue(entry, ['bytesProcessed', 'bytes_processed'], 0), bytesTotal: numberValue(entry, ['bytesTotal', 'bytes_total'], 0), currentFile: optionalStringValue(entry, ['currentFile', 'current_file']) }) : null
+  const result = (entry: unknown) => isRecord(entry) ? ({ ...job(entry)!, status: stringValue(entry, ['status'], 'failed') as 'succeeded' | 'failed' | 'cancelled', summary: stringValue(entry, ['summary'], ''), finishedAt: stringValue(entry, ['finishedAt', 'finished_at'], ''), error: optionalStringValue(entry, ['error']) }) : null
   return { queuedCount: numberValue(value, ['queuedCount', 'queued_count'], 0), runningCount: numberValue(value, ['runningCount', 'running_count'], 0), completedCount: numberValue(value, ['completedCount', 'completed_count'], 0), failedCount: numberValue(value, ['failedCount', 'failed_count'], 0), totalCount: numberValue(value, ['totalCount', 'total_count'], 0), queuedItems: arrayValue(value, ['queuedItems', 'queued_items']).map(job).filter((v): v is NonNullable<typeof v> => v !== null), runningItems: arrayValue(value, ['runningItems', 'running_items']).map(job).filter((v): v is NonNullable<typeof v> => v !== null), recentResults: arrayValue(value, ['recentResults', 'recent_results']).map(result).filter((v): v is NonNullable<typeof v> => v !== null), updatedAt: stringValue(value, ['updatedAt', 'updated_at'], empty.updatedAt) }
 }
 
@@ -3030,6 +3031,10 @@ export async function enqueueSourceMediaPathMigration(sourceIds: string[], targe
 }
 export async function loadMediaPathMigrationQueueStatus(): Promise<MediaPathMigrationQueueStatus> {
   return normalizeMediaPathMigrationQueueStatus(await invoke<unknown>('media_path_migration_queue_status'))
+}
+
+export async function cancelMediaPathMigrations(): Promise<MediaPathMigrationQueueStatus> {
+  return normalizeMediaPathMigrationQueueStatus(await invoke<unknown>('cancel_media_path_migrations'))
 }
 
 export interface BatchEditorIntent {
