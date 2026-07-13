@@ -18,6 +18,8 @@ const openSourceFolderMock = vi.fn()
 const upsertSourceProfileMock = vi.fn()
 
 const bridgeMocks = vi.hoisted(() => ({
+  checkAppUpdate: vi.fn(),
+  getAppBuildInfo: vi.fn(),
   loadSourceSyncQueueStatus: vi.fn(),
   openAccountsWindow: vi.fn(),
   openConnectorRuntimesWindow: vi.fn(),

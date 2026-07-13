@@ -24,6 +24,8 @@ const upsertSourceProfileMock = vi.fn()
 let currentSnapshot: WorkspaceSnapshot = createEmptyWorkspaceSnapshot()
 
 const bridgeMocks = vi.hoisted(() => ({
+  checkAppUpdate: vi.fn(),
+  getAppBuildInfo: vi.fn(),
   loadSourceDeleteQueueStatus: vi.fn(),
   loadSourceSyncQueueStatus: vi.fn(),
   openAccountsWindow: vi.fn(),

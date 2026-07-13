@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { cleanup, fireEvent, render, screen, within } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import type { ReactNode } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import App from './App'
@@ -19,6 +19,8 @@ const openSourceFolderMock = vi.fn()
 const upsertSourceProfileMock = vi.fn()
 
 const bridgeMocks = vi.hoisted(() => ({
+  checkAppUpdate: vi.fn(),
+  getAppBuildInfo: vi.fn(),
   loadSourceDeleteQueueStatus: vi.fn(),
   loadSourceSyncQueueStatus: vi.fn(),
   openConnectorRuntimesWindow: vi.fn(),
@@ -118,6 +120,8 @@ describe('App search shortcut', () => {
   beforeEach(() => {
     applySnapshotMock.mockReset()
     bootstrapMock.mockReset()
+    bridgeMocks.checkAppUpdate.mockReset()
+    bridgeMocks.getAppBuildInfo.mockReset()
     bridgeMocks.loadSourceDeleteQueueStatus.mockReset()
     bridgeMocks.loadSourceSyncQueueStatus.mockReset()
     bridgeMocks.subscribeToDesktopRuntimeEvents.mockReset()
@@ -145,6 +149,26 @@ describe('App search shortcut', () => {
       updatedAt: new Date().toISOString(),
     })
     bridgeMocks.subscribeToDesktopRuntimeEvents.mockResolvedValue(() => undefined)
+    bridgeMocks.getAppBuildInfo.mockResolvedValue({
+      version: '0.15.0',
+      commitSha: '44ed4e3a',
+      dirty: false,
+      channel: 'development',
+      displayVersion: 'Dev 44ed4e3a',
+    })
+    bridgeMocks.checkAppUpdate.mockResolvedValue({
+      build: {
+        version: '0.15.0',
+        commitSha: '44ed4e3a',
+        dirty: false,
+        channel: 'development',
+        displayVersion: 'Dev 44ed4e3a',
+      },
+      latestVersion: '0.15.0',
+      releaseUrl: 'https://github.com/MetalDevOps/NinjaCrawler/releases/tag/v0.15.0',
+      publishedAt: '2026-07-12T07:16:25Z',
+      updateAvailable: false,
+    })
     window.history.replaceState({}, '', '/')
   })
 
@@ -186,5 +210,40 @@ describe('App search shortcut', () => {
     expect(downloadMenu).toBeTruthy()
     const downloadWithin = within(downloadMenu as HTMLElement)
     expect(downloadWithin.getByRole('button', { name: 'Run selected sync' })).toBeTruthy()
+  })
+
+  it('shows build identity and offers the newer GitHub release after one automatic check', async () => {
+    bridgeMocks.getAppBuildInfo.mockResolvedValue({
+      version: '0.15.0',
+      commitSha: 'd6a23804',
+      dirty: false,
+      channel: 'release',
+      displayVersion: 'v0.15.0',
+    })
+    bridgeMocks.checkAppUpdate.mockResolvedValue({
+      build: {
+        version: '0.15.0',
+        commitSha: 'd6a23804',
+        dirty: false,
+        channel: 'release',
+        displayVersion: 'v0.15.0',
+      },
+      latestVersion: '0.16.0',
+      releaseUrl: 'https://github.com/MetalDevOps/NinjaCrawler/releases/tag/v0.16.0',
+      publishedAt: '2026-07-13T00:00:00Z',
+      updateAvailable: true,
+    })
+
+    render(<App />)
+
+    await waitFor(() => expect(bridgeMocks.checkAppUpdate).toHaveBeenCalledTimes(1))
+    const versionButton = screen.getByRole('button', { name: /update available v0\.16\.0/i })
+    fireEvent.click(versionButton)
+
+    const downloadButton = screen.getByRole('button', { name: /view \/ download v0\.16\.0 on github/i })
+    fireEvent.click(downloadButton)
+    expect(bridgeMocks.openExternalTarget).toHaveBeenCalledWith(
+      'https://github.com/MetalDevOps/NinjaCrawler/releases/tag/v0.16.0',
+    )
   })
 })

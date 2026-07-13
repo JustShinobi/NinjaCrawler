@@ -2,10 +2,12 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow'
 import {
   enqueueSourceMediaPathMigration,
+  checkAppUpdate,
   checkSourceAvailability,
   enqueueSourceDelete,
   loadSourceDeleteQueueStatus,
   loadSourceSyncQueueStatus,
+  getAppBuildInfo,
   openAccountsWindow,
   openConnectorRuntimesWindow,
   openSingleVideosWindow,
@@ -29,6 +31,8 @@ import {
 } from './domain/sourceSyncOptions'
 import type {
   AccountsWindowIntent,
+  AppBuildInfo,
+  AppUpdateStatus,
   ConnectorRuntimeStatus,
   InstagramPresetSlot,
   ProviderKey,
@@ -138,6 +142,10 @@ function App() {
   const upsertSourceProfile = useAppStore((state) => state.upsertSourceProfile)
 
   const [aboutOpen, setAboutOpen] = useState(false)
+  const [appBuildInfo, setAppBuildInfo] = useState<AppBuildInfo>()
+  const [appUpdateStatus, setAppUpdateStatus] = useState<AppUpdateStatus>()
+  const [appUpdateChecking, setAppUpdateChecking] = useState(false)
+  const [appUpdateError, setAppUpdateError] = useState<string>()
   const [availabilityCheckDialog, setAvailabilityCheckDialog] = useState<AvailabilityCheckDialogState>()
   const [availabilityAccountPrompt, setAvailabilityAccountPrompt] = useState<AvailabilityAccountPromptState>()
   const [openMenu, setOpenMenu] = useState<string | null>(null)
@@ -156,6 +164,7 @@ function App() {
   const [queueStatus, setQueueStatus] = useState<SourceSyncQueueStatus>(() => createEmptyQueueStatus())
   const [deleteQueueStatus, setDeleteQueueStatus] = useState<SourceDeleteQueueStatus>(() => createEmptyDeleteQueueStatus())
   const runPresetSyncShortcutRef = useRef<(slot: InstagramPresetSlot) => void>(() => undefined)
+  const automaticUpdateCheckStartedRef = useRef(false)
   const searchInputRef = useRef<HTMLInputElement | null>(null)
 
   const openAddDialog = useCallback(async (preferredProvider?: ProviderKey, preferredAccountId?: string) => {
@@ -172,6 +181,20 @@ function App() {
       if (typeof window !== 'undefined' && typeof window.alert === 'function') {
         window.alert(`Failed to open Profile Editor.\n${message}`)
       }
+    }
+  }, [])
+
+  const runAppUpdateCheck = useCallback(async () => {
+    setAppUpdateChecking(true)
+    setAppUpdateError(undefined)
+    try {
+      const status = await checkAppUpdate()
+      setAppBuildInfo(status.build)
+      setAppUpdateStatus(status)
+    } catch (updateError) {
+      setAppUpdateError(updateError instanceof Error ? updateError.message : String(updateError))
+    } finally {
+      setAppUpdateChecking(false)
     }
   }, [])
 
@@ -219,12 +242,21 @@ function App() {
       return
     }
 
+    void Promise.resolve(getAppBuildInfo())
+      .then(setAppBuildInfo)
+      .catch(() => undefined)
+
     void Promise.resolve(bootstrap()).then((snapshot) => {
       if (snapshot?.sources) {
         void refreshAvatarThumbnails()
       }
-    }).catch(() => undefined)
-  }, [bootstrap, windowKind])
+    }).catch(() => undefined).finally(() => {
+      if (!automaticUpdateCheckStartedRef.current) {
+        automaticUpdateCheckStartedRef.current = true
+        void runAppUpdateCheck()
+      }
+    })
+  }, [bootstrap, runAppUpdateCheck, windowKind])
 
   useEffect(() => {
     if (windowKind !== 'main') {
@@ -1560,6 +1592,24 @@ function App() {
           </div>
           <strong>{queueProgressText}</strong>
         </div>
+        <div className={appUpdateStatus?.updateAvailable ? 'status-cell status-cell-version status-cell-version-update' : 'status-cell status-cell-version'}>
+          <button
+            aria-label={appUpdateStatus?.updateAvailable
+              ? `Update available v${appUpdateStatus.latestVersion}`
+              : `Version ${appBuildInfo?.displayVersion ?? 'loading'}`}
+            className="status-version-button"
+            onClick={() => setAboutOpen(true)}
+            title="Open app version and update details"
+            type="button"
+          >
+            <span>{appUpdateStatus?.updateAvailable ? 'Update available' : 'Version'}</span>
+            <strong>
+              {appUpdateStatus?.updateAvailable
+                ? `v${appUpdateStatus.latestVersion}`
+                : appBuildInfo?.displayVersion ?? 'Loading...'}
+            </strong>
+          </button>
+        </div>
         <div className="status-cell status-cell-actions">
           <button className="status-open-queue-button" onClick={() => void handleOpenSingleVideos()} type="button">
             Single Videos
@@ -1787,11 +1837,66 @@ function App() {
       {aboutOpen ? (
         <InternalDialog
           onClose={() => setAboutOpen(false)}
-          subtitle="Workspace paths are available here while live queue progress stays in the footer and Queue Status window."
+          subtitle="Build identity, update availability, and local workspace paths."
           title="About NinjaCrawler"
           width="medium"
         >
           <section className="about-grid">
+            <article className={appUpdateStatus?.updateAvailable ? 'panel panel-accent about-version-panel' : 'panel about-version-panel'}>
+              <div className="panel-header compact-header">
+                <div>
+                  <p className="eyebrow">Application</p>
+                  <h2>Version</h2>
+                </div>
+              </div>
+              <div className="section-stack">
+                <div className="list-row">
+                  <div>
+                    <strong>Current build</strong>
+                    <p>{appBuildInfo?.displayVersion ?? 'Loading build information...'}</p>
+                  </div>
+                </div>
+                {appBuildInfo?.channel === 'development' ? (
+                  <div className="list-row">
+                    <div>
+                      <strong>Build channel</strong>
+                      <p>Development build; release age is not inferred from its commit SHA.</p>
+                    </div>
+                  </div>
+                ) : null}
+                <div className="list-row">
+                  <div>
+                    <strong>Latest stable release</strong>
+                    <p>{appUpdateChecking
+                      ? 'Checking GitHub...'
+                      : appUpdateError
+                        ? appUpdateError
+                        : appUpdateStatus
+                          ? `v${appUpdateStatus.latestVersion}${appUpdateStatus.updateAvailable ? ' is available.' : ' is the latest release.'}`
+                          : 'Not checked yet.'}</p>
+                  </div>
+                </div>
+                <div className="about-version-actions">
+                  <button
+                    className="ghost-button"
+                    disabled={appUpdateChecking}
+                    onClick={() => void runAppUpdateCheck()}
+                    type="button"
+                  >
+                    {appUpdateChecking ? 'Checking...' : 'Check again'}
+                  </button>
+                  {appUpdateStatus?.releaseUrl ? (
+                    <button
+                      className="primary-button"
+                      onClick={() => void openExternalTarget(appUpdateStatus.releaseUrl)}
+                      type="button"
+                    >
+                      View / Download v{appUpdateStatus.latestVersion} on GitHub
+                    </button>
+                  ) : null}
+                </div>
+              </div>
+            </article>
             <article className="panel panel-accent">
               <div className="panel-header compact-header">
                 <div>

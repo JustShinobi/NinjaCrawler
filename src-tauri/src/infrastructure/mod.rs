@@ -1,3 +1,4 @@
+pub mod app_update;
 pub mod companion_api;
 pub mod connector_debug;
 pub mod connector_runtime;

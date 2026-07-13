@@ -1668,3 +1668,30 @@ pub struct AppSettingUpsert {
     pub key: String,
     pub value: String,
 }
+
+#[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AppBuildChannel {
+    Release,
+    Development,
+}
+
+#[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AppBuildInfo {
+    pub version: String,
+    pub commit_sha: String,
+    pub dirty: bool,
+    pub channel: AppBuildChannel,
+    pub display_version: String,
+}
+
+#[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AppUpdateStatus {
+    pub build: AppBuildInfo,
+    pub latest_version: String,
+    pub release_url: String,
+    pub published_at: Option<String>,
+    pub update_available: bool,
+}

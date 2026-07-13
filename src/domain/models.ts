@@ -20,6 +20,7 @@ export type SchedulerPauseMode =
   | 'until'
 export type SchedulerSkipMode = 'default' | 'minutes' | 'until' | 'reset'
 export type ConnectorRuntimeManagementMode = 'managed' | 'custom'
+export type AppBuildChannel = 'release' | 'development'
 export type InstagramPresetSlot = 'preset1' | 'preset2'
 export type ConnectorRuntimeStatusKind =
   | 'up_to_date'
@@ -1116,4 +1117,20 @@ export interface AppSettingUpsert {
   category?: string
   description?: string
   mutable?: boolean
+}
+
+export interface AppBuildInfo {
+  version: string
+  commitSha: string
+  dirty: boolean
+  channel: AppBuildChannel
+  displayVersion: string
+}
+
+export interface AppUpdateStatus {
+  build: AppBuildInfo
+  latestVersion: string
+  releaseUrl: string
+  publishedAt?: string
+  updateAvailable: boolean
 }
