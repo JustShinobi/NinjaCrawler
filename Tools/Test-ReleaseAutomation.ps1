@@ -8,12 +8,14 @@ $appReleaseWorkflowPath = Join-Path $repoRoot ".github\workflows\release.yml"
 $companionReleaseWorkflowPath = Join-Path $repoRoot ".github\workflows\release-companion.yml"
 $promotionWorkflowPath = Join-Path $repoRoot ".github\workflows\release-pr.yml"
 $releaseBackSyncWorkflowPath = Join-Path $repoRoot ".github\workflows\release-back-sync.yml"
+$cargoLockPath = Join-Path $repoRoot "src-tauri\Cargo.lock"
 $config = Get-Content -LiteralPath $configPath -Raw | ConvertFrom-Json
 $workflow = Get-Content -LiteralPath $workflowPath -Raw
 $appReleaseWorkflow = Get-Content -LiteralPath $appReleaseWorkflowPath -Raw
 $companionReleaseWorkflow = Get-Content -LiteralPath $companionReleaseWorkflowPath -Raw
 $promotionWorkflow = Get-Content -LiteralPath $promotionWorkflowPath -Raw
 $releaseBackSyncWorkflow = Get-Content -LiteralPath $releaseBackSyncWorkflowPath -Raw
+$cargoLock = Get-Content -LiteralPath $cargoLockPath -Raw
 
 if ($config.'separate-pull-requests' -ne $true) {
     throw "Release Please packages must use separate pull requests."
@@ -25,6 +27,18 @@ foreach ($packagePath in @('.', 'NinjaCrawler.Companion')) {
     if (-not $pattern.Contains('${component}') -or -not $pattern.Contains('${version}')) {
         throw "Release PR title for '$packagePath' must preserve component and version."
     }
+}
+
+$cargoLockUpdater = @($config.packages.'.'.'extra-files') | Where-Object {
+    $_.PSObject.Properties['type'] -and
+    $_.type -eq 'generic' -and
+    $_.path -eq 'src-tauri/Cargo.lock'
+}
+if (-not $cargoLockUpdater) {
+    throw "Release Please must update the Cargo lockfile version."
+}
+if (-not $cargoLock.Contains('x-release-please-version')) {
+    throw "Cargo.lock must mark the application package version for Release Please."
 }
 
 foreach ($requiredFragment in @(
@@ -44,6 +58,9 @@ if (-not $appReleaseWorkflow.Contains('startswith("release-please--")')) {
 }
 if (-not $appReleaseWorkflow.Contains('Reconcile recovered release PR label')) {
     throw "App release recovery must reconcile the pending release PR label."
+}
+if (-not $appReleaseWorkflow.Contains("'src-tauri/Cargo.lock' = `$cargoLockVersion")) {
+    throw "App release validation must reject a stale Cargo lockfile version."
 }
 
 foreach ($requiredFragment in @(

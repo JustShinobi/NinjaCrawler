@@ -54,6 +54,15 @@ jobs:
             Select-String -Path src-tauri/Cargo.toml -Pattern '^version\s*=\s*"([^"]+)"' |
               Select-Object -First 1
           ).Matches[0].Groups[1].Value
+          $cargoLockContent = Get-Content src-tauri/Cargo.lock -Raw
+          $cargoLockMatch = [regex]::Match(
+            $cargoLockContent,
+            '(?ms)^\[\[package\]\]\s*name\s*=\s*"ninjacrawler"\s*version\s*=\s*"([^"]+)"'
+          )
+          if (-not $cargoLockMatch.Success) {
+            throw "Could not resolve the NinjaCrawler package version from src-tauri/Cargo.lock."
+          }
+          $cargoLockVersion = $cargoLockMatch.Groups[1].Value
 
           # The Companion has its own release-please track (tag companion-vX.Y.Z),
           # so its manifest version is intentionally independent of the app tag and
@@ -62,6 +71,7 @@ jobs:
             'package.json' = $packageVersion
             'src-tauri/tauri.conf.json' = $tauriVersion
             'src-tauri/Cargo.toml' = $cargoVersion
+            'src-tauri/Cargo.lock' = $cargoLockVersion
           }
           foreach ($entry in $versions.GetEnumerator()) {
             if ($entry.Value -ne $version) {
