@@ -54,6 +54,15 @@ jobs:
             Select-String -Path src-tauri/Cargo.toml -Pattern '^version\s*=\s*"([^"]+)"' |
               Select-Object -First 1
           ).Matches[0].Groups[1].Value
+          $cargoLockContent = Get-Content src-tauri/Cargo.lock -Raw
+          $cargoLockMatch = [regex]::Match(
+            $cargoLockContent,
+            '(?ms)^\[\[package\]\]\s*name\s*=\s*"ninjacrawler"\s*version\s*=\s*"([^"]+)"'
+          )
+          if (-not $cargoLockMatch.Success) {
+            throw "Could not resolve the NinjaCrawler package version from src-tauri/Cargo.lock."
+          }
+          $cargoLockVersion = $cargoLockMatch.Groups[1].Value
 
           # The Companion has its own release-please track (tag companion-vX.Y.Z),
           # so its manifest version is intentionally independent of the app tag and
@@ -62,6 +71,7 @@ jobs:
             'package.json' = $packageVersion
             'src-tauri/tauri.conf.json' = $tauriVersion
             'src-tauri/Cargo.toml' = $cargoVersion
+            'src-tauri/Cargo.lock' = $cargoLockVersion
           }
           foreach ($entry in $versions.GetEnumerator()) {
             if ($entry.Value -ne $version) {
@@ -108,6 +118,9 @@ jobs:
         shell: pwsh
         env:
           GITHUB_TOKEN: ${{ github.token }}
+          NINJACRAWLER_RELEASE_BUILD: "true"
+          NINJACRAWLER_RELEASE_VERSION: ${{ steps.version.outputs.version }}
+          NINJACRAWLER_BUILD_SHA: ${{ inputs.sha || github.sha }}
         run: >
           powershell -ExecutionPolicy Bypass
           -File Tools\Build-NinjaCrawler.ps1
@@ -318,10 +331,11 @@ jobs:
         # rebuilt the changelog from the start of the project (this produced the
         # bloated PRs #47, #53 and #58). Re-running release-please does NOT
         # deflate an already-open pending release PR — only closing it and
-        # regenerating does. So: close that stale release PR, then re-dispatch
-        # release-please, which recreates a correctly-anchored PR (or nothing,
-        # when there is nothing to release since this tag). Uses the PAT, like
-        # release-please.yml itself.
+        # regenerating does. Every package PR edits the shared release manifest,
+        # so publishing either package also makes sibling release PRs stale and
+        # potentially conflicting. Close all of them, then re-dispatch
+        # release-please so each package PR is recreated from the new tag and
+        # manifest state. Uses the PAT, like release-please.yml itself.
         if: success()
         shell: pwsh
         env:
@@ -329,7 +343,7 @@ jobs:
         run: |
           $stale = gh pr list --repo ${{ github.repository }} --base main --state open `
             --json number,headRefName `
-            --jq '.[] | select(.headRefName | endswith("--components--ninjacrawler")) | .number'
+            --jq '.[] | select(.headRefName | startswith("release-please--")) | .number'
           foreach ($pr in @($stale)) {
             if ($pr) {
               Write-Host "Closing stale release PR #$pr (opened before the tag existed)."
@@ -338,3 +352,14 @@ jobs:
             }
           }
           gh workflow run release-please.yml --repo ${{ github.repository }} --ref main
+
+      - name: Back-sync published version to develop
+        if: success()
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: |
+          gh workflow run release-back-sync.yml `
+            --repo ${{ github.repository }} `
+            --ref main `
+            -f tag=${{ steps.version.outputs.tag }}

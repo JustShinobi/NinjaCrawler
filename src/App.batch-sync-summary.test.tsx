@@ -24,6 +24,8 @@ const upsertSourceProfileMock = vi.fn()
 let currentSnapshot: WorkspaceSnapshot = createEmptyWorkspaceSnapshot()
 
 const bridgeMocks = vi.hoisted(() => ({
+  checkAppUpdate: vi.fn(),
+  getAppBuildInfo: vi.fn(),
   checkSourceAvailability: vi.fn(),
   loadSourceDeleteQueueStatus: vi.fn(),
   loadSourceSyncQueueStatus: vi.fn(),
@@ -302,7 +304,7 @@ describe('App batch sync summary', () => {
     const view = render(<App />)
     const statusBar = view.container.querySelector('.status-bar')
     expect(statusBar).toBeTruthy()
-    expect(statusBar?.querySelectorAll('.status-cell')).toHaveLength(6)
+    expect(statusBar?.querySelectorAll('.status-cell')).toHaveLength(7)
 
     const connectorCell = statusBar?.querySelector('.status-cell-connector')
     expect(connectorCell).toBeTruthy()

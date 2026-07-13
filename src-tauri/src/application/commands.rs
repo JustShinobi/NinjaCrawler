@@ -1,18 +1,19 @@
 use crate::domain::models::{
-    AccountsWindowIntent, AppSettingUpsert, BatchSourceProfilePatch, CheckSourceAvailabilityInput,
-    CloneSyncPlanInput, ConnectorDebugEntry, ConnectorDebugQuery, DesktopRuntimeState,
-    ImportMethodDescriptor, ImportPreview, ImportPreviewOptions, ImportProviderDescriptor,
-    ImportQueueStatus, ImportRootDescriptor, ImportRunRequest, ImportRunResult, MoveSyncPlanInput,
-    PlanEditorWindowIntent, ProviderAccountCookie, ProviderAccountCookieImport,
-    ProviderAccountEditor, ProviderAccountSettingValue, ProviderAccountUpsert, RunSourceSyncInput,
-    RunSyncPlanNowInput, RuntimeLogContext, RuntimeLogEntry, RuntimeLogQuery,
-    RuntimeLogWindowStatus, SchedulerGroupUpsert, SchedulerSetUpsert, SetSyncPlanPauseInput,
-    SkipSyncPlanInput, SourceAvailabilityCheckResult, SourceDeleteQueueStatus,
-    SourceEditorWindowIntent, SourceProfileDeleteInput, SourceProfileUpsert, SourceSyncQueueStatus,
-    SyncPlanTargetPreview, SyncPlanTargetPreviewInput, SyncPlanUpsert, WorkspaceSnapshot,
+    AccountsWindowIntent, AppBuildInfo, AppSettingUpsert, AppUpdateStatus, BatchSourceProfilePatch,
+    CheckSourceAvailabilityInput, CloneSyncPlanInput, ConnectorDebugEntry, ConnectorDebugQuery,
+    DesktopRuntimeState, ImportMethodDescriptor, ImportPreview, ImportPreviewOptions,
+    ImportProviderDescriptor, ImportQueueStatus, ImportRootDescriptor, ImportRunRequest,
+    ImportRunResult, MoveSyncPlanInput, PlanEditorWindowIntent, ProviderAccountCookie,
+    ProviderAccountCookieImport, ProviderAccountEditor, ProviderAccountSettingValue,
+    ProviderAccountUpsert, RunSourceSyncInput, RunSyncPlanNowInput, RuntimeLogContext,
+    RuntimeLogEntry, RuntimeLogQuery, RuntimeLogWindowStatus, SchedulerGroupUpsert,
+    SchedulerSetUpsert, SetSyncPlanPauseInput, SkipSyncPlanInput, SourceAvailabilityCheckResult,
+    SourceDeleteQueueStatus, SourceEditorWindowIntent, SourceProfileDeleteInput,
+    SourceProfileUpsert, SourceSyncQueueStatus, SyncPlanTargetPreview, SyncPlanTargetPreviewInput,
+    SyncPlanUpsert, WorkspaceSnapshot,
 };
 use crate::infrastructure::{
-    connector_debug, connector_runtime, desktop_runtime, import_runtime,
+    app_update, connector_debug, connector_runtime, desktop_runtime, import_runtime,
     media_path_migration_runtime, media_thumbnail_runtime, single_video_runtime,
     source_delete_runtime, source_sync_runtime, workspace_repository,
 };
@@ -23,6 +24,18 @@ fn publish_snapshot(
 ) -> Result<WorkspaceSnapshot, String> {
     desktop_runtime::publish_workspace_runtime(app, &snapshot)?;
     Ok(snapshot)
+}
+
+#[tauri::command]
+pub fn get_app_build_info() -> AppBuildInfo {
+    app_update::build_info()
+}
+
+#[tauri::command]
+pub async fn check_app_update() -> Result<AppUpdateStatus, String> {
+    tauri::async_runtime::spawn_blocking(app_update::check_app_update)
+        .await
+        .map_err(|error| format!("Update check task failed: {error}"))?
 }
 
 #[tauri::command]

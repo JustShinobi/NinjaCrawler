@@ -144,14 +144,28 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
         run: |
+          # All package PRs edit .release-please-manifest.json. Once this tag is
+          # published, every open release PR must be regenerated from the updated
+          # main branch or sibling package PRs can conflict with this release.
           $stale = gh pr list --repo ${{ github.repository }} --base main --state open `
             --json number,headRefName `
-            --jq '.[] | select(.headRefName | endswith("--components--companion")) | .number'
+            --jq '.[] | select(.headRefName | startswith("release-please--")) | .number'
           foreach ($pr in @($stale)) {
             if ($pr) {
-              Write-Host "Closing stale Companion release PR #$pr opened before the tag existed."
+              Write-Host "Closing stale release PR #$pr opened before the Companion tag existed."
               gh pr close $pr --repo ${{ github.repository }} `
                 --comment "Superseded by the Companion release workflow after publishing ${{ steps.version.outputs.tag }}."
             }
           }
           gh workflow run release-please.yml --repo ${{ github.repository }} --ref main
+
+      - name: Back-sync published Companion version to develop
+        if: success()
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: |
+          gh workflow run release-back-sync.yml `
+            --repo ${{ github.repository }} `
+            --ref main `
+            -f tag=${{ steps.version.outputs.tag }}
