@@ -51,7 +51,9 @@ jobs:
         id: recovery
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.recover_package != 'none' }}
         env:
-          GH_TOKEN: ${{ github.token }}
+          # Release creation and workflow dispatch need the repository PAT. The
+          # default workflow token is rejected by this repository's policy.
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
           RECOVER_PACKAGE: ${{ inputs.recover_package }}
           RECOVER_SHA: ${{ inputs.recover_sha || github.sha }}
         run: |
