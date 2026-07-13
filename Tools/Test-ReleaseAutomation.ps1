@@ -6,10 +6,14 @@ $configPath = Join-Path $repoRoot "release-please-config.json"
 $workflowPath = Join-Path $repoRoot ".github\workflows\release-please.yml"
 $appReleaseWorkflowPath = Join-Path $repoRoot ".github\workflows\release.yml"
 $companionReleaseWorkflowPath = Join-Path $repoRoot ".github\workflows\release-companion.yml"
+$promotionWorkflowPath = Join-Path $repoRoot ".github\workflows\release-pr.yml"
+$releaseBackSyncWorkflowPath = Join-Path $repoRoot ".github\workflows\release-back-sync.yml"
 $config = Get-Content -LiteralPath $configPath -Raw | ConvertFrom-Json
 $workflow = Get-Content -LiteralPath $workflowPath -Raw
 $appReleaseWorkflow = Get-Content -LiteralPath $appReleaseWorkflowPath -Raw
 $companionReleaseWorkflow = Get-Content -LiteralPath $companionReleaseWorkflowPath -Raw
+$promotionWorkflow = Get-Content -LiteralPath $promotionWorkflowPath -Raw
+$releaseBackSyncWorkflow = Get-Content -LiteralPath $releaseBackSyncWorkflowPath -Raw
 
 if ($config.'separate-pull-requests' -ne $true) {
     throw "Release Please packages must use separate pull requests."
@@ -50,6 +54,38 @@ foreach ($requiredFragment in @(
 )) {
     if (-not $companionReleaseWorkflow.Contains($requiredFragment)) {
         throw "Companion release workflow is missing shared-manifest re-anchoring: $requiredFragment"
+    }
+}
+
+foreach ($requiredFragment in @(
+    'git log --no-merges --oneline',
+    'Closing empty release PR',
+    'gh pr close "$existing"'
+)) {
+    if (-not $promotionWorkflow.Contains($requiredFragment)) {
+        throw "Promotion workflow does not close merge-only release PRs: $requiredFragment"
+    }
+}
+
+foreach ($releaseWorkflow in @($appReleaseWorkflow, $companionReleaseWorkflow)) {
+    foreach ($requiredFragment in @(
+        'gh workflow run release-back-sync.yml',
+        '-f tag=${{ steps.version.outputs.tag }}'
+    )) {
+        if (-not $releaseWorkflow.Contains($requiredFragment)) {
+            throw "Every package release must trigger branch back-sync: $requiredFragment"
+        }
+    }
+}
+
+foreach ($requiredFragment in @(
+    '^(companion-)?v[0-9]+\.[0-9]+\.[0-9]+$',
+    'git merge-base --is-ancestor',
+    '--base "$BASE" --head "$branch"',
+    '--merge --delete-branch'
+)) {
+    if (-not $releaseBackSyncWorkflow.Contains($requiredFragment)) {
+        throw "Release back-sync workflow is missing a safety invariant: $requiredFragment"
     }
 }
 

@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.15.1](https://github.com/MetalDevOps/NinjaCrawler/compare/companion-v0.15.0...companion-v0.15.1) (2026-07-13)
+
+
+### Bug Fixes
+
+* **companion:** detect initial Instagram story by resolving live tab URL ([#125](https://github.com/MetalDevOps/NinjaCrawler/issues/125)) ([ee036cf](https://github.com/MetalDevOps/NinjaCrawler/commit/ee036cf20388dd278823eb8d92c8494a04c7bddd))
+
 ## [0.15.0](https://github.com/MetalDevOps/NinjaCrawler/compare/companion-v0.14.0...companion-v0.15.0) (2026-07-11)
 
 

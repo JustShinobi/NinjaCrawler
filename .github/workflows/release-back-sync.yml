@@ -1,0 +1,106 @@
+name: Release back-sync
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Published app or Companion release tag to merge back into develop
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: release-back-sync
+  cancel-in-progress: false
+
+jobs:
+  back-sync:
+    name: Merge published release into develop
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+
+      - name: Validate published release
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$RELEASE_TAG" =~ ^(companion-)?v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Release tag '$RELEASE_TAG' must use vX.Y.Z or companion-vX.Y.Z."
+            exit 1
+          fi
+
+          release="$(gh release view "$RELEASE_TAG" --repo "${{ github.repository }}" \
+            --json isDraft,isPrerelease,tagName)"
+          if [ "$(jq -r '.tagName' <<< "$release")" != "$RELEASE_TAG" ] \
+            || [ "$(jq -r '.isDraft' <<< "$release")" != "false" ] \
+            || [ "$(jq -r '.isPrerelease' <<< "$release")" != "false" ]; then
+            echo "::error::$RELEASE_TAG must be a published, stable release before it can be synced."
+            exit 1
+          fi
+
+      - name: Create or update back-sync pull request
+        id: pull-request
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          RELEASE_TAG: ${{ inputs.tag }}
+          BASE: develop
+        run: |
+          set -euo pipefail
+          git fetch --force origin "$BASE" "refs/tags/$RELEASE_TAG:refs/tags/$RELEASE_TAG"
+          if git merge-base --is-ancestor "$RELEASE_TAG" "origin/$BASE"; then
+            echo "$RELEASE_TAG is already an ancestor of $BASE; nothing to sync."
+            echo "skipped=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          branch="sync/release-$RELEASE_TAG"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -B "$branch" "$RELEASE_TAG"
+          git config --local --unset-all http.https://github.com/.extraheader || true
+          gh auth setup-git
+          git push --force --set-upstream origin "$branch"
+
+          pr="$(gh pr list --repo "${{ github.repository }}" --base "$BASE" --head "$branch" \
+            --state open --json number --jq '.[0].number')"
+          if [ -z "$pr" ]; then
+            gh pr create --repo "${{ github.repository }}" --base "$BASE" --head "$branch" \
+              --title "chore(release): sync $RELEASE_TAG back to develop" \
+              --body "Merges the published release $RELEASE_TAG back into develop so development inherits the current public versions. This PR must use a merge commit; do not squash it."
+            pr="$(gh pr list --repo "${{ github.repository }}" --base "$BASE" --head "$branch" \
+              --state open --json number --jq '.[0].number')"
+          fi
+
+          if [ -z "$pr" ]; then
+            echo "::error::Could not resolve the release back-sync pull request."
+            exit 1
+          fi
+          echo "number=$pr" >> "$GITHUB_OUTPUT"
+
+      - name: Merge back-sync after validation
+        if: ${{ steps.pull-request.outputs.skipped != 'true' }}
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          PR_NUMBER: ${{ steps.pull-request.outputs.number }}
+        run: |
+          set -euo pipefail
+          mergeable="$(gh pr view "$PR_NUMBER" --repo "${{ github.repository }}" \
+            --json mergeable --jq '.mergeable')"
+          if [ "$mergeable" = "CONFLICTING" ]; then
+            echo "::error::Back-sync PR #$PR_NUMBER has conflicts and was left open for manual resolution."
+            exit 1
+          fi
+
+          gh pr checks "$PR_NUMBER" --repo "${{ github.repository }}" --watch --fail-fast
+          gh pr merge "$PR_NUMBER" --repo "${{ github.repository }}" --merge --delete-branch \
+            --subject "chore(release): sync published version back to develop"

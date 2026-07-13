@@ -45,9 +45,20 @@ jobs:
           set -euo pipefail
           git fetch --quiet origin "$BASE" "$HEAD"
 
-          # Nothing to promote when develop is not ahead of main.
-          if [ -z "$(git log --oneline "origin/$BASE..origin/$HEAD")" ]; then
-            echo "No commits on $HEAD ahead of $BASE; skipping."
+          existing="$(gh pr list --base "$BASE" --head "$HEAD" --state open \
+            --json number --jq '.[0].number' || true)"
+
+          # Release back-syncs add merge commits to develop so it inherits the
+          # published versions from main. Those merges are ancestry maintenance,
+          # not changes that should be promoted back to main. Close a standing PR
+          # when no non-merge commits remain so an empty promotion cannot linger.
+          if [ -z "$(git log --no-merges --oneline "origin/$BASE..origin/$HEAD")" ]; then
+            echo "No non-merge commits on $HEAD ahead of $BASE."
+            if [ -n "$existing" ]; then
+              echo "Closing empty release PR #$existing"
+              gh pr close "$existing" \
+                --comment "Closed automatically: only release back-sync merge commits remain on \`$HEAD\`; there are no changes to promote to \`$BASE\`."
+            fi
             exit 0
           fi
 
@@ -91,8 +102,6 @@ jobs:
 
           title="chore: promote develop → main"
 
-          existing="$(gh pr list --base "$BASE" --head "$HEAD" --state open \
-            --json number --jq '.[0].number' || true)"
           if [ -n "$existing" ]; then
             echo "Updating existing release PR #$existing"
             gh pr edit "$existing" --title "$title" --body-file "$body_file"

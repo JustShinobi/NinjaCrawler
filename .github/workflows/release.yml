@@ -339,3 +339,14 @@ jobs:
             }
           }
           gh workflow run release-please.yml --repo ${{ github.repository }} --ref main
+
+      - name: Back-sync published version to develop
+        if: success()
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: |
+          gh workflow run release-back-sync.yml `
+            --repo ${{ github.repository }} `
+            --ref main `
+            -f tag=${{ steps.version.outputs.tag }}
