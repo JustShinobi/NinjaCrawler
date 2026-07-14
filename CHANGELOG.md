@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.18.0](https://github.com/MetalDevOps/NinjaCrawler/compare/v0.17.1...v0.18.0) (2026-07-14)
+
+
+### Features
+
+* **release:** cross-build thin Windows distribution ([#160](https://github.com/MetalDevOps/NinjaCrawler/issues/160)) ([408bb96](https://github.com/MetalDevOps/NinjaCrawler/commit/408bb96b820f6a6015f46dea4590845ff7692ffa))
+
+
+### Bug Fixes
+
+* **release:** use labeled promotion PR directly ([5575879](https://github.com/MetalDevOps/NinjaCrawler/commit/5575879a8c39cabe7c63a7efeadd48d957313e49))
+
 ## [0.17.1](https://github.com/MetalDevOps/NinjaCrawler/compare/v0.17.0...v0.17.1) (2026-07-14)
 
 
