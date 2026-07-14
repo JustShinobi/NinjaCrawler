@@ -232,8 +232,12 @@ if (-not $appReleaseWorkflow.Contains('startswith("release-please--")')) {
 if (-not $appReleaseWorkflow.Contains('Reconcile recovered release PR label')) {
     throw "App release recovery must reconcile the pending release PR label."
 }
-if (-not $appReleaseWorkflow.Contains('Tools/Test-NinjaCrawlerVersion.ps1 -ExpectedVersion $version')) {
-    throw "App release validation must enforce the shared version contract."
+if ($appReleaseWorkflow.Contains('Tools/Test-NinjaCrawlerVersion.ps1')) {
+    throw "Historical release recovery must not depend on helper scripts from the current workflow revision."
+}
+if (-not $appReleaseWorkflow.Contains("'src-tauri/Cargo.lock' = `$cargoLockVersion") -or
+    -not $appReleaseWorkflow.Contains('Keep this validation self-contained.')) {
+    throw "App release validation must enforce a self-contained version contract."
 }
 
 foreach ($requiredFragment in @(

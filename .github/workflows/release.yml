@@ -58,7 +58,35 @@ jobs:
           }
 
           $version = $Matches.version
-          & Tools/Test-NinjaCrawlerVersion.ps1 -ExpectedVersion $version | Out-Null
+          # Keep this validation self-contained. Recovery checks out the historical
+          # release SHA, which may predate helper scripts in the current workflow.
+          $packageVersion = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          $tauriVersion = (Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
+          $cargoVersion = (
+            Select-String -Path src-tauri/Cargo.toml -Pattern '^version\s*=\s*"([^"]+)"' |
+              Select-Object -First 1
+          ).Matches[0].Groups[1].Value
+          $cargoLockContent = Get-Content src-tauri/Cargo.lock -Raw
+          $cargoLockMatch = [regex]::Match(
+            $cargoLockContent,
+            '(?ms)^\[\[package\]\]\s*name\s*=\s*"ninjacrawler"\s*version\s*=\s*"([^"]+)"'
+          )
+          if (-not $cargoLockMatch.Success) {
+            throw "Could not resolve the NinjaCrawler package version from src-tauri/Cargo.lock."
+          }
+          $cargoLockVersion = $cargoLockMatch.Groups[1].Value
+
+          $versions = @{
+            'package.json' = $packageVersion
+            'src-tauri/tauri.conf.json' = $tauriVersion
+            'src-tauri/Cargo.toml' = $cargoVersion
+            'src-tauri/Cargo.lock' = $cargoLockVersion
+          }
+          foreach ($entry in $versions.GetEnumerator()) {
+            if ($entry.Value -ne $version) {
+              throw "$($entry.Key) has version '$($entry.Value)', expected '$version'."
+            }
+          }
 
           "tag=$env:RELEASE_TAG" >> $env:GITHUB_OUTPUT
           "version=$version" >> $env:GITHUB_OUTPUT
