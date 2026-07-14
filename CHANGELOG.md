@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.18.1](https://github.com/MetalDevOps/NinjaCrawler/compare/v0.18.0...v0.18.1) (2026-07-14)
+
+
+### Bug Fixes
+
+* **release:** keep historical recovery self-contained ([7b84214](https://github.com/MetalDevOps/NinjaCrawler/commit/7b84214e08dbe56c3300d3170b4792657d985c58))
+* **release:** make post-publish maintenance resilient ([906b74c](https://github.com/MetalDevOps/NinjaCrawler/commit/906b74cc7ee4a1dd0e86e0f5826e29cb74f61f8e))
+* **release:** overlay trusted tooling for recovery ([3fba695](https://github.com/MetalDevOps/NinjaCrawler/commit/3fba69566fe066555a864140431013913e9ef1d1))
+* **release:** prevent version regressions in promotion ([ef487d0](https://github.com/MetalDevOps/NinjaCrawler/commit/ef487d061b7728397ef4ddfb7c7c84ca014a9f4e))
+* **release:** prevent version regressions in promotion ([ef487d0](https://github.com/MetalDevOps/NinjaCrawler/commit/ef487d061b7728397ef4ddfb7c7c84ca014a9f4e))
+* **release:** prevent version regressions in promotion ([c061f2a](https://github.com/MetalDevOps/NinjaCrawler/commit/c061f2a72d749ced23c95d4cd27c3f91e55ea06b))
+* **release:** use Linux release notes path ([4d9f2f5](https://github.com/MetalDevOps/NinjaCrawler/commit/4d9f2f564f3f9e175beea41353fb196bde9f3cfa))
+
 ## [0.18.0](https://github.com/MetalDevOps/NinjaCrawler/compare/v0.17.1...v0.18.0) (2026-07-14)
 
 
