@@ -292,6 +292,12 @@ foreach ($requiredFragment in @(
 if ($appReleaseWorkflow.Contains('sudo apt-get')) {
     throw "The immutable JIT release job must not mutate the golden image with apt."
 }
+if ($appReleaseWorkflow.Contains("'release\CHANGELOG.md'")) {
+    throw "Hosted Linux publication must not use a Windows path for release notes."
+}
+if ([regex]::Matches($appReleaseWorkflow, "'--notes-file', 'release/CHANGELOG.md'").Count -ne 2) {
+    throw "Both release publication paths must use the hosted Linux changelog path."
+}
 
 foreach ($requiredFragment in @(
     'runs-on: [self-hosted, proxmox-lxc, crossbuild, mode-ephemeral]',

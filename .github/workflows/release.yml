@@ -243,7 +243,7 @@ jobs:
             $publishArgs = @(
               'release', 'edit', $env:RELEASE_TAG
               '--title', "NinjaCrawler $env:RELEASE_VERSION"
-              '--notes-file', 'release\CHANGELOG.md'
+              '--notes-file', 'release/CHANGELOG.md'
               '--draft=false'
               '--prerelease=false'
               '--latest'
@@ -255,7 +255,7 @@ jobs:
             $arguments = @(
               'release', 'create', $env:RELEASE_TAG
               '--target', $env:RELEASE_SHA
-              '--notes-file', 'release\CHANGELOG.md'
+              '--notes-file', 'release/CHANGELOG.md'
               '--title', "NinjaCrawler $env:RELEASE_VERSION"
               '--latest'
             )
