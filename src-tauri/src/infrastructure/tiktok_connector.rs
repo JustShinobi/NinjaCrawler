@@ -1201,7 +1201,7 @@ where
         .arg("-o")
         .arg(output_template)
         .arg("--print")
-        .arg("after_move:%(timestamp)s\t%(id)s\t%(filepath)s");
+        .arg("after_move:%(timestamp)s\t%(id)s\t%(filepath)s\t%(vcodec)s");
     for post in batch {
         command.arg(&post.webpage_url);
     }
@@ -1237,6 +1237,7 @@ where
         let timestamp = parts.next().unwrap_or("").trim();
         let post_id = parts.next().unwrap_or("").trim();
         let file_path = parts.next().unwrap_or("").trim();
+        let video_codec = parts.next().unwrap_or("").trim();
         if post_id.is_empty() || file_path.is_empty() {
             continue;
         }
@@ -1250,6 +1251,23 @@ where
             .and_then(|value| value.to_str())
             .unwrap_or("")
             .to_ascii_lowercase();
+        if is_audio_only_video_download(&extension, video_codec) {
+            // TikTok photo-mode posts can expose their soundtrack as an MP4
+            // whose container has no video stream. Do not persist it as a
+            // video; leaving the post unproduced routes it to the image-page
+            // fallback below.
+            connector_debug::append_current(
+                "internal.tiktok",
+                "system",
+                "media.audio_only_video_rejected",
+                format!(
+                    "source={}\npost_id={post_id}\nextension={extension}\nvcodec={video_codec}",
+                    source_path.display()
+                ),
+            );
+            let _ = fs::remove_file(&source_path);
+            continue;
+        }
         if AUDIO_EXTENSIONS.contains(&extension.as_str()) {
             // Áudio do slideshow (quando o yt-dlp consegue): descarta — as
             // imagens vêm do gallery-dl.
@@ -1314,6 +1332,14 @@ where
         rate_limited,
         errors,
     })
+}
+
+fn is_audio_only_video_download(extension: &str, video_codec: &str) -> bool {
+    VIDEO_EXTENSIONS.contains(&extension.to_ascii_lowercase().as_str())
+        && matches!(
+            video_codec.trim().to_ascii_lowercase().as_str(),
+            "none" | "audio only"
+        )
 }
 
 /// Baixa as imagens de um post de foto (slideshow). O yt-dlp não suporta o
@@ -2201,6 +2227,14 @@ mod tests {
                 ),
             ]
         ));
+    }
+
+    #[test]
+    fn audio_only_mp4_is_rejected_before_photo_fallback() {
+        assert!(is_audio_only_video_download("mp4", "none"));
+        assert!(is_audio_only_video_download("MP4", "audio only"));
+        assert!(!is_audio_only_video_download("mp4", "h264"));
+        assert!(!is_audio_only_video_download("m4a", "none"));
     }
 
     #[test]
