@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.17.0](https://github.com/MetalDevOps/NinjaCrawler/compare/v0.16.1...v0.17.0) (2026-07-13)
+
+
+### Features
+
+* **release:** add app update checker and release back-sync ([#140](https://github.com/MetalDevOps/NinjaCrawler/issues/140)) ([58458d5](https://github.com/MetalDevOps/NinjaCrawler/commit/58458d5bfad08a95aede5f2bda377833969af000))
+
+
+### Bug Fixes
+
+* **release:** keep Cargo lock version aligned ([e66e4d0](https://github.com/MetalDevOps/NinjaCrawler/commit/e66e4d0c810c869e5c5f709a4313fc79f0c6e99a))
+
 ## [0.16.1](https://github.com/MetalDevOps/NinjaCrawler/compare/v0.16.0...v0.16.1) (2026-07-13)
 
 
