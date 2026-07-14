@@ -15,9 +15,9 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
-use crate::infrastructure::connector_debug;
+use crate::infrastructure::{atomic_file, connector_debug};
 
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
@@ -1345,53 +1345,7 @@ fn download_asset(
 }
 
 fn write_download_atomically(destination: &Path, bytes: &[u8]) -> Result<(), String> {
-    if bytes.is_empty() {
-        return Err("empty response body".to_string());
-    }
-    let parent = destination
-        .parent()
-        .ok_or_else(|| "download destination has no parent directory".to_string())?;
-    fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-
-    let final_name = destination
-        .file_name()
-        .and_then(|value| value.to_str())
-        .ok_or_else(|| "download destination has an invalid file name".to_string())?;
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    let temporary = parent.join(format!(
-        ".{final_name}.{}.{}.part",
-        std::process::id(),
-        nonce
-    ));
-
-    if let Err(error) = fs::write(&temporary, bytes) {
-        let _ = fs::remove_file(&temporary);
-        return Err(error.to_string());
-    }
-
-    if destination.exists() {
-        let is_empty_placeholder = destination
-            .metadata()
-            .map(|metadata| metadata.len() == 0)
-            .unwrap_or(false);
-        if !is_empty_placeholder {
-            let _ = fs::remove_file(&temporary);
-            return Err("destination file already exists".to_string());
-        }
-        if let Err(error) = fs::remove_file(destination) {
-            let _ = fs::remove_file(&temporary);
-            return Err(error.to_string());
-        }
-    }
-
-    if let Err(error) = fs::rename(&temporary, destination) {
-        let _ = fs::remove_file(&temporary);
-        return Err(error.to_string());
-    }
-    Ok(())
+    atomic_file::write_bytes_replacing_empty(destination, bytes)
 }
 
 /// Prefixa o nome do arquivo com a data/hora local do tweet, no mesmo formato

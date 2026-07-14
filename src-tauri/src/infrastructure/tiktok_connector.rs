@@ -20,7 +20,7 @@ use std::thread;
 use std::time::Duration;
 use std::time::Instant;
 
-use crate::infrastructure::connector_debug;
+use crate::infrastructure::{atomic_file, connector_debug};
 
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
@@ -1459,7 +1459,9 @@ where
             timestamped_file_name(captured_at_timestamp, &raw_name)
         };
         let destination = request.profile_root.join(&final_file_name);
-        if destination.exists() || request.existing_relative_paths.contains(&final_file_name) {
+        if atomic_file::is_nonempty_file(&destination)
+            || request.existing_relative_paths.contains(&final_file_name)
+        {
             continue;
         }
         connector_debug::append_current(
@@ -1506,7 +1508,7 @@ where
         if let Some(parent) = destination.parent() {
             fs::create_dir_all(parent).map_err(|error| error.to_string())?;
         }
-        if fs::write(&destination, &bytes).is_err() {
+        if atomic_file::write_bytes_replacing_empty(&destination, bytes.as_ref()).is_err() {
             continue;
         }
         media.push(DownloadedTikTokMedia {
@@ -1628,11 +1630,17 @@ where
         }
         fs::create_dir_all(&target_dir).map_err(|error| error.to_string())?;
         let destination = target_dir.join(&final_file_name);
-        if destination.exists() {
+        if atomic_file::is_nonempty_file(&destination) {
             continue;
         }
+        if !atomic_file::is_nonempty_file(&path) {
+            continue;
+        }
+        if destination.exists() {
+            let _ = fs::remove_file(&destination);
+        }
         if fs::rename(&path, &destination).is_err() {
-            if fs::copy(&path, &destination).is_err() {
+            if atomic_file::copy_file_replacing_empty(&path, &destination).is_err() {
                 continue;
             }
             let _ = fs::remove_file(&path);
@@ -1718,7 +1726,7 @@ fn finalize_media_file(
     };
     fs::create_dir_all(&target_dir).map_err(|error| error.to_string())?;
     let destination = target_dir.join(&final_file_name);
-    if destination.exists() {
+    if atomic_file::is_nonempty_file(&destination) {
         connector_debug::append_current(
             "internal.tiktok",
             "system",
@@ -1740,8 +1748,14 @@ fn finalize_media_file(
             destination.display()
         ),
     );
+    if !atomic_file::is_nonempty_file(source_path) {
+        return Err("downloaded source file is empty".to_string());
+    }
+    if destination.exists() {
+        fs::remove_file(&destination).map_err(|error| error.to_string())?;
+    }
     let transfer_mode = if fs::rename(source_path, &destination).is_err() {
-        fs::copy(source_path, &destination).map_err(|error| error.to_string())?;
+        atomic_file::copy_file_replacing_empty(source_path, &destination)?;
         let _ = fs::remove_file(source_path);
         "copy"
     } else {

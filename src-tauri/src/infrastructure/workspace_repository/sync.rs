@@ -1177,6 +1177,7 @@ pub(super) fn execute_twitter_source_sync_with_connection(
     let profile_root =
         resolved_source_media_output_root_with_connection(connection, layout, &context.source)?;
     fs::create_dir_all(&profile_root).map_err(|error| error.to_string())?;
+    cleanup_empty_media_artifacts(&profile_root)?;
     let cache_root = layout
         .cache_root
         .join(format!("twitter-sync-{}", context.source.id));
@@ -2129,6 +2130,7 @@ pub(super) fn execute_tiktok_source_sync_with_connection(
     let profile_root =
         resolved_source_media_output_root_with_connection(connection, layout, &context.source)?;
     fs::create_dir_all(&profile_root).map_err(|error| error.to_string())?;
+    cleanup_empty_media_artifacts(&profile_root)?;
     let cache_root = layout
         .cache_root
         .join(format!("tiktok-sync-{}", context.source.id));
@@ -4539,6 +4541,7 @@ pub(super) fn build_instagram_profile_sync_request(
         Some(settings),
         Some(&source_options),
     );
+    cleanup_empty_media_artifacts(&profile_root)?;
     let saved_posts_root = resolve_instagram_saved_posts_root(layout, Some(settings));
     let existing_media_keys =
         load_existing_instagram_media_identity_keys_for_source(layout, &context.source, settings)?;

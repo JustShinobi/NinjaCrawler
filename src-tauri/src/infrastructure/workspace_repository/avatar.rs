@@ -308,18 +308,22 @@ pub(super) fn ensure_profile_picture_at_root(
     let target_path = profile_picture_path(output_root);
     if candidate_path != target_path {
         let temporary_path = output_root.join(format!("{PROFILE_PICTURE_FILE_NAME}.download"));
-        fs::copy(candidate_path, &temporary_path)
-            .map_err(|error| ProfilePictureRefreshError::warning(error.to_string()))?;
+        if let Err(error) = fs::copy(candidate_path, &temporary_path) {
+            let _ = fs::remove_file(&temporary_path);
+            return Err(ProfilePictureRefreshError::warning(error.to_string()));
+        }
         if target_path.exists() {
             let _ = fs::remove_file(&target_path);
         }
 
         if let Err(rename_error) = fs::rename(&temporary_path, &target_path) {
-            fs::copy(&temporary_path, &target_path).map_err(|copy_error| {
-                ProfilePictureRefreshError::warning(format!(
+            if let Err(copy_error) = fs::copy(&temporary_path, &target_path) {
+                let _ = fs::remove_file(&temporary_path);
+                let _ = fs::remove_file(&target_path);
+                return Err(ProfilePictureRefreshError::warning(format!(
                     "Failed to persist profile picture: {copy_error}"
-                ))
-            })?;
+                )));
+            }
             let _ = fs::remove_file(&temporary_path);
             if !target_path.exists() {
                 return Err(ProfilePictureRefreshError::warning(format!(

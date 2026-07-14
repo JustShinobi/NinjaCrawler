@@ -3088,17 +3088,21 @@ fn refresh_twitter_profile_picture(
         .map_err(|error| ProfilePictureRefreshError::warning(error.to_string()))?;
     let target_path = profile_picture_path(output_root);
     let temporary_path = output_root.join(format!("{PROFILE_PICTURE_FILE_NAME}.download"));
-    fs::write(&temporary_path, bytes.as_ref())
-        .map_err(|error| ProfilePictureRefreshError::warning(error.to_string()))?;
+    if let Err(error) = fs::write(&temporary_path, bytes.as_ref()) {
+        let _ = fs::remove_file(&temporary_path);
+        return Err(ProfilePictureRefreshError::warning(error.to_string()));
+    }
     if target_path.exists() {
         let _ = fs::remove_file(&target_path);
     }
     if let Err(rename_error) = fs::rename(&temporary_path, &target_path) {
-        fs::copy(&temporary_path, &target_path).map_err(|copy_error| {
-            ProfilePictureRefreshError::warning(format!(
+        if let Err(copy_error) = fs::copy(&temporary_path, &target_path) {
+            let _ = fs::remove_file(&temporary_path);
+            let _ = fs::remove_file(&target_path);
+            return Err(ProfilePictureRefreshError::warning(format!(
                 "Failed to persist profile picture: {copy_error}"
-            ))
-        })?;
+            )));
+        }
         let _ = fs::remove_file(&temporary_path);
         if !target_path.exists() {
             return Err(ProfilePictureRefreshError::warning(format!(
@@ -3344,18 +3348,22 @@ fn refresh_instagram_profile_picture(
     let target_path = profile_picture_path(output_root);
     let temporary_path = output_root.join(format!("{PROFILE_PICTURE_FILE_NAME}.download"));
 
-    fs::write(&temporary_path, avatar_bytes.as_ref())
-        .map_err(|error| ProfilePictureRefreshError::warning(error.to_string()))?;
+    if let Err(error) = fs::write(&temporary_path, avatar_bytes.as_ref()) {
+        let _ = fs::remove_file(&temporary_path);
+        return Err(ProfilePictureRefreshError::warning(error.to_string()));
+    }
     if target_path.exists() {
         let _ = fs::remove_file(&target_path);
     }
 
     if let Err(rename_error) = fs::rename(&temporary_path, &target_path) {
-        fs::copy(&temporary_path, &target_path).map_err(|copy_error| {
-            ProfilePictureRefreshError::warning(format!(
+        if let Err(copy_error) = fs::copy(&temporary_path, &target_path) {
+            let _ = fs::remove_file(&temporary_path);
+            let _ = fs::remove_file(&target_path);
+            return Err(ProfilePictureRefreshError::warning(format!(
                 "Failed to persist profile picture: {copy_error}"
-            ))
-        })?;
+            )));
+        }
         let _ = fs::remove_file(&temporary_path);
         if !target_path.exists() {
             return Err(ProfilePictureRefreshError::warning(format!(

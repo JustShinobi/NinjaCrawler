@@ -869,7 +869,12 @@ pub(super) fn collect_media_file_paths(root: &Path) -> Result<Vec<PathBuf>, Stri
                 continue;
             }
 
-            if file_type.is_file() {
+            if file_type.is_file()
+                && entry
+                    .metadata()
+                    .map(|metadata| metadata.len() > 0)
+                    .unwrap_or(false)
+            {
                 collected.push(path);
             }
         }
@@ -877,6 +882,55 @@ pub(super) fn collect_media_file_paths(root: &Path) -> Result<Vec<PathBuf>, Stri
 
     collected.sort();
     Ok(collected)
+}
+
+pub(super) fn cleanup_empty_media_artifacts(root: &Path) -> Result<usize, String> {
+    if !root.exists() {
+        return Ok(0);
+    }
+
+    let mut removed = 0;
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(current) = pending.pop() {
+        for entry in fs::read_dir(&current).map_err(|error| error.to_string())? {
+            let entry = entry.map_err(|error| error.to_string())?;
+            let path = entry.path();
+            let file_type = entry.file_type().map_err(|error| error.to_string())?;
+            if file_type.is_dir() {
+                if !entry
+                    .file_name()
+                    .to_string_lossy()
+                    .eq_ignore_ascii_case(".thumbs")
+                {
+                    pending.push(path);
+                }
+                continue;
+            }
+            if !file_type.is_file()
+                || entry
+                    .metadata()
+                    .map(|metadata| metadata.len() > 0)
+                    .unwrap_or(true)
+            {
+                continue;
+            }
+
+            let is_avatar_download = entry
+                .file_name()
+                .to_string_lossy()
+                .eq_ignore_ascii_case(&format!("{PROFILE_PICTURE_FILE_NAME}.download"));
+            if infer_media_type(&path).is_some() || is_avatar_download {
+                fs::remove_file(&path).map_err(|error| {
+                    format!(
+                        "Failed to remove empty media artifact '{}': {error}",
+                        path.display()
+                    )
+                })?;
+                removed += 1;
+            }
+        }
+    }
+    Ok(removed)
 }
 pub(super) fn normalize_media_file_path(path: &Path) -> Result<String, String> {
     let resolved = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());

@@ -717,6 +717,39 @@ fn media_collection_ignores_generated_thumbs_directory() {
 }
 
 #[test]
+fn media_collection_ignores_zero_byte_files() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let empty = temp.path().join("empty.mp4");
+    let media = temp.path().join("valid.mp4");
+    fs::write(&empty, []).expect("write placeholder");
+    fs::write(&media, b"video").expect("write media");
+
+    assert_eq!(
+        collect_media_file_paths(temp.path()).expect("collect media"),
+        vec![media]
+    );
+}
+
+#[test]
+fn empty_media_cleanup_removes_media_and_avatar_download_placeholders_only() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let empty_media = temp.path().join("empty.mp4");
+    let empty_avatar_download = temp.path().join("ProfilePicture.jpg.download");
+    let unrelated_empty = temp.path().join("notes.txt");
+    let valid_media = temp.path().join("valid.mp4");
+    fs::write(&empty_media, []).expect("write media placeholder");
+    fs::write(&empty_avatar_download, []).expect("write avatar placeholder");
+    fs::write(&unrelated_empty, []).expect("write unrelated placeholder");
+    fs::write(&valid_media, b"video").expect("write valid media");
+
+    assert_eq!(cleanup_empty_media_artifacts(temp.path()).unwrap(), 2);
+    assert!(!empty_media.exists());
+    assert!(!empty_avatar_download.exists());
+    assert!(unrelated_empty.exists());
+    assert!(valid_media.exists());
+}
+
+#[test]
 fn parse_rfc3339_unix_parses_ledger_timestamps() {
     assert_eq!(parse_rfc3339_unix("1970-01-01T00:00:00Z"), Some(0));
     // Espaços em volta são tolerados; valor inválido retorna None.

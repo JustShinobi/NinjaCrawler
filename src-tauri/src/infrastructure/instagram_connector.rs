@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::infrastructure::connector_debug;
+use crate::infrastructure::{atomic_file, connector_debug};
 
 /// App id público da web do Instagram, usado em consultas anônimas de identidade.
 const INSTAGRAM_PUBLIC_APP_ID: &str = "936619743392459";
@@ -561,7 +561,7 @@ impl InstagramClient {
             return Err(format!("Instagram media request '{url}' returned {status}"));
         }
 
-        fs::write(path, &bytes).map_err(|error| error.to_string())
+        atomic_file::write_bytes_replacing_empty(path, bytes.as_ref())
     }
 
     fn apply_headers(
@@ -3405,7 +3405,7 @@ where
         let destination_path =
             resolve_destination_path(section_root, asset, request, &reserved_paths);
         reserved_paths.insert(planned_destination_key(&destination_path));
-        let mut asset_available = destination_path.exists();
+        let mut asset_available = atomic_file::is_nonempty_file(&destination_path);
         if !asset_available {
             match client.download_file(&asset.file_url, &destination_path, Some(&referer)) {
                 Ok(()) => {
