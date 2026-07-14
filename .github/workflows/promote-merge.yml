@@ -55,17 +55,23 @@ jobs:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
           REPO: ${{ github.repository }}
           EVENT_NAME: ${{ github.event_name }}
+          EVENT_PR_NUMBER: ${{ github.event.pull_request.number || '' }}
           EVENT_HEAD_SHA: ${{ github.event.workflow_run.head_sha || '' }}
           EVENT_CONCLUSION: ${{ github.event.workflow_run.conclusion || '' }}
         run: |
           set -euo pipefail
 
-          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            # The label event is authoritative. Querying the label index here
+            # races GitHub's eventual consistency and can miss the PR that
+            # triggered this run.
+            pr="$EVENT_PR_NUMBER"
+          elif [ "$EVENT_NAME" = "workflow_dispatch" ]; then
             pr="$(gh pr list --repo "$REPO" --base main --head develop \
-              --state open --json number --jq '.[0].number' || true)"
+              --state open --json number --jq '.[0].number')"
           else
             pr="$(gh pr list --repo "$REPO" --base main --head develop \
-              --label promote --state open --json number --jq '.[0].number' || true)"
+              --label promote --state open --json number --jq '.[0].number')"
           fi
           if [ -z "$pr" ]; then
             echo "No labeled develop -> main promotion PR to merge; nothing to do."

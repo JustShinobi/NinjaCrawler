@@ -10,6 +10,7 @@ $selfHostedWorkflowPath = Join-Path $repoRoot ".github\workflows\cross-build-sel
 $appReleaseWorkflowPath = Join-Path $repoRoot ".github\workflows\release.yml"
 $companionReleaseWorkflowPath = Join-Path $repoRoot ".github\workflows\release-companion.yml"
 $promotionWorkflowPath = Join-Path $repoRoot ".github\workflows\release-pr.yml"
+$promoteMergeWorkflowPath = Join-Path $repoRoot ".github\workflows\promote-merge.yml"
 $releaseBackSyncWorkflowPath = Join-Path $repoRoot ".github\workflows\release-back-sync.yml"
 $cargoLockPath = Join-Path $repoRoot "src-tauri\Cargo.lock"
 $config = Get-Content -LiteralPath $configPath -Raw | ConvertFrom-Json
@@ -20,6 +21,7 @@ $selfHostedWorkflow = Get-Content -LiteralPath $selfHostedWorkflowPath -Raw
 $appReleaseWorkflow = Get-Content -LiteralPath $appReleaseWorkflowPath -Raw
 $companionReleaseWorkflow = Get-Content -LiteralPath $companionReleaseWorkflowPath -Raw
 $promotionWorkflow = Get-Content -LiteralPath $promotionWorkflowPath -Raw
+$promoteMergeWorkflow = Get-Content -LiteralPath $promoteMergeWorkflowPath -Raw
 $releaseBackSyncWorkflow = Get-Content -LiteralPath $releaseBackSyncWorkflowPath -Raw
 $cargoLock = Get-Content -LiteralPath $cargoLockPath -Raw
 
@@ -184,6 +186,21 @@ foreach ($requiredFragment in @(
     if (-not $promotionWorkflow.Contains($requiredFragment)) {
         throw "Promotion workflow does not close merge-only release PRs: $requiredFragment"
     }
+}
+
+foreach ($requiredFragment in @(
+    "EVENT_PR_NUMBER: `${{ github.event.pull_request.number || '' }}",
+    'if [ "$EVENT_NAME" = "pull_request" ]; then',
+    'pr="$EVENT_PR_NUMBER"',
+    'gh pr merge "$pr" --repo "$REPO" --merge'
+)) {
+    if (-not $promoteMergeWorkflow.Contains($requiredFragment)) {
+        throw "Promote merge workflow is missing a label-event invariant: $requiredFragment"
+    }
+}
+
+if ($promoteMergeWorkflow.Contains("--jq '.[0].number' || true")) {
+    throw "Promote merge workflow must not hide PR lookup failures."
 }
 
 if (-not $appReleaseWorkflow.Contains('gh workflow run release-back-sync.yml') -or
