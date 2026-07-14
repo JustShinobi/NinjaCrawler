@@ -295,8 +295,21 @@ if ($appReleaseWorkflow.Contains('sudo apt-get')) {
 if ($appReleaseWorkflow.Contains("'release\CHANGELOG.md'")) {
     throw "Hosted Linux publication must not use a Windows path for release notes."
 }
+if ($appReleaseWorkflow.Contains('Tools\Update-NinjaCrawlerReleaseReadme.ps1')) {
+    throw "Hosted Linux publication must not use a Windows path for the README updater."
+}
 if ([regex]::Matches($appReleaseWorkflow, "'--notes-file', 'release/CHANGELOG.md'").Count -ne 2) {
     throw "Both release publication paths must use the hosted Linux changelog path."
+}
+foreach ($requiredFragment in @(
+    'id: publish_release'
+    "always() && inputs.sha != '' && steps.publish_release.outcome == 'success'"
+    "always() && steps.publish_release.outcome == 'success'"
+    'Tools/Update-NinjaCrawlerReleaseReadme.ps1'
+)) {
+    if (-not $appReleaseWorkflow.Contains($requiredFragment)) {
+        throw "Post-publication maintenance is missing a resilience invariant: $requiredFragment"
+    }
 }
 
 foreach ($requiredFragment in @(
