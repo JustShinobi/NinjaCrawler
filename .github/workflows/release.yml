@@ -218,6 +218,7 @@ jobs:
           path: release
 
       - name: Publish GitHub Release
+        id: publish_release
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
@@ -277,7 +278,7 @@ jobs:
           git fetch origin main
           git switch --force-create $branch origin/main
 
-          & Tools\Update-NinjaCrawlerReleaseReadme.ps1 -Version $env:RELEASE_VERSION
+          & Tools/Update-NinjaCrawlerReleaseReadme.ps1 -Version $env:RELEASE_VERSION
 
           if (-not (git status --short -- README.md)) {
             Write-Host "README already points to $env:RELEASE_TAG."
@@ -355,7 +356,7 @@ jobs:
           }
 
       - name: Reconcile recovered release PR label
-        if: ${{ inputs.sha != '' }}
+        if: ${{ always() && inputs.sha != '' && steps.publish_release.outcome == 'success' }}
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
@@ -384,7 +385,7 @@ jobs:
         # potentially conflicting. Close all of them, then re-dispatch
         # release-please so each package PR is recreated from the new tag and
         # manifest state. Uses the PAT, like release-please.yml itself.
-        if: success()
+        if: ${{ always() && steps.publish_release.outcome == 'success' }}
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
@@ -402,7 +403,7 @@ jobs:
           gh workflow run release-please.yml --repo ${{ github.repository }} --ref main
 
       - name: Back-sync published version to develop
-        if: success()
+        if: ${{ always() && steps.publish_release.outcome == 'success' }}
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
