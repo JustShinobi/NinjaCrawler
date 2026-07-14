@@ -19,18 +19,16 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  changes:
-    name: Detect Rust changes
+  quality:
+    name: Frontend quality
     runs-on: ubuntu-latest
-    timeout-minutes: 5
-    outputs:
-      rust: ${{ steps.filter.outputs.rust }}
+    timeout-minutes: 15
 
     steps:
       - name: Check out repository
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
-          fetch-depth: 0
+          persist-credentials: false
 
       - name: Validate Companion release candidate
         if: ${{ github.event_name == 'pull_request' && github.head_ref == 'release-please--branches--main--components--companion' }}
@@ -48,42 +46,6 @@ jobs:
           & Tools/Test-ReleaseCandidateIntegrity.ps1 `
             -PullRequestBodyPath $bodyPath `
             -RequireFunctionalChange
-
-      - name: Detect changes under src-tauri / connectors
-        id: filter
-        shell: bash
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        run: |
-          set -euo pipefail
-          # Anything that is not a PR (push to main, manual dispatch) always
-          # compiles the backend so nothing reaches main without a Rust build.
-          if [ "$EVENT_NAME" != "pull_request" ]; then
-            echo "rust=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          # If the base commit cannot be resolved, build to stay on the safe side.
-          if ! git cat-file -e "$BASE_SHA" 2>/dev/null; then
-            echo "rust=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          # Only the merge-base..head changes count as "this PR's" changes.
-          if git diff --name-only "$BASE_SHA...$HEAD_SHA" | grep -qE '^(src-tauri/|connectors/)'; then
-            echo "rust=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "rust=false" >> "$GITHUB_OUTPUT"
-          fi
-
-  quality:
-    name: Frontend quality
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Set up Node.js
         uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
@@ -125,17 +87,15 @@ jobs:
         run: npm audit --omit=dev --audit-level=high
 
   windows-build:
-    name: Windows Release build
-    needs: [changes, quality]
-    # Skip the ~5 min Rust/tauri compile on PRs that do not touch the backend.
-    # Pushes to main and manual dispatch always build (rust output is 'true').
-    if: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' || needs.changes.outputs.rust == 'true' }}
-    runs-on: windows-latest
+    name: Windows cross-build
+    runs-on: ubuntu-latest
     timeout-minutes: 45
 
     steps:
       - name: Check out repository
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
 
       - name: Set up Node.js
         uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
@@ -143,11 +103,26 @@ jobs:
           node-version: 22
           cache: npm
 
-      - name: Set up Rust
-        shell: pwsh
+      - name: Install cross-build toolchain
+        shell: bash
         run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            clang-18=1:18.1.3-1ubuntu1 \
+            lld-18=1:18.1.3-1ubuntu1 \
+            llvm-18=1:18.1.3-1ubuntu1 \
+            nsis=3.09-4ubuntu1
+          sudo ln -sf "$(command -v clang-18)" /usr/local/bin/clang-cl
+          for tool in lld-link llvm-lib llvm-rc; do
+            sudo ln -sf "$(command -v "${tool}-18")" "/usr/local/bin/${tool}"
+            command -v "${tool}"
+          done
+          clang-18 --version
+          makensis -VERSION
           rustup toolchain install stable --profile minimal --no-self-update
           rustup default stable
+          rustup target add x86_64-pc-windows-msvc
+          cargo install cargo-xwin --version 0.22.0 --locked
 
       - name: Cache Rust dependencies
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -156,32 +131,36 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             src-tauri/target
-          # Shared key with the Release workflow so both reuse one warm cache.
-          key: cargo-windows-${{ hashFiles('src-tauri/Cargo.lock') }}
-          restore-keys: cargo-windows-
+          key: cargo-xwin-linux-${{ hashFiles('src-tauri/Cargo.lock') }}
+          restore-keys: cargo-xwin-linux-
 
       - name: Install dependencies
         run: npm ci
 
       - name: Build portable Release
         shell: pwsh
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
         run: >
-          powershell -ExecutionPolicy Bypass
-          -File Tools\Build-NinjaCrawler.ps1
+          pwsh -File Tools/Build-NinjaCrawler.ps1
           -Configuration Release
           -SkipLint
           -SkipTests
           -PortableOnly
 
+      - name: Stage versioned portable
+        id: portable
+        shell: pwsh
+        run: |
+          $version = (Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
+          $name = "NinjaCrawler-$version-windows-x64-portable.exe"
+          $destination = Join-Path $env:RUNNER_TEMP $name
+          Copy-Item src-tauri/target/x86_64-pc-windows-msvc/release/ninjacrawler.exe $destination
+          "name=$name" >> $env:GITHUB_OUTPUT
+          "path=$destination" >> $env:GITHUB_OUTPUT
+
       - name: Upload portable build
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: NinjaCrawler-windows-x64
-          path: |
-            src-tauri/target/release/ninjacrawler.exe
-            connectors/bootstrap/manifest.json
-            connectors/bootstrap/**/*.exe
+          name: ${{ steps.portable.outputs.name }}
+          path: ${{ steps.portable.outputs.path }}
           if-no-files-found: error
           retention-days: 7

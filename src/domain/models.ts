@@ -23,6 +23,7 @@ export type ConnectorRuntimeManagementMode = 'managed' | 'custom'
 export type AppBuildChannel = 'release' | 'development'
 export type InstagramPresetSlot = 'preset1' | 'preset2'
 export type ConnectorRuntimeStatusKind =
+  | 'not_installed'
   | 'up_to_date'
   | 'update_available'
   | 'checking'
@@ -225,7 +226,7 @@ export interface ConnectorRuntimeStatus {
   key: string
   displayName: string
   managementMode: ConnectorRuntimeManagementMode
-  activeVersion: string
+  activeVersion?: string
   bundledVersion: string
   latestVersion?: string
   updateAvailable: boolean
@@ -236,6 +237,7 @@ export interface ConnectorRuntimeStatus {
   progressPercent?: number
   progressDetail?: string
   customPath?: string
+  activePath?: string
 }
 
 export interface ImportProviderDescriptor {

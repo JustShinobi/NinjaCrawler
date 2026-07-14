@@ -2,6 +2,8 @@ import type { ConnectorRuntimeStatus } from '../../domain/models'
 
 export function connectorRuntimeStatusLabel(runtime: ConnectorRuntimeStatus) {
   switch (runtime.status) {
+    case 'not_installed':
+      return 'Not installed'
     case 'checking':
       return 'Checking'
     case 'downloading':

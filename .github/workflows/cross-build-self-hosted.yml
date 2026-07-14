@@ -1,0 +1,80 @@
+name: Cross-build on Proxmox JIT runner
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ninjacrawler-proxmox-cross-build
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Windows portable cross-build
+    runs-on: [self-hosted, proxmox-lxc, crossbuild, mode-ephemeral]
+    timeout-minutes: 45
+    env:
+      WINDOWS_TARGET: x86_64-pc-windows-msvc
+      CARGO_TARGET_DIR: /cache/target/ninjacrawler-cross-build
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Verify golden toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --version
+          npm --version
+          rustc --version
+          cargo-xwin --version
+          clang-18 --version
+          makensis -VERSION
+          pwsh -NoLogo -NoProfile -Command '$PSVersionTable.PSVersion.ToString()'
+          rustup target list --installed | grep -Fx "$WINDOWS_TARGET"
+          for tool in clang-cl lld-link llvm-lib llvm-rc llvm-readobj-18; do
+            command -v "$tool"
+          done
+
+      - name: Install frontend dependencies
+        shell: bash
+        run: npm ci
+
+      - name: Cross-build portable executable
+        shell: pwsh
+        run: >
+          pwsh -File Tools/Build-NinjaCrawler.ps1
+          -Configuration Release
+          -SkipLint
+          -SkipTests
+          -PortableOnly
+
+      - name: Stage and verify thin portable
+        id: artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(node -p "require('./package.json').version")"
+          name="NinjaCrawler-${version}-windows-x64-portable.exe"
+          exe="$CARGO_TARGET_DIR/$WINDOWS_TARGET/release/ninjacrawler.exe"
+          test -s "$exe"
+          test ! -e connectors/bootstrap
+          mkdir -p artifacts
+          install -m 0755 "$exe" "artifacts/$name"
+          llvm-readobj-18 --file-headers "artifacts/$name" | grep -F 'IMAGE_FILE_MACHINE_AMD64'
+          (cd artifacts && sha256sum "$name" > SHA256SUMS.txt && sha256sum --check SHA256SUMS.txt)
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Upload portable build
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: NinjaCrawler-${{ steps.artifact.outputs.version }}-self-hosted-validation
+          path: artifacts/
+          if-no-files-found: error
+          retention-days: 7

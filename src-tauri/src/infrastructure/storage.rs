@@ -34,13 +34,17 @@ pub fn workspace_layout_from_roots(
     let data_dir = root.join("data");
     let logs_dir = root.join("logs");
     let cache_root = root.join("cache");
-    let connectors_root = data_dir.join("connectors");
+    let connectors_root = root.join("connectors");
+    let legacy_connectors_root = data_dir.join("connectors");
     let media_root = preferred_media_root(&user_profile);
     let db_path = data_dir.join("ninjacrawler.db");
 
     fs::create_dir_all(&data_dir)?;
     fs::create_dir_all(&logs_dir)?;
     fs::create_dir_all(&cache_root)?;
+    if !connectors_root.exists() && legacy_connectors_root.exists() {
+        fs::rename(&legacy_connectors_root, &connectors_root)?;
+    }
     fs::create_dir_all(&connectors_root)?;
     fs::create_dir_all(&media_root)?;
 

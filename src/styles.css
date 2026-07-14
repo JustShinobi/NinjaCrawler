@@ -200,6 +200,95 @@ p {
   color: var(--muted-strong);
 }
 
+.connector-preparation-shell {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 2rem;
+  background: var(--bg-window-shell-compact);
+}
+
+.connector-preparation-card {
+  width: min(760px, 100%);
+  display: grid;
+  gap: 1rem;
+  padding: 1.3rem;
+  border: 1px solid var(--line-warm);
+  border-radius: 14px;
+  background: var(--panel);
+  box-shadow: var(--shadow-panel);
+}
+
+.connector-preparation-header {
+  display: grid;
+  gap: 0.35rem;
+}
+
+.connector-preparation-header h1 {
+  margin: 0;
+  font-family: var(--font-display);
+}
+
+.connector-preparation-header p:last-child,
+.connector-preparation-item p,
+.connector-preparation-actions {
+  color: var(--muted);
+}
+
+.connector-preparation-list {
+  display: grid;
+  gap: 0.7rem;
+}
+
+.connector-preparation-item {
+  display: grid;
+  gap: 0.55rem;
+  padding: 0.8rem;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface-metric);
+}
+
+.connector-preparation-item-heading,
+.connector-preparation-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.connector-preparation-item-heading > div {
+  display: grid;
+  gap: 0.12rem;
+}
+
+.connector-preparation-item-heading span,
+.connector-preparation-item p {
+  font-size: 0.82rem;
+}
+
+.connector-preparation-progress {
+  height: 7px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--line);
+}
+
+.connector-preparation-progress span {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+  transition: width 180ms ease;
+}
+
+.connector-preparation-error {
+  padding: 0.7rem;
+  border: 1px solid rgba(156, 65, 51, 0.25);
+  border-radius: 8px;
+  background: rgba(243, 229, 225, 0.82);
+  color: var(--danger);
+}
+
 .workspace-rail {
   background:
     var(--bg-rail),

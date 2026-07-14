@@ -39,7 +39,9 @@ export function ConnectorRuntimesPanel() {
                 <p className="eyebrow">{runtime.managementMode === 'custom' ? 'Custom' : 'Managed'}</p>
                 <div className="connector-settings-card-title-row">
                   <h3>{runtime.displayName}</h3>
-                  <span className="connector-settings-version-pill">v{runtime.activeVersion}</span>
+                  <span className="connector-settings-version-pill">
+                    {runtime.activeVersion ? `v${runtime.activeVersion}` : 'Not installed'}
+                  </span>
                 </div>
               </div>
               <span className={`status ${connectorRuntimeStatusClassName(runtime)}`}>

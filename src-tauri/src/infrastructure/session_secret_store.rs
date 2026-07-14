@@ -16,7 +16,7 @@ struct DataBlob {
 }
 
 #[cfg(target_os = "windows")]
-#[link(name = "Crypt32")]
+#[link(name = "crypt32")]
 unsafe extern "system" {
     fn CryptProtectData(
         p_data_in: *const DataBlob,
@@ -40,7 +40,7 @@ unsafe extern "system" {
 }
 
 #[cfg(target_os = "windows")]
-#[link(name = "Kernel32")]
+#[link(name = "kernel32")]
 unsafe extern "system" {
     fn LocalFree(h_mem: *mut c_void) -> *mut c_void;
 }

@@ -6,18 +6,22 @@ $configPath = Join-Path $repoRoot "release-please-config.json"
 $companionConfigPath = Join-Path $repoRoot "release-please-companion-config.json"
 $workflowPath = Join-Path $repoRoot ".github\workflows\release-please.yml"
 $ciWorkflowPath = Join-Path $repoRoot ".github\workflows\ci.yml"
+$selfHostedWorkflowPath = Join-Path $repoRoot ".github\workflows\cross-build-self-hosted.yml"
 $appReleaseWorkflowPath = Join-Path $repoRoot ".github\workflows\release.yml"
 $companionReleaseWorkflowPath = Join-Path $repoRoot ".github\workflows\release-companion.yml"
 $promotionWorkflowPath = Join-Path $repoRoot ".github\workflows\release-pr.yml"
+$promoteMergeWorkflowPath = Join-Path $repoRoot ".github\workflows\promote-merge.yml"
 $releaseBackSyncWorkflowPath = Join-Path $repoRoot ".github\workflows\release-back-sync.yml"
 $cargoLockPath = Join-Path $repoRoot "src-tauri\Cargo.lock"
 $config = Get-Content -LiteralPath $configPath -Raw | ConvertFrom-Json
 $companionConfig = Get-Content -LiteralPath $companionConfigPath -Raw | ConvertFrom-Json
 $workflow = Get-Content -LiteralPath $workflowPath -Raw
 $ciWorkflow = Get-Content -LiteralPath $ciWorkflowPath -Raw
+$selfHostedWorkflow = Get-Content -LiteralPath $selfHostedWorkflowPath -Raw
 $appReleaseWorkflow = Get-Content -LiteralPath $appReleaseWorkflowPath -Raw
 $companionReleaseWorkflow = Get-Content -LiteralPath $companionReleaseWorkflowPath -Raw
 $promotionWorkflow = Get-Content -LiteralPath $promotionWorkflowPath -Raw
+$promoteMergeWorkflow = Get-Content -LiteralPath $promoteMergeWorkflowPath -Raw
 $releaseBackSyncWorkflow = Get-Content -LiteralPath $releaseBackSyncWorkflowPath -Raw
 $cargoLock = Get-Content -LiteralPath $cargoLockPath -Raw
 
@@ -107,6 +111,42 @@ foreach ($requiredFragment in @(
     }
 }
 
+foreach ($requiredFragment in @(
+    'Stage versioned portable',
+    'NinjaCrawler-$version-windows-x64-portable.exe',
+    'steps.portable.outputs.path'
+)) {
+    if (-not $ciWorkflow.Contains($requiredFragment)) {
+        throw "CI is missing versioned portable artifact staging: $requiredFragment"
+    }
+}
+
+foreach ($requiredFragment in @(
+    'workflow_dispatch:',
+    'runs-on: [self-hosted, proxmox-lxc, crossbuild, mode-ephemeral]',
+    'persist-credentials: false',
+    'cancel-in-progress: false',
+    'Tools/Build-NinjaCrawler.ps1',
+    '-PortableOnly',
+    'test ! -e connectors/bootstrap',
+    'IMAGE_FILE_MACHINE_AMD64'
+)) {
+    if (-not $selfHostedWorkflow.Contains($requiredFragment)) {
+        throw "Self-hosted validation workflow is missing a safety invariant: $requiredFragment"
+    }
+}
+
+foreach ($forbiddenFragment in @(
+    'pull_request:',
+    'Prepare-ConnectorBootstrap.ps1',
+    'secrets.',
+    'contents: write'
+)) {
+    if ($selfHostedWorkflow.Contains($forbiddenFragment)) {
+        throw "Self-hosted validation workflow contains forbidden behavior: $forbiddenFragment"
+    }
+}
+
 if (-not $appReleaseWorkflow.Contains('startswith("release-please--")')) {
     throw "App release re-anchoring must regenerate every PR that shares the release manifest."
 }
@@ -148,15 +188,28 @@ foreach ($requiredFragment in @(
     }
 }
 
-foreach ($releaseWorkflow in @($appReleaseWorkflow, $companionReleaseWorkflow)) {
-    foreach ($requiredFragment in @(
-        'gh workflow run release-back-sync.yml',
-        '-f tag=${{ steps.version.outputs.tag }}'
-    )) {
-        if (-not $releaseWorkflow.Contains($requiredFragment)) {
-            throw "Every package release must trigger branch back-sync: $requiredFragment"
-        }
+foreach ($requiredFragment in @(
+    "EVENT_PR_NUMBER: `${{ github.event.pull_request.number || '' }}",
+    'if [ "$EVENT_NAME" = "pull_request" ]; then',
+    'pr="$EVENT_PR_NUMBER"',
+    'gh pr merge "$pr" --repo "$REPO" --merge'
+)) {
+    if (-not $promoteMergeWorkflow.Contains($requiredFragment)) {
+        throw "Promote merge workflow is missing a label-event invariant: $requiredFragment"
     }
+}
+
+if ($promoteMergeWorkflow.Contains("--jq '.[0].number' || true")) {
+    throw "Promote merge workflow must not hide PR lookup failures."
+}
+
+if (-not $appReleaseWorkflow.Contains('gh workflow run release-back-sync.yml') -or
+    -not $appReleaseWorkflow.Contains('-f tag=${{ needs.build.outputs.tag }}')) {
+    throw "The app release must back-sync the tag produced by its isolated build job."
+}
+if (-not $companionReleaseWorkflow.Contains('gh workflow run release-back-sync.yml') -or
+    -not $companionReleaseWorkflow.Contains('-f tag=${{ steps.version.outputs.tag }}')) {
+    throw "The Companion release must back-sync its published tag."
 }
 
 foreach ($requiredFragment in @(

@@ -24,7 +24,7 @@
 - `src/`: React admin shell bound to Tauri commands through a shared `WorkspaceSnapshot`
 - `src-tauri/`: Rust application layer, SQLite-backed workspace repository, provider catalog, and storage layout
 - `src-tauri/migrations/0001_initial.sql`: baseline schema used by the live workspace bootstrap
-- `src-tauri/target/debug/bundle/`: validated MSI and NSIS debug bundles
+- `src-tauri/target/debug/bundle/nsis/`: validated NSIS debug bundles
 
 ## Bootstrap contract
 - Workspace bootstrap must be deterministic and empty-state safe.

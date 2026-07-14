@@ -3,6 +3,7 @@ use reqwest::blocking::Client;
 use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, USER_AGENT};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs;
 use std::io::{Cursor, Read, Write};
@@ -37,6 +38,8 @@ struct ConnectorCatalogEntry {
     tool_setting_key: String,
     default_command: String,
     bundled_version: String,
+    #[serde(default)]
+    release_tag: Option<String>,
     executable_name: String,
     version_args: Vec<String>,
     release_api_url: String,
@@ -49,10 +52,8 @@ struct ConnectorCatalogEntry {
 }
 
 impl ConnectorCatalogEntry {
-    /// Verifica se o nome de um asset de release corresponde ao esperado.
-    /// Quando `asset_prefix`/`asset_suffix` estão definidos (ex.: o pacote do
-    /// Instaloader, cujo nome carrega a versão), casa por prefixo/sufixo; caso
-    /// contrário exige igualdade exata (ex.: `gallery-dl.exe`, `yt-dlp.exe`).
+    /// Checks whether a release asset name matches the catalog entry.
+    /// Prefix and suffix matching supports versioned archive names.
     fn asset_matches(&self, name: &str) -> bool {
         if self.asset_prefix.is_some() || self.asset_suffix.is_some() {
             let lower = name.to_ascii_lowercase();
@@ -72,7 +73,7 @@ impl ConnectorCatalogEntry {
         }
     }
 
-    /// Texto legível do asset esperado, para mensagens de erro.
+    /// Returns a readable asset pattern for error messages.
     fn asset_descriptor(&self) -> String {
         match (&self.asset_prefix, &self.asset_suffix) {
             (None, None) => self.asset_name.clone(),
@@ -91,11 +92,12 @@ struct ConnectorRuntimeRecord {
     display_name: String,
     management_mode: String,
     bundled_version: String,
-    active_version: String,
-    active_path: String,
+    active_version: Option<String>,
+    active_path: Option<String>,
     custom_path: Option<String>,
     latest_version: Option<String>,
     latest_asset_url: Option<String>,
+    latest_asset_digest: Option<String>,
     latest_checked_at: Option<String>,
     update_status: String,
     pending_version: Option<String>,
@@ -110,6 +112,7 @@ struct ConnectorRuntimeRecord {
 struct LatestRelease {
     version: String,
     asset_url: String,
+    asset_digest: String,
 }
 
 #[derive(Deserialize)]
@@ -126,6 +129,7 @@ struct GitHubRelease {
 struct GitHubReleaseAsset {
     name: String,
     browser_download_url: String,
+    digest: Option<String>,
 }
 
 #[derive(Default)]
@@ -166,8 +170,8 @@ fn catalog() -> &'static [ConnectorCatalogEntry] {
     CATALOG
         .get_or_init(|| {
             let manifest: ConnectorManifest =
-                serde_json::from_str(include_str!("../../../connectors/bootstrap/manifest.json"))
-                    .expect("connector bootstrap manifest should be valid JSON");
+                serde_json::from_str(include_str!("../../../connectors/manifest.json"))
+                    .expect("connector manifest should be valid JSON");
             manifest.connectors
         })
         .as_slice()
@@ -248,6 +252,128 @@ pub fn load_connector_runtime_statuses(
     Ok(statuses)
 }
 
+pub fn prepare_connector_runtimes() -> Result<Vec<ConnectorRuntimeStatus>, String> {
+    let layout = storage::ensure_workspace_layout().map_err(|error| error.to_string())?;
+    let connection =
+        database::open_connection(&layout.db_path).map_err(|error| error.to_string())?;
+    ensure_catalog_state(&connection, &layout)?;
+
+    let mut failures = Vec::new();
+    for entry in catalog() {
+        let record = load_record(&connection, &entry.key)?
+            .ok_or_else(|| format!("Connector runtime '{}' is not initialized.", entry.key))?;
+        let active_exists = record
+            .active_path
+            .as_deref()
+            .map(Path::new)
+            .is_some_and(Path::exists);
+        if active_exists {
+            continue;
+        }
+        if record.management_mode == "custom" {
+            failures.push(format!(
+                "{}: configured custom executable does not exist",
+                entry.display_name
+            ));
+            continue;
+        }
+
+        if let Err(error) = prepare_managed_connector(&connection, &layout, entry) {
+            let _ = update_progress(
+                &connection,
+                &entry.key,
+                "error",
+                None,
+                Some("Connector preparation failed.".to_string()),
+                Some(error.clone()),
+            );
+            log_connector_runtime_event(
+                entry,
+                "error",
+                format!("Failed to prepare '{}'.", entry.display_name),
+                Some(error.clone()),
+            );
+            emit_runtime_changed();
+            failures.push(format!("{}: {}", entry.display_name, error));
+        }
+    }
+
+    if failures.is_empty() {
+        load_connector_runtime_statuses(&connection)
+    } else {
+        Err(format!(
+            "Connector preparation did not finish: {}",
+            failures.join("; ")
+        ))
+    }
+}
+
+fn prepare_managed_connector(
+    connection: &Connection,
+    layout: &StorageLayout,
+    entry: &ConnectorCatalogEntry,
+) -> Result<(), String> {
+    update_progress(
+        connection,
+        &entry.key,
+        "checking",
+        Some(5),
+        Some("Resolving the pinned connector release.".to_string()),
+        None,
+    )?;
+    emit_runtime_changed();
+
+    let release = lookup_pinned_release(entry)?;
+    update_progress(
+        connection,
+        &entry.key,
+        "downloading",
+        Some(20),
+        Some(format!(
+            "Downloading {} {}.",
+            entry.display_name, release.version
+        )),
+        None,
+    )?;
+    emit_runtime_changed();
+
+    let download = download_release_asset(entry, &release.asset_url, &layout.connectors_root)?;
+    let bytes = fs::read(download.path()).map_err(|error| {
+        format!(
+            "Failed to read the temporary '{}' download: {}",
+            entry.display_name, error
+        )
+    })?;
+    verify_asset_digest(entry, &bytes, &release.asset_digest)?;
+    update_progress(
+        connection,
+        &entry.key,
+        "downloading",
+        Some(75),
+        Some("Digest verified. Installing connector runtime.".to_string()),
+        None,
+    )?;
+    emit_runtime_changed();
+
+    let installed_path = install_release_asset(layout, entry, &release.version, &bytes)?;
+    let mut record = load_record(connection, &entry.key)?
+        .ok_or_else(|| format!("Connector runtime '{}' is not initialized.", entry.key))?;
+    record.active_version = Some(release.version.clone());
+    record.active_path = Some(installed_path.display().to_string());
+    record.latest_version = Some(release.version);
+    record.latest_asset_url = Some(release.asset_url);
+    record.latest_asset_digest = Some(release.asset_digest);
+    record.latest_checked_at = Some(now_timestamp());
+    record.update_status = "up_to_date".to_string();
+    record.progress_percent = Some(100);
+    record.progress_detail = Some("Managed runtime installed and verified.".to_string());
+    record.last_error = None;
+    record.updated_at = now_timestamp();
+    save_record(connection, &record)?;
+    emit_runtime_changed();
+    Ok(())
+}
+
 pub fn resolve_connector_executable(
     connection: &Connection,
     layout: &StorageLayout,
@@ -257,7 +383,12 @@ pub fn resolve_connector_executable(
     activate_pending_if_idle(key)?;
     let record = load_record(connection, key)?
         .ok_or_else(|| format!("Connector runtime '{}' is not initialized.", key))?;
-    Ok(record.active_path)
+    record.active_path.ok_or_else(|| {
+        format!(
+            "Connector '{}' is not installed. Complete connector preparation before continuing.",
+            key
+        )
+    })
 }
 
 pub fn check_connector_updates(key: Option<&str>) -> Result<Vec<ConnectorRuntimeStatus>, String> {
@@ -288,16 +419,17 @@ pub fn check_connector_updates(key: Option<&str>) -> Result<Vec<ConnectorRuntime
                 let mut record = load_record(&connection, &entry.key)?.ok_or_else(|| {
                     format!("Connector runtime '{}' is not initialized.", entry.key)
                 })?;
-                let update_available = release.version != record.active_version;
+                let update_available = record.active_version.as_deref() != Some(&release.version);
                 record.latest_version = Some(release.version);
                 record.latest_asset_url = Some(release.asset_url);
+                record.latest_asset_digest = Some(release.asset_digest);
                 record.latest_checked_at = Some(now.clone());
                 record.last_error = None;
                 record.progress_percent = None;
                 record.progress_detail = None;
                 record.update_status = derive_status(
                     &record.management_mode,
-                    &record.active_version,
+                    record.active_version.as_deref(),
                     record.latest_version.as_deref(),
                     record.pending_version.as_deref(),
                 );
@@ -311,7 +443,7 @@ pub fn check_connector_updates(key: Option<&str>) -> Result<Vec<ConnectorRuntime
                             "Update available for '{}' ({}, active {}).",
                             entry.display_name,
                             record.latest_version.as_deref().unwrap_or("unknown"),
-                            record.active_version
+                            record.active_version.as_deref().unwrap_or("not installed")
                         ),
                         None,
                     );
@@ -321,7 +453,8 @@ pub fn check_connector_updates(key: Option<&str>) -> Result<Vec<ConnectorRuntime
                         "info",
                         format!(
                             "'{}' is up to date at {}.",
-                            entry.display_name, record.active_version
+                            entry.display_name,
+                            record.active_version.as_deref().unwrap_or("not installed")
                         ),
                         None,
                     );
@@ -393,7 +526,8 @@ pub fn update_connector_runtime(key: &str) -> Result<Vec<ConnectorRuntimeStatus>
         })
         .unwrap_or(true)
         || record.latest_version.is_none()
-        || record.latest_asset_url.is_none();
+        || record.latest_asset_url.is_none()
+        || record.latest_asset_digest.is_none();
 
     if needs_refresh {
         let _ = check_connector_updates(Some(&entry.key))?;
@@ -413,11 +547,17 @@ pub fn update_connector_runtime(key: &str) -> Result<Vec<ConnectorRuntimeStatus>
             entry.display_name
         )
     })?;
+    let asset_digest = record.latest_asset_digest.clone().ok_or_else(|| {
+        format!(
+            "Unable to determine the verified download digest for '{}'.",
+            entry.display_name
+        )
+    })?;
 
     if record.pending_version.as_deref() == Some(latest_version.as_str()) {
         return load_connector_runtime_statuses(&connection);
     }
-    if record.active_version == latest_version {
+    if record.active_version.as_deref() == Some(latest_version.as_str()) {
         record.update_status = "up_to_date".to_string();
         record.progress_percent = None;
         record.progress_detail = None;
@@ -446,7 +586,8 @@ pub fn update_connector_runtime(key: &str) -> Result<Vec<ConnectorRuntimeStatus>
         ),
         Some(format!(
             "Active version: {}. Target version: {}.",
-            record.active_version, latest_version
+            record.active_version.as_deref().unwrap_or("not installed"),
+            latest_version
         )),
     );
 
@@ -463,8 +604,8 @@ pub fn update_connector_runtime(key: &str) -> Result<Vec<ConnectorRuntimeStatus>
     )?;
     emit_runtime_changed();
 
-    let bytes = match download_release_asset(entry, &asset_url) {
-        Ok(bytes) => bytes,
+    let download = match download_release_asset(entry, &asset_url, &layout.connectors_root) {
+        Ok(download) => download,
         Err(error) => {
             log_connector_runtime_event(
                 entry,
@@ -478,6 +619,24 @@ pub fn update_connector_runtime(key: &str) -> Result<Vec<ConnectorRuntimeStatus>
             return Err(error);
         }
     };
+    let bytes = fs::read(download.path()).map_err(|error| {
+        format!(
+            "Failed to read the temporary '{}' download: {}",
+            entry.display_name, error
+        )
+    })?;
+    if let Err(error) = verify_asset_digest(entry, &bytes, &asset_digest) {
+        update_progress(
+            &connection,
+            &entry.key,
+            "error",
+            None,
+            Some("Downloaded asset failed integrity verification.".to_string()),
+            Some(error.clone()),
+        )?;
+        emit_runtime_changed();
+        return Err(error);
+    }
 
     update_progress(
         &connection,
@@ -492,6 +651,15 @@ pub fn update_connector_runtime(key: &str) -> Result<Vec<ConnectorRuntimeStatus>
     let installed_path = match install_release_asset(&layout, entry, &latest_version, &bytes) {
         Ok(path) => path,
         Err(error) => {
+            update_progress(
+                &connection,
+                &entry.key,
+                "error",
+                None,
+                Some("Downloaded asset could not be installed.".to_string()),
+                Some(error.clone()),
+            )?;
+            emit_runtime_changed();
             log_connector_runtime_event(
                 entry,
                 "error",
@@ -519,8 +687,8 @@ pub fn update_connector_runtime(key: &str) -> Result<Vec<ConnectorRuntimeStatus>
             Some("Downloaded. Activation will happen after the current job finishes.".to_string());
         record.update_status = "pending_activation".to_string();
     } else {
-        record.active_version = latest_version.clone();
-        record.active_path = installed_path_string;
+        record.active_version = Some(latest_version.clone());
+        record.active_path = Some(installed_path_string);
         record.pending_version = None;
         record.pending_path = None;
         record.progress_detail = Some("Connector runtime updated successfully.".to_string());
@@ -576,13 +744,13 @@ pub fn set_connector_custom_override(
         ));
     }
 
-    let version = probe_connector_version(entry, &path).unwrap_or_else(|_| "custom".to_string());
+    let version = probe_connector_version(entry, &path)?;
     let mut record = load_record(&connection, &entry.key)?
         .ok_or_else(|| format!("Connector runtime '{}' is not initialized.", entry.key))?;
     record.management_mode = "custom".to_string();
     record.custom_path = Some(path.display().to_string());
-    record.active_path = path.display().to_string();
-    record.active_version = version;
+    record.active_path = Some(path.display().to_string());
+    record.active_version = Some(version);
     record.pending_version = None;
     record.pending_path = None;
     record.update_status = "custom_override".to_string();
@@ -603,30 +771,37 @@ pub fn clear_connector_custom_override(key: &str) -> Result<Vec<ConnectorRuntime
     ensure_catalog_state(&connection, &layout)?;
 
     let entry = catalog_entry(key)?;
-    let (active_path, last_error) = match ensure_bundled_install(&layout, entry) {
-        Ok(path) => (path.display().to_string(), None),
-        Err(_) => (
-            entry.default_command.clone(),
-            Some("Bundled runtime not found; falling back to PATH resolution.".to_string()),
-        ),
+    let install_path = managed_install_path(&layout, entry, &entry.bundled_version);
+    let managed_ready = install_path.exists()
+        && probe_connector_version(entry, &install_path).as_deref()
+            == Ok(entry.bundled_version.as_str());
+    let (active_version, active_path, status, detail) = if managed_ready {
+        (
+            Some(entry.bundled_version.clone()),
+            Some(install_path.display().to_string()),
+            "up_to_date",
+            "Managed runtime restored.",
+        )
+    } else {
+        (
+            None,
+            None,
+            "not_installed",
+            "Managed runtime must be downloaded before the workspace can open.",
+        )
     };
     let mut record = load_record(&connection, &entry.key)?
         .ok_or_else(|| format!("Connector runtime '{}' is not initialized.", entry.key))?;
     record.management_mode = "managed".to_string();
     record.custom_path = None;
-    record.active_version = entry.bundled_version.clone();
+    record.active_version = active_version;
     record.active_path = active_path;
     record.pending_version = None;
     record.pending_path = None;
     record.progress_percent = None;
-    record.progress_detail = Some("Managed runtime restored.".to_string());
-    record.last_error = last_error;
-    record.update_status = derive_status(
-        &record.management_mode,
-        &record.active_version,
-        record.latest_version.as_deref(),
-        record.pending_version.as_deref(),
-    );
+    record.progress_detail = Some(detail.to_string());
+    record.last_error = None;
+    record.update_status = status.to_string();
     record.updated_at = now_timestamp();
     save_record(&connection, &record)?;
     emit_runtime_changed();
@@ -659,15 +834,15 @@ fn activate_pending_if_idle(key: &str) -> Result<(), String> {
         return Ok(());
     };
 
-    record.active_version = pending_version;
-    record.active_path = pending_path;
+    record.active_version = Some(pending_version);
+    record.active_path = Some(pending_path);
     record.pending_version = None;
     record.pending_path = None;
     record.progress_percent = None;
     record.progress_detail = Some("Pending connector runtime activated.".to_string());
     record.update_status = derive_status(
         &record.management_mode,
-        &record.active_version,
+        record.active_version.as_deref(),
         record.latest_version.as_deref(),
         record.pending_version.as_deref(),
     );
@@ -679,7 +854,8 @@ fn activate_pending_if_idle(key: &str) -> Result<(), String> {
             "info",
             format!(
                 "Activated pending runtime for '{}' at version {}.",
-                entry.display_name, record.active_version
+                entry.display_name,
+                record.active_version.as_deref().unwrap_or("unknown")
             ),
             None,
         );
@@ -699,33 +875,46 @@ fn normalize_record(
             if let Some(custom_path) = record.custom_path.clone() {
                 let custom = PathBuf::from(&custom_path);
                 if custom.exists() {
-                    record.active_path = custom_path;
-                    record.active_version = probe_connector_version(entry, &custom)
-                        .unwrap_or_else(|_| record.active_version.clone());
+                    match probe_connector_version(entry, &custom) {
+                        Ok(version) => {
+                            record.active_path = Some(custom_path);
+                            record.active_version = Some(version);
+                            record.last_error = None;
+                        }
+                        Err(error) => {
+                            record.active_path = None;
+                            record.active_version = None;
+                            record.last_error = Some(error);
+                            record.update_status = "error".to_string();
+                        }
+                    }
                 } else {
+                    record.active_path = None;
+                    record.active_version = None;
                     record.last_error =
                         Some("Configured custom executable no longer exists.".to_string());
                     record.update_status = "error".to_string();
                 }
             }
         } else {
-            let active = PathBuf::from(&record.active_path);
-            if !active.exists() && active.components().count() > 1 {
-                match ensure_bundled_install(layout, entry) {
-                    Ok(restored) => {
-                        record.active_path = restored.display().to_string();
-                        record.last_error = None;
-                    }
-                    Err(_) => {
-                        record.active_path = entry.default_command.clone();
-                        record.last_error = Some(
-                            "Bundled runtime not found; falling back to PATH resolution."
-                                .to_string(),
-                        );
-                    }
-                }
-                if record.active_version.trim().is_empty() {
-                    record.active_version = entry.bundled_version.clone();
+            let active_exists = record
+                .active_path
+                .as_deref()
+                .map(Path::new)
+                .is_some_and(Path::exists);
+            if !active_exists {
+                let bundled = managed_install_path(layout, entry, &entry.bundled_version);
+                if bundled.exists()
+                    && probe_connector_version(entry, &bundled).as_deref()
+                        == Ok(entry.bundled_version.as_str())
+                {
+                    record.active_path = Some(bundled.display().to_string());
+                    record.active_version = Some(entry.bundled_version.clone());
+                    record.last_error = None;
+                } else {
+                    record.active_path = None;
+                    record.active_version = None;
+                    record.last_error = None;
                 }
             }
         }
@@ -737,12 +926,17 @@ fn normalize_record(
             }
         }
 
-        record.update_status = derive_status(
-            &record.management_mode,
-            &record.active_version,
-            record.latest_version.as_deref(),
-            record.pending_version.as_deref(),
-        );
+        record.update_status = if record.management_mode == "custom" && record.active_path.is_none()
+        {
+            "error".to_string()
+        } else {
+            derive_status(
+                &record.management_mode,
+                record.active_version.as_deref(),
+                record.latest_version.as_deref(),
+                record.pending_version.as_deref(),
+            )
+        };
         if record.updated_at.trim().is_empty() {
             record.updated_at = now_timestamp();
         }
@@ -757,55 +951,75 @@ fn normalize_record(
 
     if is_custom {
         let custom = PathBuf::from(legacy_value.trim());
-        let active_version = if custom.exists() {
-            probe_connector_version(entry, &custom).unwrap_or_else(|_| "custom".to_string())
+        let probe = if custom.exists() {
+            probe_connector_version(entry, &custom)
         } else {
-            "custom".to_string()
+            Err("Configured custom executable does not exist.".to_string())
         };
+        let active_version = probe.as_ref().ok().cloned();
+        let active_path = probe.as_ref().ok().map(|_| custom.display().to_string());
+        let last_error = probe.err();
+        let custom_ready = active_version.is_some();
         Ok(ConnectorRuntimeRecord {
             key: entry.key.clone(),
             display_name: entry.display_name.clone(),
             management_mode: "custom".to_string(),
             bundled_version: entry.bundled_version.clone(),
             active_version,
-            active_path: custom.display().to_string(),
+            active_path,
             custom_path: Some(custom.display().to_string()),
             latest_version: None,
             latest_asset_url: None,
+            latest_asset_digest: None,
             latest_checked_at: None,
-            update_status: "custom_override".to_string(),
+            update_status: if custom_ready {
+                "custom_override"
+            } else {
+                "error"
+            }
+            .to_string(),
             pending_version: None,
             pending_path: None,
             progress_percent: None,
             progress_detail: Some("Using a user-supplied executable.".to_string()),
-            last_error: None,
+            last_error,
             updated_at: now_timestamp(),
         })
     } else {
-        let (active_path, last_error) = match ensure_bundled_install(layout, entry) {
-            Ok(path) => (path.display().to_string(), None),
-            Err(_) => (
-                entry.default_command.clone(),
-                Some("Bundled runtime not found; falling back to PATH resolution.".to_string()),
-            ),
-        };
+        let path = managed_install_path(layout, entry, &entry.bundled_version);
+        let installed = path.exists()
+            && probe_connector_version(entry, &path).as_deref()
+                == Ok(entry.bundled_version.as_str());
         Ok(ConnectorRuntimeRecord {
             key: entry.key.clone(),
             display_name: entry.display_name.clone(),
             management_mode: "managed".to_string(),
             bundled_version: entry.bundled_version.clone(),
-            active_version: entry.bundled_version.clone(),
-            active_path,
+            active_version: installed.then(|| entry.bundled_version.clone()),
+            active_path: installed.then(|| path.display().to_string()),
             custom_path: None,
             latest_version: None,
             latest_asset_url: None,
+            latest_asset_digest: None,
             latest_checked_at: None,
-            update_status: "up_to_date".to_string(),
+            update_status: if installed {
+                "up_to_date"
+            } else {
+                "not_installed"
+            }
+            .to_string(),
             pending_version: None,
             pending_path: None,
             progress_percent: None,
-            progress_detail: Some("Managed runtime is ready.".to_string()),
-            last_error,
+            progress_detail: Some(
+                if installed {
+                    "Managed runtime is ready."
+                } else {
+                    "Managed runtime must be downloaded before the workspace can open."
+                }
+                .to_string(),
+            ),
+            last_error: None,
             updated_at: now_timestamp(),
         })
     }
@@ -816,7 +1030,7 @@ fn to_status(record: &ConnectorRuntimeRecord) -> ConnectorRuntimeStatus {
         key: record.key.clone(),
         display_name: record.display_name.clone(),
         management_mode: record.management_mode.clone(),
-        active_version: Some(record.active_version.clone()),
+        active_version: record.active_version.clone(),
         bundled_version: record.bundled_version.clone(),
         latest_version: record.latest_version.clone(),
         update_available: record.management_mode == "managed"
@@ -824,14 +1038,14 @@ fn to_status(record: &ConnectorRuntimeRecord) -> ConnectorRuntimeStatus {
             && record
                 .latest_version
                 .as_deref()
-                .is_some_and(|latest| latest != record.active_version),
+                .is_some_and(|latest| record.active_version.as_deref() != Some(latest)),
         status: record.update_status.clone(),
         last_checked_at: record.latest_checked_at.clone(),
         last_error: record.last_error.clone(),
         pending_version: record.pending_version.clone(),
         progress_percent: record.progress_percent,
         progress_detail: record.progress_detail.clone(),
-        active_path: Some(record.active_path.clone()),
+        active_path: record.active_path.clone(),
         custom_path: record.custom_path.clone(),
     }
 }
@@ -852,6 +1066,7 @@ fn load_record(
                 custom_path,
                 latest_version,
                 latest_asset_url,
+                latest_asset_digest,
                 latest_checked_at,
                 update_status,
                 pending_version,
@@ -875,14 +1090,15 @@ fn load_record(
                     custom_path: row.get(6)?,
                     latest_version: row.get(7)?,
                     latest_asset_url: row.get(8)?,
-                    latest_checked_at: row.get(9)?,
-                    update_status: row.get(10)?,
-                    pending_version: row.get(11)?,
-                    pending_path: row.get(12)?,
-                    progress_percent: row.get(13)?,
-                    progress_detail: row.get(14)?,
-                    last_error: row.get(15)?,
-                    updated_at: row.get(16)?,
+                    latest_asset_digest: row.get(9)?,
+                    latest_checked_at: row.get(10)?,
+                    update_status: row.get(11)?,
+                    pending_version: row.get(12)?,
+                    pending_path: row.get(13)?,
+                    progress_percent: row.get(14)?,
+                    progress_detail: row.get(15)?,
+                    last_error: row.get(16)?,
+                    updated_at: row.get(17)?,
                 })
             },
         )
@@ -903,6 +1119,7 @@ fn save_record(connection: &Connection, record: &ConnectorRuntimeRecord) -> Resu
                 custom_path,
                 latest_version,
                 latest_asset_url,
+                latest_asset_digest,
                 latest_checked_at,
                 update_status,
                 pending_version,
@@ -912,7 +1129,7 @@ fn save_record(connection: &Connection, record: &ConnectorRuntimeRecord) -> Resu
                 last_error,
                 updated_at
              ) VALUES (
-                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17
+                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18
              )
              ON CONFLICT(key) DO UPDATE SET
                 display_name = excluded.display_name,
@@ -923,6 +1140,7 @@ fn save_record(connection: &Connection, record: &ConnectorRuntimeRecord) -> Resu
                 custom_path = excluded.custom_path,
                 latest_version = excluded.latest_version,
                 latest_asset_url = excluded.latest_asset_url,
+                latest_asset_digest = excluded.latest_asset_digest,
                 latest_checked_at = excluded.latest_checked_at,
                 update_status = excluded.update_status,
                 pending_version = excluded.pending_version,
@@ -941,6 +1159,7 @@ fn save_record(connection: &Connection, record: &ConnectorRuntimeRecord) -> Resu
                 record.custom_path,
                 record.latest_version,
                 record.latest_asset_url,
+                record.latest_asset_digest,
                 record.latest_checked_at,
                 record.update_status,
                 record.pending_version,
@@ -992,69 +1211,46 @@ fn load_app_settings_map(connection: &Connection) -> Result<HashMap<String, Stri
     Ok(settings)
 }
 
-fn ensure_bundled_install(
+fn managed_install_path(
     layout: &StorageLayout,
     entry: &ConnectorCatalogEntry,
-) -> Result<PathBuf, String> {
-    let install_path = layout
+    version: &str,
+) -> PathBuf {
+    layout
         .connectors_root
         .join(&entry.key)
-        .join(&entry.bundled_version)
-        .join(&entry.executable_name);
-    if install_path.exists() {
-        return Ok(install_path);
-    }
-
-    let source = locate_bootstrap_binary(entry)?;
-    if let Some(parent) = install_path.parent() {
-        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-    }
-    fs::copy(&source, &install_path).map_err(|error| {
-        format!(
-            "Failed to copy bundled connector runtime from '{}' to '{}': {}",
-            source.display(),
-            install_path.display(),
-            error
-        )
-    })?;
-    Ok(install_path)
+        .join(version)
+        .join(&entry.executable_name)
 }
 
-fn locate_bootstrap_binary(entry: &ConnectorCatalogEntry) -> Result<PathBuf, String> {
-    let relative = PathBuf::from("connectors")
-        .join("bootstrap")
-        .join(&entry.key)
-        .join(&entry.bundled_version)
-        .join(&entry.executable_name);
-    let resources_relative = PathBuf::from("resources").join(&relative);
-
-    let mut candidates = Vec::new();
-    if let Ok(current_dir) = std::env::current_dir() {
-        candidates.push(current_dir.join(&relative));
-        candidates.push(current_dir.join(&resources_relative));
-    }
-
-    if let Ok(current_exe) = std::env::current_exe() {
-        let mut cursor = current_exe.parent().map(Path::to_path_buf);
-        for _ in 0..7 {
-            let Some(path) = cursor.clone() else {
-                break;
-            };
-            candidates.push(path.join(&relative));
-            candidates.push(path.join(&resources_relative));
-            cursor = path.parent().map(Path::to_path_buf);
-        }
-    }
-
-    candidates
-        .into_iter()
-        .find(|candidate| candidate.exists())
-        .ok_or_else(|| {
+fn lookup_pinned_release(entry: &ConnectorCatalogEntry) -> Result<LatestRelease, String> {
+    let tag = entry
+        .release_tag
+        .as_deref()
+        .unwrap_or(&entry.bundled_version);
+    let url = format!(
+        "{}/tags/{}",
+        entry.release_api_url.trim_end_matches('/'),
+        tag
+    );
+    let release: GitHubRelease = github_client()?
+        .get(&url)
+        .send()
+        .and_then(|response| response.error_for_status())
+        .map_err(|error| {
             format!(
-                "Bundled connector runtime '{}' was not found in the application resources.",
-                entry.display_name
+                "Failed to resolve pinned release '{}' for '{}': {}",
+                tag, entry.display_name, error
             )
-        })
+        })?
+        .json()
+        .map_err(|error| {
+            format!(
+                "Failed to parse pinned release '{}' for '{}': {}",
+                tag, entry.display_name, error
+            )
+        })?;
+    release_from_asset(entry, &release, Some(&entry.bundled_version))
 }
 
 fn lookup_latest_release(entry: &ConnectorCatalogEntry) -> Result<LatestRelease, String> {
@@ -1078,23 +1274,19 @@ fn lookup_latest_release(entry: &ConnectorCatalogEntry) -> Result<LatestRelease,
             )
         })?;
 
-    // O GitHub devolve as releases da mais recente para a mais antiga. Algumas
-    // releases novas ainda não têm os binários do Windows anexados (o upstream
-    // os publica de forma assíncrona), então escolhemos a release estável mais
-    // recente que de fato exponha o asset esperado.
+    // GitHub returns newest releases first. Some upstream releases publish
+    // Windows assets asynchronously, so select the newest stable release that
+    // actually contains the expected verified asset.
     for release in &releases {
         if release.draft || release.prerelease {
             continue;
         }
-        if let Some(asset) = release
+        if release
             .assets
             .iter()
-            .find(|item| entry.asset_matches(&item.name))
+            .any(|item| entry.asset_matches(&item.name))
         {
-            return Ok(LatestRelease {
-                version: release.tag_name.trim_start_matches('v').to_string(),
-                asset_url: asset.browser_download_url.clone(),
-            });
+            return release_from_asset(entry, release, None);
         }
     }
 
@@ -1105,10 +1297,70 @@ fn lookup_latest_release(entry: &ConnectorCatalogEntry) -> Result<LatestRelease,
     ))
 }
 
+fn release_from_asset(
+    entry: &ConnectorCatalogEntry,
+    release: &GitHubRelease,
+    version_override: Option<&str>,
+) -> Result<LatestRelease, String> {
+    let asset = release
+        .assets
+        .iter()
+        .find(|item| entry.asset_matches(&item.name))
+        .ok_or_else(|| {
+            format!(
+                "Release '{}' for '{}' does not contain the expected Windows asset '{}'.",
+                release.tag_name,
+                entry.display_name,
+                entry.asset_descriptor()
+            )
+        })?;
+    let digest = required_sha256(asset.digest.as_deref()).map_err(|error| {
+        format!(
+            "Release asset '{}' for '{}' cannot be trusted: {}",
+            asset.name, entry.display_name, error
+        )
+    })?;
+    Ok(LatestRelease {
+        version: version_override
+            .map(str::to_string)
+            .unwrap_or_else(|| release.tag_name.trim_start_matches('v').to_string()),
+        asset_url: asset.browser_download_url.clone(),
+        asset_digest: digest,
+    })
+}
+
+fn required_sha256(digest: Option<&str>) -> Result<String, String> {
+    let value = digest.ok_or_else(|| "GitHub did not provide an asset digest.".to_string())?;
+    let hash = value
+        .strip_prefix("sha256:")
+        .ok_or_else(|| format!("Unsupported asset digest '{}'.", value))?;
+    if hash.len() != 64 || !hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(format!("Invalid SHA-256 asset digest '{}'.", value));
+    }
+    Ok(value.to_ascii_lowercase())
+}
+
+fn verify_asset_digest(
+    entry: &ConnectorCatalogEntry,
+    bytes: &[u8],
+    expected_digest: &str,
+) -> Result<(), String> {
+    let expected = required_sha256(Some(expected_digest))?;
+    let actual = format!("sha256:{:x}", Sha256::digest(bytes));
+    if actual != expected {
+        return Err(format!(
+            "SHA-256 mismatch for '{}': expected {}, received {}.",
+            entry.display_name, expected, actual
+        ));
+    }
+    Ok(())
+}
+
 fn download_release_asset(
     entry: &ConnectorCatalogEntry,
     asset_url: &str,
-) -> Result<Vec<u8>, String> {
+    connectors_root: &Path,
+) -> Result<tempfile::NamedTempFile, String> {
     let client = github_client()?;
     let mut response = client
         .get(asset_url)
@@ -1121,14 +1373,34 @@ fn download_release_asset(
             )
         })?;
 
-    let mut bytes = Vec::new();
-    response.read_to_end(&mut bytes).map_err(|error| {
+    stage_download(entry, connectors_root, &mut response)
+}
+
+fn stage_download(
+    entry: &ConnectorCatalogEntry,
+    connectors_root: &Path,
+    reader: &mut impl Read,
+) -> Result<tempfile::NamedTempFile, String> {
+    let download_root = connectors_root.join(".downloads");
+    fs::create_dir_all(&download_root).map_err(|error| error.to_string())?;
+    let mut download = tempfile::Builder::new()
+        .prefix(&format!("{}-", entry.key))
+        .suffix(".download")
+        .tempfile_in(&download_root)
+        .map_err(|error| error.to_string())?;
+    std::io::copy(reader, download.as_file_mut()).map_err(|error| {
         format!(
-            "Failed to read '{}' update asset: {}",
+            "Failed to write the temporary '{}' download: {}",
             entry.display_name, error
         )
     })?;
-    Ok(bytes)
+    download.as_file_mut().flush().map_err(|error| {
+        format!(
+            "Failed to flush the temporary '{}' download: {}",
+            entry.display_name, error
+        )
+    })?;
+    Ok(download)
 }
 
 fn install_release_asset(
@@ -1137,39 +1409,14 @@ fn install_release_asset(
     version: &str,
     bytes: &[u8],
 ) -> Result<PathBuf, String> {
-    let install_path = layout
-        .connectors_root
-        .join(&entry.key)
-        .join(version)
-        .join(&entry.executable_name);
+    let install_path = managed_install_path(layout, entry, version);
     if install_path.exists() {
-        return Ok(install_path);
-    }
-
-    if let Some(parent) = install_path.parent() {
-        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-    }
-
-    if let Some(member_name) = entry.archive_member_name.as_deref() {
-        let mut archive = ZipArchive::new(Cursor::new(bytes)).map_err(|error| {
+        if probe_connector_version(entry, &install_path).as_deref() == Ok(version) {
+            return Ok(install_path);
+        }
+        fs::remove_file(&install_path).map_err(|error| {
             format!(
-                "Failed to open '{}' update archive: {}",
-                entry.display_name, error
-            )
-        })?;
-        let mut member = archive.by_name(member_name).map_err(|error| {
-            format!(
-                "Failed to locate '{}' inside '{}' update archive: {}",
-                member_name, entry.display_name, error
-            )
-        })?;
-        let mut file = fs::File::create(&install_path).map_err(|error| error.to_string())?;
-        std::io::copy(&mut member, &mut file).map_err(|error| error.to_string())?;
-        file.flush().map_err(|error| error.to_string())?;
-    } else {
-        fs::write(&install_path, bytes).map_err(|error| {
-            format!(
-                "Failed to write '{}' update asset to '{}': {}",
+                "Failed to replace invalid '{}' runtime at '{}': {}",
                 entry.display_name,
                 install_path.display(),
                 error
@@ -1177,6 +1424,66 @@ fn install_release_asset(
         })?;
     }
 
+    let parent = install_path
+        .parent()
+        .ok_or_else(|| "Connector install path has no parent directory.".to_string())?;
+    fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    let temporary_path = parent.join(format!(
+        ".install-{}-{}",
+        uuid::Uuid::new_v4(),
+        entry.executable_name
+    ));
+
+    let result = (|| -> Result<(), String> {
+        if let Some(member_name) = entry.archive_member_name.as_deref() {
+            let mut archive = ZipArchive::new(Cursor::new(bytes)).map_err(|error| {
+                format!(
+                    "Failed to open '{}' update archive: {}",
+                    entry.display_name, error
+                )
+            })?;
+            let mut member = archive.by_name(member_name).map_err(|error| {
+                format!(
+                    "Failed to locate '{}' inside '{}' update archive: {}",
+                    member_name, entry.display_name, error
+                )
+            })?;
+            let mut file = fs::File::create(&temporary_path).map_err(|error| error.to_string())?;
+            std::io::copy(&mut member, &mut file).map_err(|error| error.to_string())?;
+            file.flush().map_err(|error| error.to_string())?;
+        } else {
+            fs::write(&temporary_path, bytes).map_err(|error| {
+                format!(
+                    "Failed to stage '{}' at '{}': {}",
+                    entry.display_name,
+                    temporary_path.display(),
+                    error
+                )
+            })?;
+        }
+
+        let observed_version = probe_connector_version(entry, &temporary_path)?;
+        if observed_version != version {
+            return Err(format!(
+                "'{}' reported version '{}', expected '{}'.",
+                entry.display_name, observed_version, version
+            ));
+        }
+        fs::rename(&temporary_path, &install_path).map_err(|error| {
+            format!(
+                "Failed to activate '{}' at '{}': {}",
+                entry.display_name,
+                install_path.display(),
+                error
+            )
+        })?;
+        Ok(())
+    })();
+
+    if let Err(error) = result {
+        let _ = fs::remove_file(&temporary_path);
+        return Err(error);
+    }
     Ok(install_path)
 }
 
@@ -1244,7 +1551,7 @@ fn is_custom_connector_path(entry: &ConnectorCatalogEntry, value: &str) -> bool 
 
 fn derive_status(
     management_mode: &str,
-    active_version: &str,
+    active_version: Option<&str>,
     latest_version: Option<&str>,
     pending_version: Option<&str>,
 ) -> String {
@@ -1254,6 +1561,9 @@ fn derive_status(
     if pending_version.is_some() {
         return "pending_activation".to_string();
     }
+    let Some(active_version) = active_version else {
+        return "not_installed".to_string();
+    };
     if latest_version.is_some_and(|latest| latest != active_version) {
         return "update_available".to_string();
     }
@@ -1318,6 +1628,7 @@ mod tests {
             tool_setting_key: "tool.test.path".to_string(),
             default_command: "test".to_string(),
             bundled_version: "1.0".to_string(),
+            release_tag: Some("v1.0".to_string()),
             executable_name: "test.exe".to_string(),
             version_args: vec!["--version".to_string()],
             release_api_url: "https://example.invalid/releases".to_string(),
@@ -1339,7 +1650,7 @@ mod tests {
 
     #[test]
     fn prefix_suffix_matches_versioned_asset_names() {
-        // Instaloader embute a versão no nome do asset; deve casar por padrão.
+        // Instaloader includes its version in the asset name.
         let entry = entry_with_asset(
             "instaloader-windows-standalone.zip",
             Some("instaloader-"),
@@ -1350,5 +1661,101 @@ mod tests {
         assert!(entry.asset_matches("instaloader-v5.0-windows-standalone.zip"));
         assert!(!entry.asset_matches("instaloader-v4.15-linux.tar.gz"));
         assert!(!entry.asset_matches("something-else.zip"));
+    }
+
+    #[test]
+    fn required_sha256_rejects_missing_and_malformed_digests() {
+        assert!(required_sha256(None).is_err());
+        assert!(required_sha256(Some("sha512:abc")).is_err());
+        assert!(required_sha256(Some("sha256:abc")).is_err());
+    }
+
+    #[test]
+    fn asset_digest_verification_is_fail_closed() {
+        let entry = entry_with_asset("test.exe", None, None);
+        let bytes = b"verified connector";
+        let digest = format!("sha256:{:x}", Sha256::digest(bytes));
+        assert!(verify_asset_digest(&entry, bytes, &digest).is_ok());
+        assert!(verify_asset_digest(&entry, b"tampered connector", &digest).is_err());
+    }
+
+    #[test]
+    fn managed_status_is_not_installed_without_an_active_version() {
+        assert_eq!(derive_status("managed", None, None, None), "not_installed");
+        assert_eq!(
+            derive_status("managed", Some("1.0"), Some("2.0"), None),
+            "update_available"
+        );
+    }
+
+    #[test]
+    fn invalid_archive_never_creates_an_active_runtime() {
+        let temporary = tempfile::tempdir().expect("temporary connector root");
+        let root = temporary.path().to_path_buf();
+        let layout = StorageLayout {
+            root: root.clone(),
+            data_dir: root.join("data"),
+            logs_dir: root.join("logs"),
+            db_path: root.join("data/ninjacrawler.db"),
+            media_root: root.join("media"),
+            cache_root: root.join("cache"),
+            connectors_root: root.join("connectors"),
+        };
+        let mut entry = entry_with_asset("test.zip", None, None);
+        entry.archive_member_name = Some("test.exe".to_string());
+
+        assert!(install_release_asset(&layout, &entry, "1.0", b"not a zip").is_err());
+        let install_dir = layout.connectors_root.join("test/1.0");
+        assert!(!install_dir.join("test.exe").exists());
+        assert_eq!(
+            fs::read_dir(install_dir)
+                .map(|entries| entries.count())
+                .unwrap_or(0),
+            0
+        );
+    }
+
+    #[test]
+    fn interrupted_download_removes_its_temporary_file() {
+        struct InterruptedReader(bool);
+        impl Read for InterruptedReader {
+            fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+                if self.0 {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::ConnectionReset,
+                        "interrupted",
+                    ));
+                }
+                self.0 = true;
+                let partial = b"partial";
+                buffer[..partial.len()].copy_from_slice(partial);
+                Ok(partial.len())
+            }
+        }
+
+        let temporary = tempfile::tempdir().expect("temporary connector root");
+        let entry = entry_with_asset("test.exe", None, None);
+        let mut reader = InterruptedReader(false);
+        assert!(stage_download(&entry, temporary.path(), &mut reader).is_err());
+        let download_root = temporary.path().join(".downloads");
+        assert_eq!(
+            fs::read_dir(download_root)
+                .map(|entries| entries.count())
+                .unwrap_or(0),
+            0
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn version_probe_requires_a_successful_executable() {
+        let mut entry = entry_with_asset("cmd.exe", None, None);
+        entry.version_args = vec!["/c".to_string(), "echo 1.0".to_string()];
+        assert_eq!(
+            probe_connector_version(&entry, Path::new(r"C:\Windows\System32\cmd.exe"))
+                .expect("cmd version probe"),
+            "1.0"
+        );
+        assert!(probe_connector_version(&entry, Path::new(r"C:\missing\connector.exe")).is_err());
     }
 }
