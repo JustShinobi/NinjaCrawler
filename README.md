@@ -11,11 +11,11 @@
 [![CI](https://img.shields.io/github/actions/workflow/status/MetalDevOps/NinjaCrawler/ci.yml?branch=develop&label=ci)](https://github.com/MetalDevOps/NinjaCrawler/actions/workflows/ci.yml)
 
 <!-- ninjacrawler-release-start -->
-<a href="https://github.com/MetalDevOps/NinjaCrawler/releases/download/v0.17.1/NinjaCrawler-0.17.1-windows-x64-setup.exe">
+<a href="https://github.com/MetalDevOps/NinjaCrawler/releases/download/v0.18.0/NinjaCrawler-0.18.0-windows-x64-setup.exe">
   <img src="https://img.shields.io/badge/Download%20for%20Windows-x64-2ea44f?style=for-the-badge&logo=windows&logoColor=white" alt="Download for Windows x64" height="46">
 </a>
 
-<sub>Current release: v0.17.1 · [portable executable](https://github.com/MetalDevOps/NinjaCrawler/releases/download/v0.17.1/NinjaCrawler-0.17.1-windows-x64-portable.exe) · [checksums](https://github.com/MetalDevOps/NinjaCrawler/releases/download/v0.17.1/SHA256SUMS.txt) · [all releases](https://github.com/MetalDevOps/NinjaCrawler/releases) · [changelog](CHANGELOG.md)</sub>
+<sub>Current release: v0.18.0 · [portable executable](https://github.com/MetalDevOps/NinjaCrawler/releases/download/v0.18.0/NinjaCrawler-0.18.0-windows-x64-portable.exe) · [checksums](https://github.com/MetalDevOps/NinjaCrawler/releases/download/v0.18.0/SHA256SUMS.txt) · [all releases](https://github.com/MetalDevOps/NinjaCrawler/releases) · [changelog](CHANGELOG.md)</sub>
 <!-- ninjacrawler-release-end -->
 
 </div>
@@ -43,10 +43,10 @@ NinjaCrawler is built with Rust, Tauri 2, React, and TypeScript. Metadata and op
 ## Getting started
 
 <!-- ninjacrawler-release-start -->
-1. **[Download NinjaCrawler for Windows](https://github.com/MetalDevOps/NinjaCrawler/releases/download/v0.17.1/NinjaCrawler-0.17.1-windows-x64-setup.exe)**.
+1. **[Download NinjaCrawler for Windows](https://github.com/MetalDevOps/NinjaCrawler/releases/download/v0.18.0/NinjaCrawler-0.18.0-windows-x64-setup.exe)**.
 2. Windows SmartScreen may warn about an unknown publisher because the current builds are unsigned. Choose **More info** and then **Run anyway** if you trust this repository.
-3. Install with the setup executable, or download the standalone [portable executable](https://github.com/MetalDevOps/NinjaCrawler/releases/download/v0.17.1/NinjaCrawler-0.17.1-windows-x64-portable.exe).
-4. Optional: compare the file hash with [SHA256SUMS.txt](https://github.com/MetalDevOps/NinjaCrawler/releases/download/v0.17.1/SHA256SUMS.txt).
+3. Install with the setup executable, or download the standalone [portable executable](https://github.com/MetalDevOps/NinjaCrawler/releases/download/v0.18.0/NinjaCrawler-0.18.0-windows-x64-portable.exe).
+4. Optional: compare the file hash with [SHA256SUMS.txt](https://github.com/MetalDevOps/NinjaCrawler/releases/download/v0.18.0/SHA256SUMS.txt).
 <!-- ninjacrawler-release-end -->
 
 On first launch, an internet connection is required while NinjaCrawler downloads and verifies its connector runtimes. Application data and connectors remain under `%LOCALAPPDATA%\NinjaCrawler`; portable means that the app itself needs no installation.
