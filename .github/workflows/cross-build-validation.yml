@@ -76,10 +76,10 @@ jobs:
         id: identity
         shell: pwsh
         run: |
-          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          $version = & Tools/Test-NinjaCrawlerVersion.ps1
           "version=$version" >> $env:GITHUB_OUTPUT
           "artifact=NinjaCrawler-$version-release-e2e-${{ github.run_id }}" >> $env:GITHUB_OUTPUT
-          "test_tag=release-e2e-${{ github.run_id }}-${{ github.run_attempt }}" >> $env:GITHUB_OUTPUT
+          "test_tag=release-e2e-v$version-${{ github.run_id }}-${{ github.run_attempt }}" >> $env:GITHUB_OUTPUT
 
       - name: Build portable and NSIS
         shell: pwsh
