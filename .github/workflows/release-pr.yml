@@ -48,6 +48,15 @@ jobs:
           existing="$(gh pr list --base "$BASE" --head "$HEAD" --state open \
             --json number --jq '.[0].number' || true)"
 
+          base_version="$(git show "origin/$BASE:package.json" | jq -r .version)"
+          head_version="$(git show "origin/$HEAD:package.json" | jq -r .version)"
+          oldest_version="$(printf '%s\n%s\n' "$base_version" "$head_version" | sort -V | head -n 1)"
+          if [ "$head_version" != "$base_version" ] && [ "$oldest_version" = "$head_version" ]; then
+            echo "Refusing to promote $HEAD version $head_version over newer $BASE version $base_version." >&2
+            echo "Merge $BASE into $HEAD to preserve the release version before promotion." >&2
+            exit 1
+          fi
+
           # Release back-syncs add merge commits to develop so it inherits the
           # published versions from main. Those merges are ancestry maintenance,
           # not changes that should be promoted back to main. Close a standing PR

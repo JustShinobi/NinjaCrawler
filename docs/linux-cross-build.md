@@ -103,9 +103,24 @@ so a workflow modified in another branch cannot receive `contents: write`:
    again, compares the bytes and checksums, then deletes the prerelease and tag
    in an `always()` cleanup step.
 
-The test tag is `release-e2e-<run-id>-<attempt>`. It never uses a production
-`vX.Y.Z` tag and never updates the README, manifest, changelog, back-sync branch,
-or latest-release marker.
+The test tag is `release-e2e-v<app-version>-<run-id>-<attempt>`. It exposes the
+version actually compiled while remaining outside the production `vX.Y.Z`
+namespace, and it never updates the README, manifest, changelog, back-sync
+branch, or latest-release marker. Before compilation, the workflow requires
+`package.json`, the Tauri config, `Cargo.toml`, and the application entry in
+`Cargo.lock` to carry the same version. Promotion automation also refuses to
+move an older `develop` version over a newer `main` version; the draft release
+state must be synced back into `develop` first.
+
+Linux cross-compilation can emit diagnostics owned by upstream tools. The build
+passes `/ignore:4099` only to the Windows cross-linker because the MSVC runtime
+archives reference Microsoft-internal PDB files that are not distributed by
+`cargo-xwin`; those missing debug symbols do not affect the optimized PE. The
+Tauri experimental-cross-compilation notice, its unsigned-installer notice,
+and NSIS warning 5202 about `-OUTPUTCHARSET` on non-Win32 hosts remain expected
+tool capability notices. They do not indicate Rust source warnings. Signing is
+a separate release capability and must use an explicit trusted signing command
+and certificate rather than hiding that notice.
 
 ## Proxmox JIT validation
 

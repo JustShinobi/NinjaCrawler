@@ -14,6 +14,8 @@ $promotionWorkflowPath = Join-Path $repoRoot ".github\workflows\release-pr.yml"
 $promoteMergeWorkflowPath = Join-Path $repoRoot ".github\workflows\promote-merge.yml"
 $releaseBackSyncWorkflowPath = Join-Path $repoRoot ".github\workflows\release-back-sync.yml"
 $cargoLockPath = Join-Path $repoRoot "src-tauri\Cargo.lock"
+$buildScriptPath = Join-Path $repoRoot "Tools\Build-NinjaCrawler.ps1"
+$versionTestPath = Join-Path $repoRoot "Tools\Test-NinjaCrawlerVersion.ps1"
 $config = Get-Content -LiteralPath $configPath -Raw | ConvertFrom-Json
 $companionConfig = Get-Content -LiteralPath $companionConfigPath -Raw | ConvertFrom-Json
 $workflow = Get-Content -LiteralPath $workflowPath -Raw
@@ -26,6 +28,8 @@ $promotionWorkflow = Get-Content -LiteralPath $promotionWorkflowPath -Raw
 $promoteMergeWorkflow = Get-Content -LiteralPath $promoteMergeWorkflowPath -Raw
 $releaseBackSyncWorkflow = Get-Content -LiteralPath $releaseBackSyncWorkflowPath -Raw
 $cargoLock = Get-Content -LiteralPath $cargoLockPath -Raw
+$buildScript = Get-Content -LiteralPath $buildScriptPath -Raw
+$versionTest = Get-Content -LiteralPath $versionTestPath -Raw
 
 foreach ($releaseConfig in @($config, $companionConfig)) {
     if ($releaseConfig.'separate-pull-requests' -ne $true) {
@@ -140,6 +144,8 @@ foreach ($requiredFragment in @(
     '["self-hosted","proxmox-lxc","crossbuild","mode-ephemeral"]',
     '["ubuntu-latest"]',
     'CARGO_TARGET_DIR=/cache/target/ninjacrawler-ci'
+    'Validate app version manifests'
+    'Tools/Test-NinjaCrawlerVersion.ps1'
 )) {
     if (-not $ciWorkflow.Contains($requiredFragment)) {
         throw "CI is missing versioned portable artifact staging: $requiredFragment"
@@ -190,6 +196,8 @@ foreach ($requiredFragment in @(
     'gh release delete "$TEST_TAG"',
     '--cleanup-tag',
     '(cd downloaded && sha256sum --check SHA256SUMS.txt)'
+    'release-e2e-v$version-'
+    'Tools/Test-NinjaCrawlerVersion.ps1'
 )) {
     if (-not $crossBuildValidationWorkflow.Contains($requiredFragment)) {
         throw "Full cross-build validation workflow is missing a safety invariant: $requiredFragment"
@@ -224,8 +232,24 @@ if (-not $appReleaseWorkflow.Contains('startswith("release-please--")')) {
 if (-not $appReleaseWorkflow.Contains('Reconcile recovered release PR label')) {
     throw "App release recovery must reconcile the pending release PR label."
 }
-if (-not $appReleaseWorkflow.Contains("'src-tauri/Cargo.lock' = `$cargoLockVersion")) {
-    throw "App release validation must reject a stale Cargo lockfile version."
+if (-not $appReleaseWorkflow.Contains('Tools/Test-NinjaCrawlerVersion.ps1 -ExpectedVersion $version')) {
+    throw "App release validation must enforce the shared version contract."
+}
+
+foreach ($requiredFragment in @(
+    'src-tauri/Cargo.lock'
+    'src-tauri/Cargo.toml'
+    'src-tauri/tauri.conf.json'
+    'package.json'
+)) {
+    if (-not $versionTest.Contains($requiredFragment)) {
+        throw "Version contract test is missing a release manifest: $requiredFragment"
+    }
+}
+
+if (-not $buildScript.Contains('link-arg=/ignore:4099') -or
+    -not $buildScript.Contains('CrossLinkerPolicy=ignore-msvc-runtime-pdb-warning-4099')) {
+    throw "Linux MSVC cross-builds must suppress the unavailable runtime PDB warning."
 }
 
 foreach ($requiredFragment in @(
@@ -252,7 +276,9 @@ foreach ($requiredFragment in @(
 foreach ($requiredFragment in @(
     'git log --no-merges --oneline',
     'Closing empty release PR',
-    'gh pr close "$existing"'
+    'gh pr close "$existing"',
+    'Refusing to promote $HEAD version $head_version over newer $BASE version $base_version.',
+    'sort -V'
 )) {
     if (-not $promotionWorkflow.Contains($requiredFragment)) {
         throw "Promotion workflow does not close merge-only release PRs: $requiredFragment"

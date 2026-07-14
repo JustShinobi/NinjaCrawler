@@ -75,6 +75,16 @@ if ($PortableOnly) {
     $tauriArguments += @("--bundles", "nsis")
 }
 
+if (-not $runningOnWindows -and $TargetTriple -eq "x86_64-pc-windows-msvc") {
+    $ignoreMissingRuntimePdb = "-C link-arg=/ignore:4099"
+    if ([string]::IsNullOrWhiteSpace($env:RUSTFLAGS)) {
+        $env:RUSTFLAGS = $ignoreMissingRuntimePdb
+    } elseif (-not $env:RUSTFLAGS.Contains("/ignore:4099")) {
+        $env:RUSTFLAGS = "$($env:RUSTFLAGS) $ignoreMissingRuntimePdb"
+    }
+    Write-Host "CrossLinkerPolicy=ignore-msvc-runtime-pdb-warning-4099"
+}
+
 $buildCommand = @("npm", "run", "tauri:build", "--") + $tauriArguments
 Invoke-DesktopCommand $buildCommand
 
