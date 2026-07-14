@@ -1668,12 +1668,12 @@ function normalizeConnectorRuntimeStatus(value: unknown): ConnectorRuntimeStatus
     'managed',
   )
   const latestVersion = optionalStringValue(value, ['latestVersion', 'latest_version'])
-  const activeVersion = stringValue(value, ['activeVersion', 'active_version'], 'unknown')
+  const activeVersion = optionalStringValue(value, ['activeVersion', 'active_version'])
   const pendingVersion = optionalStringValue(value, ['pendingVersion', 'pending_version'])
   const status = enumValue(
     pick(value, 'status', 'updateStatus', 'update_status'),
-    ['up_to_date', 'update_available', 'checking', 'downloading', 'pending_activation', 'custom_override', 'error'],
-    'up_to_date',
+    ['not_installed', 'up_to_date', 'update_available', 'checking', 'downloading', 'pending_activation', 'custom_override', 'error'],
+    activeVersion ? 'up_to_date' : 'not_installed',
   )
 
   return {
@@ -1681,10 +1681,10 @@ function normalizeConnectorRuntimeStatus(value: unknown): ConnectorRuntimeStatus
     displayName: stringValue(value, ['displayName', 'display_name'], 'Connector'),
     managementMode,
     activeVersion,
-    bundledVersion: stringValue(value, ['bundledVersion', 'bundled_version'], activeVersion),
+    bundledVersion: stringValue(value, ['bundledVersion', 'bundled_version'], activeVersion ?? 'unknown'),
     latestVersion,
     updateAvailable: managementMode === 'managed'
-      && booleanValue(value, ['updateAvailable', 'update_available'], Boolean(latestVersion && latestVersion !== activeVersion && !pendingVersion)),
+      && booleanValue(value, ['updateAvailable', 'update_available'], Boolean(activeVersion && latestVersion && latestVersion !== activeVersion && !pendingVersion)),
     status,
     lastCheckedAt: optionalStringValue(value, ['lastCheckedAt', 'last_checked_at']),
     lastError: optionalStringValue(value, ['lastError', 'last_error']),
@@ -1694,6 +1694,7 @@ function normalizeConnectorRuntimeStatus(value: unknown): ConnectorRuntimeStatus
       : undefined,
     progressDetail: optionalStringValue(value, ['progressDetail', 'progress_detail']),
     customPath: optionalStringValue(value, ['customPath', 'custom_path']),
+    activePath: optionalStringValue(value, ['activePath', 'active_path']),
   }
 }
 
@@ -2173,6 +2174,10 @@ export async function subscribeToDesktopRuntimeEvents(handlers: {
 
 export async function setDesktopSilentMode(enabled: boolean): Promise<WorkspaceSnapshot> {
   return invokeWorkspaceCommand('set_silent_mode', { enabled })
+}
+
+export async function prepareConnectorRuntimes(): Promise<WorkspaceSnapshot> {
+  return invokeWorkspaceCommand('prepare_connector_runtimes')
 }
 
 export async function checkConnectorUpdates(key?: string): Promise<ConnectorRuntimeStatus[]> {

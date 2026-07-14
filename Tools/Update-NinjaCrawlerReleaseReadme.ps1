@@ -41,7 +41,7 @@ $updated = [regex]::Replace(
 
 $expectedLinks = @(
     "releases/download/v$Version/NinjaCrawler-$Version-windows-x64-setup.exe",
-    "releases/download/v$Version/NinjaCrawler-$Version-windows-x64-portable.zip",
+    "releases/download/v$Version/NinjaCrawler-$Version-windows-x64-portable.exe",
     "releases/download/v$Version/SHA256SUMS.txt"
 )
 foreach ($expectedLink in $expectedLinks) {

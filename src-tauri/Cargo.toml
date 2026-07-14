@@ -34,10 +34,8 @@ base64 = "0.22"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 sha2 = "0.10"
+tempfile = "3"
 trash = "5"
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.55"
-
-[dev-dependencies]
-tempfile = "3"

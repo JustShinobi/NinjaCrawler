@@ -25,6 +25,7 @@ import {
   saveProviderAccountCookies as saveProviderAccountCookiesCommand,
   setSyncPlanPause as setSyncPlanPauseCommand,
   pauseSyncPlan as pauseSyncPlanCommand,
+  prepareConnectorRuntimes as prepareConnectorRuntimesCommand,
   previewSyncPlanTarget as previewSyncPlanTargetCommand,
   resumeSyncPlan as resumeSyncPlanCommand,
   setDesktopSilentMode as setDesktopSilentModeCommand,
@@ -116,6 +117,7 @@ interface AppStore {
   loadProviderAccountEditor: (accountId: string) => Promise<ProviderAccountEditor>
   saveProviderAccountSettings: (accountId: string, values: ProviderAccountSettingValue[]) => Promise<ProviderAccountEditor>
   checkConnectorUpdates: (key?: string) => Promise<WorkspaceSnapshot>
+  prepareConnectorRuntimes: () => Promise<WorkspaceSnapshot>
   updateConnectorRuntime: (key: string) => Promise<WorkspaceSnapshot>
   setConnectorCustomOverride: (key: string, customPath: string) => Promise<WorkspaceSnapshot>
   clearConnectorCustomOverride: (key: string) => Promise<WorkspaceSnapshot>
@@ -297,6 +299,8 @@ export const useAppStore = create<AppStore>((set) => {
       runEditorMutation('save_provider_account_settings', () => saveProviderAccountSettingsCommand(accountId, values)),
     checkConnectorUpdates: (key) =>
       runConnectorMutation('check_connector_updates', () => checkConnectorUpdatesCommand(key)),
+    prepareConnectorRuntimes: () =>
+      runSnapshotMutation('prepare_connector_runtimes', prepareConnectorRuntimesCommand),
     updateConnectorRuntime: (key) =>
       runConnectorMutation('update_connector_runtime', () => updateConnectorRuntimeCommand(key)),
     setConnectorCustomOverride: (key, customPath) =>

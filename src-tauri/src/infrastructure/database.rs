@@ -155,6 +155,10 @@ const MIGRATIONS: &[(i64, &str)] = &[
         40,
         include_str!("../../migrations/0040_media_path_migration_queue.sql"),
     ),
+    (
+        41,
+        include_str!("../../migrations/0041_connector_runtime_asset_digest.sql"),
+    ),
 ];
 
 const PROVIDER_SYNC_RESUME_SCHEMA: &str =

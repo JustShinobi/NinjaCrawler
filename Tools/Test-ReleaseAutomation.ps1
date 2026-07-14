@@ -107,6 +107,16 @@ foreach ($requiredFragment in @(
     }
 }
 
+foreach ($requiredFragment in @(
+    'Stage versioned portable',
+    'NinjaCrawler-$version-windows-x64-portable.exe',
+    'steps.portable.outputs.path'
+)) {
+    if (-not $ciWorkflow.Contains($requiredFragment)) {
+        throw "CI is missing versioned portable artifact staging: $requiredFragment"
+    }
+}
+
 if (-not $appReleaseWorkflow.Contains('startswith("release-please--")')) {
     throw "App release re-anchoring must regenerate every PR that shares the release manifest."
 }
@@ -148,15 +158,13 @@ foreach ($requiredFragment in @(
     }
 }
 
-foreach ($releaseWorkflow in @($appReleaseWorkflow, $companionReleaseWorkflow)) {
-    foreach ($requiredFragment in @(
-        'gh workflow run release-back-sync.yml',
-        '-f tag=${{ steps.version.outputs.tag }}'
-    )) {
-        if (-not $releaseWorkflow.Contains($requiredFragment)) {
-            throw "Every package release must trigger branch back-sync: $requiredFragment"
-        }
-    }
+if (-not $appReleaseWorkflow.Contains('gh workflow run release-back-sync.yml') -or
+    -not $appReleaseWorkflow.Contains('-f tag=${{ needs.build.outputs.tag }}')) {
+    throw "The app release must back-sync the tag produced by its isolated build job."
+}
+if (-not $companionReleaseWorkflow.Contains('gh workflow run release-back-sync.yml') -or
+    -not $companionReleaseWorkflow.Contains('-f tag=${{ steps.version.outputs.tag }}')) {
+    throw "The Companion release must back-sync its published tag."
 }
 
 foreach ($requiredFragment in @(

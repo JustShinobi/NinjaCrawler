@@ -3,6 +3,9 @@ param(
     [ValidatePattern("^\d+\.\d+\.\d+$")]
     [string]$Version,
     [string]$OutputRoot = "release",
+    [string]$BuildRoot = "",
+    [string]$TargetTriple = "",
+    [string]$ChangelogPath = "",
     [switch]$CompanionOnly,
     [switch]$SkipCompanion
 )
@@ -15,7 +18,15 @@ if ($CompanionOnly -and $SkipCompanion) {
 }
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
-$releaseRoot = Join-Path $repoRoot "src-tauri\target\release"
+$releaseRoot = if ([string]::IsNullOrWhiteSpace($BuildRoot)) {
+    $path = Join-Path $repoRoot "src-tauri/target"
+    if (-not [string]::IsNullOrWhiteSpace($TargetTriple)) {
+        $path = Join-Path $path $TargetTriple
+    }
+    Join-Path $path "release"
+} else {
+    [System.IO.Path]::GetFullPath((Join-Path $repoRoot $BuildRoot))
+}
 $outputPath = [System.IO.Path]::GetFullPath((Join-Path $repoRoot $OutputRoot))
 $directorySeparator = [System.IO.Path]::DirectorySeparatorChar
 $normalizedRepoRoot = [System.IO.Path]::GetFullPath($repoRoot).TrimEnd(
@@ -38,44 +49,31 @@ $assets = @()
 
 if (-not $CompanionOnly) {
     $executablePath = Join-Path $releaseRoot "ninjacrawler.exe"
-    $msiPath = Get-ChildItem (Join-Path $releaseRoot "bundle\msi") -Filter "*.msi" -File |
+    $nsisPath = Get-ChildItem (Join-Path $releaseRoot "bundle/nsis") -Filter "*-setup.exe" -File |
         Select-Object -First 1
-    $nsisPath = Get-ChildItem (Join-Path $releaseRoot "bundle\nsis") -Filter "*-setup.exe" -File |
-        Select-Object -First 1
-    $bootstrapPath = Join-Path $repoRoot "connectors\bootstrap"
 
     if (-not (Test-Path -LiteralPath $executablePath)) {
         throw "Release executable not found: '$executablePath'."
     }
-    if (-not $msiPath) {
-        throw "MSI bundle not found below '$releaseRoot\bundle\msi'."
-    }
     if (-not $nsisPath) {
-        throw "NSIS bundle not found below '$releaseRoot\bundle\nsis'."
-    }
-    if (-not (Test-Path -LiteralPath $bootstrapPath)) {
-        throw "Connector bootstrap directory not found: '$bootstrapPath'."
+        throw "NSIS bundle not found below '$releaseRoot/bundle/nsis'."
     }
 
-    $portableName = "NinjaCrawler-$Version-windows-x64"
-    $portablePath = Join-Path $outputPath $portableName
-    New-Item -ItemType Directory -Path $portablePath -Force | Out-Null
-
-    Copy-Item -LiteralPath $executablePath -Destination (Join-Path $portablePath "ninjacrawler.exe")
-    Copy-Item -LiteralPath (Join-Path $repoRoot "README.md") -Destination $portablePath
-    $portableConnectorsPath = Join-Path $portablePath "connectors"
-    New-Item -ItemType Directory -Path $portableConnectorsPath -Force | Out-Null
-    Copy-Item -LiteralPath $bootstrapPath -Destination (Join-Path $portableConnectorsPath "bootstrap") -Recurse
-
-    $portableZip = Join-Path $outputPath "$portableName-portable.zip"
-    Compress-Archive -LiteralPath $portablePath -DestinationPath $portableZip -CompressionLevel Optimal
-    Remove-Item -LiteralPath $portablePath -Recurse -Force
-
-    $msiDestination = Join-Path $outputPath "NinjaCrawler-$Version-windows-x64.msi"
+    $portableDestination = Join-Path $outputPath "NinjaCrawler-$Version-windows-x64-portable.exe"
     $nsisDestination = Join-Path $outputPath "NinjaCrawler-$Version-windows-x64-setup.exe"
-    Copy-Item -LiteralPath $msiPath.FullName -Destination $msiDestination
+    Copy-Item -LiteralPath $executablePath -Destination $portableDestination
     Copy-Item -LiteralPath $nsisPath.FullName -Destination $nsisDestination
-    $assets += @($portableZip, $msiDestination, $nsisDestination)
+    $assets += @($portableDestination, $nsisDestination)
+
+    if (-not [string]::IsNullOrWhiteSpace($ChangelogPath)) {
+        $resolvedChangelogPath = [System.IO.Path]::GetFullPath((Join-Path $repoRoot $ChangelogPath))
+        if (-not (Test-Path -LiteralPath $resolvedChangelogPath -PathType Leaf)) {
+            throw "Changelog not found: '$resolvedChangelogPath'."
+        }
+        $changelogDestination = Join-Path $outputPath "CHANGELOG.md"
+        Copy-Item -LiteralPath $resolvedChangelogPath -Destination $changelogDestination
+        $assets += $changelogDestination
+    }
 }
 
 # The Companion ships in its own release; -SkipCompanion lets the app release

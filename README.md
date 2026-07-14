@@ -15,7 +15,7 @@
   <img src="https://img.shields.io/badge/Download%20for%20Windows-x64-2ea44f?style=for-the-badge&logo=windows&logoColor=white" alt="Download for Windows x64" height="46">
 </a>
 
-<sub>Current release: v0.17.0 · [portable zip](https://github.com/MetalDevOps/NinjaCrawler/releases/download/v0.17.0/NinjaCrawler-0.17.0-windows-x64-portable.zip) · [checksums](https://github.com/MetalDevOps/NinjaCrawler/releases/download/v0.17.0/SHA256SUMS.txt) · [all releases](https://github.com/MetalDevOps/NinjaCrawler/releases) · [changelog](CHANGELOG.md)</sub>
+<sub>Current release: v0.17.0 · [portable executable](https://github.com/MetalDevOps/NinjaCrawler/releases/download/v0.17.0/NinjaCrawler-0.17.0-windows-x64-portable.exe) · [checksums](https://github.com/MetalDevOps/NinjaCrawler/releases/download/v0.17.0/SHA256SUMS.txt) · [all releases](https://github.com/MetalDevOps/NinjaCrawler/releases) · [changelog](CHANGELOG.md)</sub>
 <!-- ninjacrawler-release-end -->
 
 </div>
@@ -37,7 +37,7 @@ NinjaCrawler is built with Rust, Tauri 2, React, and TypeScript. Metadata and op
 - Create scheduler sets, plans, groups, filters, and date constraints.
 - Import existing SCrawler media without duplicating files.
 - Browse downloaded media by profile and date, open the original post, or reveal the local file.
-- Manage bundled connector runtimes such as `gallery-dl`, `yt-dlp`, and Instaloader.
+- Download and manage verified connector runtimes such as `gallery-dl`, `yt-dlp`, and Instaloader.
 - Add or sync profiles from Chrome through the optional NinjaCrawler Companion extension.
 
 ## Getting started
@@ -45,11 +45,11 @@ NinjaCrawler is built with Rust, Tauri 2, React, and TypeScript. Metadata and op
 <!-- ninjacrawler-release-start -->
 1. **[Download NinjaCrawler for Windows](https://github.com/MetalDevOps/NinjaCrawler/releases/download/v0.17.0/NinjaCrawler-0.17.0-windows-x64-setup.exe)**.
 2. Windows SmartScreen may warn about an unknown publisher because the current builds are unsigned. Choose **More info** and then **Run anyway** if you trust this repository.
-3. Install with the setup executable, or download the [portable zip](https://github.com/MetalDevOps/NinjaCrawler/releases/download/v0.17.0/NinjaCrawler-0.17.0-windows-x64-portable.zip) if you prefer a folder-based build.
+3. Install with the setup executable, or download the standalone [portable executable](https://github.com/MetalDevOps/NinjaCrawler/releases/download/v0.17.0/NinjaCrawler-0.17.0-windows-x64-portable.exe).
 4. Optional: compare the file hash with [SHA256SUMS.txt](https://github.com/MetalDevOps/NinjaCrawler/releases/download/v0.17.0/SHA256SUMS.txt).
 <!-- ninjacrawler-release-end -->
 
-After first launch, open the workspace settings to choose a media folder, configure provider accounts, and install or update connector runtimes.
+On first launch, an internet connection is required while NinjaCrawler downloads and verifies its connector runtimes. Application data and connectors remain under `%LOCALAPPDATA%\NinjaCrawler`; portable means that the app itself needs no installation.
 
 ## Provider support
 
@@ -59,7 +59,7 @@ After first launch, open the workspace settings to choose a media folder, config
 | TikTok | Multiple accounts, videos, photo posts, stories, reposts, avatars, date ranges, and configurable file naming |
 | X / Twitter | Profile media timeline, avatars, duplicate prevention, and handle recovery through stable user IDs |
 
-Provider behavior depends on the platform, account authentication, rate limits, and the capabilities of the bundled connector tools.
+Provider behavior depends on the platform, account authentication, rate limits, and the capabilities of the managed connector tools.
 
 ## How it works
 
@@ -92,7 +92,7 @@ Development and local builds currently target Windows.
 - Visual Studio 2022 Build Tools with the Desktop development with C++ workload
 - Microsoft Edge WebView2 Runtime
 - PowerShell 5.1 or newer
-- Internet access during the first build to download connector bootstrap assets
+- Internet access during first-run connector preparation
 
 ## Development
 
@@ -126,7 +126,7 @@ npm test
 npm run build
 ```
 
-The repository build wrapper prepares connector runtimes, runs lint and tests, and builds the Tauri application:
+The repository build wrapper runs lint and tests, then builds the Tauri application:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File Tools\Build-NinjaCrawler.ps1 -Configuration Debug
@@ -155,7 +155,7 @@ Use `-PortableOnly` with the build wrapper when installers are not required.
 
 ## Continuous integration and releases
 
-GitHub Actions runs lint, frontend tests, a production dependency audit, and a Windows Release build for pull requests and changes to `main` or `develop`.
+GitHub Actions runs lint, frontend tests, a production dependency audit, and a Windows x64 cross-build on `ubuntu-latest` for every pull request and changes to `main`.
 
 Releases are tag-driven. The desktop app and the Chrome Companion are versioned on **independent** Release Please tracks so a release that only touches one of them never bumps the other:
 
@@ -166,13 +166,12 @@ Releases are tag-driven. The desktop app and the Chrome Companion are versioned 
 2. Release Please opens or updates the release PR, bumping whichever track(s) changed.
 3. Merging the release PR creates the draft GitHub Release(s) and dispatches the matching release workflow: the Windows build for the app, and the Companion packaging workflow for the extension.
 
-The app release workflow validates that the app versions match the tag, performs the complete Release build and smoke test, and publishes:
+The app release workflow validates that the app versions match the tag, builds on a read-only hosted Linux job, and publishes from a separate credentialed job:
 
 - A generated changelog grouped from Conventional Commit messages since the previous version.
-- A portable Windows ZIP with the managed connector runtimes.
-- An MSI installer.
+- A standalone portable Windows executable.
 - An NSIS setup executable.
-- SHA-256 checksums for every downloadable asset.
+- SHA-256 checksums for both executables and the changelog.
 
 The Companion release workflow packages and publishes, under the `companion-vX.Y.Z` tag:
 
@@ -225,7 +224,7 @@ The extension communicates only with the local desktop API at `127.0.0.1`.
 | --- | --- |
 | `src/` | React workspace, desktop windows, state, bridge, and frontend tests |
 | `src-tauri/` | Rust backend, SQLite migrations, provider connectors, queues, and scheduler |
-| `connectors/bootstrap/` | Connector runtime manifest and downloaded build assets |
+| `connectors/manifest.json` | Fixed connector versions and GitHub release asset metadata |
 | `NinjaCrawler.Companion/` | Optional Chrome extension |
 | `Tools/` | Windows development, build, smoke-test, and publishing scripts |
 | `docs/` | Architecture and Windows distribution notes |

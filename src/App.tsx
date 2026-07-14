@@ -43,6 +43,8 @@ import type {
   SourceSyncQueueStatus,
 } from './domain/models'
 import { SettingsPage } from './features/settings/SettingsPage'
+import { ConnectorPreparationScreen } from './features/connectors/ConnectorPreparationScreen'
+import { connectorsNeedPreparation } from './features/connectors/connectorPreparation'
 import { SourceDeleteConfirmDialog } from './features/sources/SourceDeleteConfirmDialog'
 import { AccountsMenu } from './features/workspace/AccountsMenu'
 import { InternalDialog } from './features/workspace/InternalDialog'
@@ -676,6 +678,10 @@ function App() {
 
   if (!snapshot) {
     return <div className="app-shell loading-shell">Failed to load workspace: {error ?? 'missing snapshot'}</div>
+  }
+
+  if (connectorsNeedPreparation(snapshot.connectorRuntimes)) {
+    return <ConnectorPreparationScreen />
   }
 
   const workspaceSnapshot = snapshot

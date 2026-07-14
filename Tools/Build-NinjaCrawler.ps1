@@ -3,41 +3,38 @@ param(
     [string]$Configuration = "Debug",
     [switch]$SkipLint,
     [switch]$SkipTests,
-    [switch]$PortableOnly
+    [switch]$PortableOnly,
+    [string]$TargetTriple = ""
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-function Get-RepoRoot {
-    return Split-Path -Parent $PSScriptRoot
-}
-
-function Get-RunnerPath {
-    $runner = Join-Path $PSScriptRoot "Run-InVsDevCmd.cmd"
-    if (-not (Test-Path $runner)) {
-        throw "Run-InVsDevCmd.cmd nao foi encontrado em '$PSScriptRoot'."
-    }
-
-    return $runner
+$repoRoot = Split-Path -Parent $PSScriptRoot
+$runningOnWindows = $env:OS -eq "Windows_NT"
+if ([string]::IsNullOrWhiteSpace($TargetTriple) -and -not $runningOnWindows) {
+    $TargetTriple = "x86_64-pc-windows-msvc"
 }
 
 function Invoke-DesktopCommand {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$RepoRoot,
-        [Parameter(Mandatory = $true)]
-        [string[]]$Command
-    )
+    param([Parameter(Mandatory)][string[]]$Command)
 
-    $runner = Get-RunnerPath
     Write-Host ("> " + ($Command -join " "))
-
-    Push-Location $RepoRoot
+    Push-Location $repoRoot
     try {
-        & $runner @Command
+        if ($runningOnWindows) {
+            $runner = Join-Path $PSScriptRoot "Run-InVsDevCmd.cmd"
+            if (-not (Test-Path -LiteralPath $runner -PathType Leaf)) {
+                throw "Run-InVsDevCmd.cmd was not found in '$PSScriptRoot'."
+            }
+            & $runner @Command
+        } else {
+            $executable = $Command[0]
+            $arguments = @($Command | Select-Object -Skip 1)
+            & $executable @arguments
+        }
         if ($LASTEXITCODE -ne 0) {
-            throw "Falha ao executar: $($Command -join ' ')"
+            throw "Command failed: $($Command -join ' ')"
         }
     } finally {
         Pop-Location
@@ -45,114 +42,48 @@ function Invoke-DesktopCommand {
 }
 
 function Get-TargetRoot {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$RepoRoot,
-        [Parameter(Mandatory = $true)]
-        [string]$BuildConfiguration
-    )
-
-    $targetName = $BuildConfiguration.ToLowerInvariant()
-    return Join-Path (Join-Path (Join-Path $RepoRoot "src-tauri") "target") $targetName
-}
-
-function Get-BuildArtifacts {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$RepoRoot,
-        [Parameter(Mandatory = $true)]
-        [string]$BuildConfiguration,
-        [Parameter(Mandatory = $true)]
-        [bool]$IncludeBundles
-    )
-
-    $targetRoot = Get-TargetRoot -RepoRoot $RepoRoot -BuildConfiguration $BuildConfiguration
-    $portableNames = @("ninjacrawler.exe", "ninjacrawler.pdb")
-    $portableArtifacts = foreach ($name in $portableNames) {
-        $path = Join-Path $targetRoot $name
-        if (Test-Path $path) {
-            Get-Item -LiteralPath $path
-        }
+    $root = Join-Path $repoRoot "src-tauri/target"
+    if (-not [string]::IsNullOrWhiteSpace($TargetTriple)) {
+        $root = Join-Path $root $TargetTriple
     }
-
-    $bundleArtifacts = @()
-    if ($IncludeBundles) {
-        $bundleRoot = Join-Path $targetRoot "bundle"
-        $bundleArtifacts = if (Test-Path $bundleRoot) {
-            Get-ChildItem -LiteralPath $bundleRoot -File -Recurse |
-                Sort-Object FullName
-        } else {
-            @()
-        }
-    }
-
-    return @{
-        TargetRoot = $targetRoot
-        PortableArtifacts = @($portableArtifacts)
-        BundleArtifacts = @($bundleArtifacts)
-    }
-}
-
-$repoRoot = Get-RepoRoot
-$prepareBootstrapScript = Join-Path $PSScriptRoot "Prepare-ConnectorBootstrap.ps1"
-
-Push-Location $repoRoot
-try {
-    & powershell -ExecutionPolicy Bypass -File $prepareBootstrapScript
-    if ($LASTEXITCODE -ne 0) {
-        throw "Falha ao preparar os conectores bootstrap."
-    }
-} finally {
-    Pop-Location
+    return Join-Path $root $Configuration.ToLowerInvariant()
 }
 
 if (-not $SkipLint) {
-    Invoke-DesktopCommand -RepoRoot $repoRoot -Command @("npm", "run", "lint")
-} else {
-    Write-Host "Lint ignorado."
+    Invoke-DesktopCommand @("npm", "run", "lint")
 }
-
 if (-not $SkipTests) {
-    Invoke-DesktopCommand -RepoRoot $repoRoot -Command @("npm", "test")
-} else {
-    Write-Host "Testes frontend ignorados."
+    Invoke-DesktopCommand @("npm", "test")
 }
 
-$buildCommand = @("npm", "run", "tauri:build")
+$tauriArguments = @()
 if ($Configuration -eq "Debug") {
-    $buildCommand += @("--", "--debug")
+    $tauriArguments += "--debug"
+}
+if (-not [string]::IsNullOrWhiteSpace($TargetTriple)) {
+    $tauriArguments += @("--runner", "cargo-xwin", "--target", $TargetTriple)
 }
 if ($PortableOnly) {
-    $targetRoot = Get-TargetRoot -RepoRoot $repoRoot -BuildConfiguration $Configuration
-    $bundleRoot = Join-Path $targetRoot "bundle"
-    if (Test-Path $bundleRoot) {
-        Remove-Item -LiteralPath $bundleRoot -Recurse -Force
-    }
-
-    if ($buildCommand.Count -eq 3) {
-        $buildCommand += "--"
-    }
-
-    $buildCommand += "--no-bundle"
-}
-
-Invoke-DesktopCommand -RepoRoot $repoRoot -Command $buildCommand
-
-$artifacts = Get-BuildArtifacts -RepoRoot $repoRoot -BuildConfiguration $Configuration -IncludeBundles (-not $PortableOnly)
-
-if ($artifacts.PortableArtifacts.Count -eq 0) {
-    throw "O build terminou sem gerar artefatos portateis em '$($artifacts.TargetRoot)'."
-}
-
-Write-Host "BuildRoot=$($artifacts.TargetRoot)"
-Write-Host "PortableArtifacts:"
-$artifacts.PortableArtifacts | ForEach-Object { Write-Host $_.FullName }
-
-Write-Host "BundleArtifacts:"
-if ($PortableOnly) {
-    Write-Host "(skipped by -PortableOnly)"
-} elseif ($artifacts.BundleArtifacts.Count -eq 0) {
-    Write-Host "(nenhum)"
+    $tauriArguments += "--no-bundle"
 } else {
-    $artifacts.BundleArtifacts | ForEach-Object { Write-Host $_.FullName }
+    $tauriArguments += @("--bundles", "nsis")
+}
+
+$buildCommand = @("npm", "run", "tauri:build", "--") + $tauriArguments
+Invoke-DesktopCommand $buildCommand
+
+$targetRoot = Get-TargetRoot
+$executablePath = Join-Path $targetRoot "ninjacrawler.exe"
+if (-not (Test-Path -LiteralPath $executablePath -PathType Leaf)) {
+    throw "The build did not produce '$executablePath'."
+}
+
+Write-Host "BuildRoot=$targetRoot"
+Write-Host "PortableArtifact=$executablePath"
+if (-not $PortableOnly) {
+    $nsisArtifacts = @(Get-ChildItem -LiteralPath (Join-Path $targetRoot "bundle/nsis") -Filter "*-setup.exe" -File -ErrorAction SilentlyContinue)
+    if ($nsisArtifacts.Count -eq 0) {
+        throw "The build did not produce an NSIS installer below '$targetRoot/bundle/nsis'."
+    }
+    $nsisArtifacts | ForEach-Object { Write-Host "NsisArtifact=$($_.FullName)" }
 }

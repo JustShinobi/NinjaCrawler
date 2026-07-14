@@ -70,7 +70,6 @@ Portable artifacts:
 
 Bundled installers:
 
-- `bundle\msi\*.msi`
 - `bundle\nsis\*-setup.exe`
 
 GitHub releases also contain `NinjaCrawler-Companion-<version>.zip`. The
@@ -117,7 +116,6 @@ Tools\Publish-Desktop.cmd
 The publish root is organized as:
 
 - `app\` for the portable desktop binary
-- `bundle\msi\` for MSI packages
 - `bundle\nsis\` for NSIS installers
 - `_backup\<timestamp>\` for the replaced files from the previous publish
 
@@ -147,9 +145,7 @@ powershell -ExecutionPolicy Bypass -File Tools\Publish-NinjaCrawler.ps1 -Configu
 3. Launch the published portable app from `F:\NinjaCrawler\app\ninjacrawler.exe`.
 4. In `Settings`, confirm the configured external tool paths used by the compiled provider runtimes, especially `gallery-dl` and `yt-dlp`.
 5. Validate at least one provider-account health check and one manual source sync from the published build.
-6. If installers are part of the release, smoke-test both:
-   - `bundle\msi\*.msi`
-   - `bundle\nsis\*-setup.exe`
+6. Smoke-test `bundle\nsis\*-setup.exe` when an installer is part of the release.
 
 ## Provider Extensibility Boundary
 

@@ -701,6 +701,16 @@ pub fn upsert_app_setting(
 }
 
 #[tauri::command]
+pub async fn prepare_connector_runtimes(
+    app: tauri::AppHandle,
+) -> Result<WorkspaceSnapshot, String> {
+    tauri::async_runtime::spawn_blocking(connector_runtime::prepare_connector_runtimes)
+        .await
+        .map_err(|error| format!("Connector preparation worker failed: {error}"))??;
+    publish_snapshot(&app, workspace_repository::bootstrap_workspace()?)
+}
+
+#[tauri::command]
 pub fn check_connector_updates(
     app: tauri::AppHandle,
     key: Option<String>,

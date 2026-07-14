@@ -107,7 +107,7 @@ jobs:
           fi
 
           pending=()
-          for required in "Detect Rust changes" "Frontend quality" "Windows Release build"; do
+          for required in "Frontend quality" "Windows cross-build"; do
             result="$(jq -r --arg name "$required" \
               '[.[] | select(.name == $name)] | last |
                if . == null then "" else [.status, .conclusion] | @tsv end' \
@@ -123,12 +123,7 @@ jobs:
               pending+=("$required ($status)")
               continue
             fi
-            if [ "$required" = "Windows Release build" ]; then
-              if [ "$conclusion" != "SUCCESS" ] &&
-                 [ "$conclusion" != "SKIPPED" ]; then
-                pending+=("$required ($conclusion)")
-              fi
-            elif [ "$conclusion" != "SUCCESS" ]; then
+            if [ "$conclusion" != "SUCCESS" ]; then
               pending+=("$required ($conclusion)")
             fi
           done
@@ -140,6 +135,5 @@ jobs:
 
           echo "CI passed for $pr_head_sha; merging promotion PR #$pr as a merge commit."
           # --merge forces a merge commit even though the repo defaults to
-          # squash. The explicit CI gate above also waits for the optional
-          # Windows build when backend files changed.
+          # squash. The explicit CI gate above waits for both hosted jobs.
           gh pr merge "$pr" --repo "$REPO" --merge
