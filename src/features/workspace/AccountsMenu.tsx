@@ -1,6 +1,7 @@
 import { useMemo, useRef, useState } from 'react'
 import type { KeyboardEvent as ReactKeyboardEvent } from 'react'
 import type { ProviderAccount, ProviderDescriptor, ProviderKey } from '../../domain/models'
+import { formatAuthState } from '../accounts/formatAuthState'
 
 type AccountMenuAction = 'edit' | 'clone' | 'delete'
 type AccountActionKey = AccountMenuAction
@@ -170,12 +171,16 @@ export function AccountsMenu({
         }
         break
       }
-      case 'ArrowRight':
-      case 'Enter':
-      case ' ': {
+      case 'ArrowRight': {
         event.preventDefault()
         setAccountHover(accountId, event.currentTarget.offsetTop)
         requestAnimationFrame(() => focusAccountAction('edit'))
+        break
+      }
+      case 'Enter':
+      case ' ': {
+        event.preventDefault()
+        onAccountAction(accountId, 'edit')
         break
       }
       default:
@@ -266,7 +271,7 @@ export function AccountsMenu({
                     : 'accounts-menu-entry'
                 }
                 key={account.id}
-                onClick={(event) => setAccountHover(account.id, event.currentTarget.offsetTop)}
+                onClick={() => onAccountAction(account.id, 'edit')}
                 onKeyDown={(event) => handleAccountKeyDown(event, account.id, index)}
                 onMouseEnter={(event) => setAccountHover(account.id, event.currentTarget.offsetTop)}
                 ref={(element) => {
@@ -275,7 +280,7 @@ export function AccountsMenu({
                 type="button"
               >
                 <strong>{account.displayName}</strong>
-                <span>{account.authState}</span>
+                <span>{formatAuthState(account.authState)}</span>
                 <em aria-hidden="true">▶</em>
               </button>
             ))}

@@ -4,6 +4,8 @@ import {
 } from '../../bridge/desktop'
 import type { AccountsWindowIntent, ProviderKey } from '../../domain/models'
 import { useAppStore } from '../../state/appStore'
+import { WindowShell } from '../brand/WindowShell'
+import { WindowTitlebar } from '../brand/WindowTitlebar'
 import { AccountsPage } from './AccountsPage'
 
 const PROVIDERS: ProviderKey[] = ['instagram', 'tiktok', 'twitter']
@@ -33,6 +35,9 @@ interface AccountsWindowPageProps {
 
 export function AccountsWindowPage({ initialIntent }: AccountsWindowPageProps) {
   const bootstrap = useAppStore((state) => state.bootstrap)
+  const loading = useAppStore((state) => state.loading)
+  const snapshot = useAppStore((state) => state.snapshot)
+  const error = useAppStore((state) => state.error)
   const [activeIntent, setActiveIntent] = useState<AccountsWindowIntent>(() => normalizeIntent(initialIntent))
   const [intentRevision, setIntentRevision] = useState(0)
   const [isDirty, setIsDirty] = useState(false)
@@ -61,6 +66,7 @@ export function AccountsWindowPage({ initialIntent }: AccountsWindowPageProps) {
         return
       }
 
+      setIsDirty(false)
       setActiveIntent(nextIntent)
       setIntentRevision((current) => current + 1)
     })
@@ -80,8 +86,42 @@ export function AccountsWindowPage({ initialIntent }: AccountsWindowPageProps) {
     }
   }, [isDirty, signature])
 
+  const titlebarTrailing = isDirty ? (
+    <span className="window-titlebar-status-meta source-editor-titlebar-dirty">Unsaved changes</span>
+  ) : null
+
+  if (loading) {
+    return (
+      <WindowShell
+        className="accounts-window-shell"
+        contentClassName="accounts-window-content"
+        titlebar={<WindowTitlebar title="Accounts editor" />}
+      >
+        <div className="loading-shell source-editor-loading">Loading accounts…</div>
+      </WindowShell>
+    )
+  }
+
+  if (!snapshot) {
+    return (
+      <WindowShell
+        className="accounts-window-shell"
+        contentClassName="accounts-window-content"
+        titlebar={<WindowTitlebar title="Accounts editor" />}
+      >
+        <div className="loading-shell source-editor-loading" role="alert">
+          Failed to load workspace: {error ?? 'missing snapshot'}
+        </div>
+      </WindowShell>
+    )
+  }
+
   return (
-    <div className="accounts-window-shell">
+    <WindowShell
+      className="accounts-window-shell"
+      contentClassName="accounts-window-content"
+      titlebar={<WindowTitlebar title="Accounts editor" trailing={titlebarTrailing} />}
+    >
       <AccountsPage
         key={`${intentRevision}:${signature}`}
         initialAccountId={activeIntent.initialAccountId}
@@ -89,6 +129,6 @@ export function AccountsWindowPage({ initialIntent }: AccountsWindowPageProps) {
         initialProvider={activeIntent.initialProvider}
         onDirtyChange={setIsDirty}
       />
-    </div>
+    </WindowShell>
   )
 }
