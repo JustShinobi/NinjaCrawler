@@ -1,0 +1,78 @@
+name: cancel-closed-pr-ci
+
+on:
+  pull_request_target:
+    types:
+      - closed
+
+permissions:
+  actions: write
+  pull-requests: read
+
+concurrency:
+  group: cancel-closed-pr-ci-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  cancel:
+    name: Cancel active CI runs
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Cancel unfinished runs for the closed pull request
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          HEAD_BRANCH: ${{ github.event.pull_request.head.ref }}
+          HEAD_OWNER: ${{ github.event.pull_request.head.repo.owner.login }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+
+          other_open_prs="$(
+            gh api --method GET "repos/$REPOSITORY/pulls" \
+              -f state=open \
+              -f head="$HEAD_OWNER:$HEAD_BRANCH" \
+              -f per_page=100 \
+              --jq "[.[] | select(.number != $PR_NUMBER)] | length"
+          )"
+          if [ "$other_open_prs" -ne 0 ]; then
+            echo "The head branch still belongs to another open pull request; leaving its CI runs active."
+            exit 0
+          fi
+
+          mapfile -t run_ids < <(
+            gh api --paginate --method GET \
+              "repos/$REPOSITORY/actions/workflows/ci.yml/runs" \
+              -f event=pull_request \
+              -f branch="$HEAD_BRANCH" \
+              -f head_sha="$HEAD_SHA" \
+              -f per_page=100 \
+              --jq ".workflow_runs[] |
+                select(.status != \"completed\") |
+                .id"
+          )
+
+          if [ "${#run_ids[@]}" -eq 0 ]; then
+            echo "No unfinished CI runs found for PR #$PR_NUMBER at $HEAD_SHA."
+            exit 0
+          fi
+
+          for run_id in "${run_ids[@]}"; do
+            echo "Cancelling CI run $run_id for PR #$PR_NUMBER."
+            if gh api --method POST "repos/$REPOSITORY/actions/runs/$run_id/cancel"; then
+              continue
+            fi
+
+            status="$(gh api "repos/$REPOSITORY/actions/runs/$run_id" --jq .status)"
+            if [ "$status" = "completed" ]; then
+              echo "CI run $run_id completed before cancellation was accepted."
+              continue
+            fi
+
+            echo "Could not cancel CI run $run_id; current status is $status." >&2
+            exit 1
+          done

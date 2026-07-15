@@ -9,7 +9,6 @@ on:
       - opened
       - synchronize
       - reopened
-      - closed
   workflow_dispatch:
 
 permissions:
@@ -24,7 +23,6 @@ concurrency:
 jobs:
   changes:
     name: Detect Windows build impact
-    if: ${{ github.event.action != 'closed' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
@@ -189,7 +187,7 @@ jobs:
 
   quality_check:
     name: Frontend quality
-    if: ${{ github.event.action != 'closed' && always() }}
+    if: ${{ always() }}
     needs: [changes, quality_execution]
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -334,7 +332,7 @@ jobs:
 
   windows-check:
     name: Windows cross-build
-    if: ${{ github.event.action != 'closed' && always() }}
+    if: ${{ always() }}
     needs: [changes, windows-build]
     runs-on: ubuntu-latest
     timeout-minutes: 5
