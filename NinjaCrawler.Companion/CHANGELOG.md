@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.16.0](https://github.com/MetalDevOps/NinjaCrawler/compare/companion-v0.15.1...companion-v0.16.0) (2026-07-15)
+
+
+### Features
+
+* **workspace:** establish brand visual system and custom window shell ([#193](https://github.com/MetalDevOps/NinjaCrawler/issues/193)) ([1d91f7f](https://github.com/MetalDevOps/NinjaCrawler/commit/1d91f7feaea5090a1d22779f5b75a7eb85a8723a))
+
+
+### Bug Fixes
+
+* **release:** prevent empty promotion pull requests ([#141](https://github.com/MetalDevOps/NinjaCrawler/issues/141)) ([f23e662](https://github.com/MetalDevOps/NinjaCrawler/commit/f23e662b1fbd5728f4ec9972d5e54fb34c2e8d92))
+
 ## [0.15.1](https://github.com/MetalDevOps/NinjaCrawler/compare/companion-v0.15.0...companion-v0.15.1) (2026-07-13)
 
 
