@@ -14,62 +14,46 @@ on:
         description: Commit SHA to build. Used when the tag does not exist yet (draft release).
         required: false
         type: string
+      artifact_run_id:
+        description: Optional prior Release run whose verified artifact should be reused
+        required: false
+        type: string
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   group: release-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
   cancel-in-progress: false
 
 jobs:
-  build:
-    name: Build Windows release assets
-    runs-on: [self-hosted, proxmox-lxc, crossbuild, mode-ephemeral]
-    timeout-minutes: 60
+  prepare:
+    name: Resolve Windows release inputs
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: read
-    env:
-      WINDOWS_TARGET: x86_64-pc-windows-msvc
-      CARGO_TARGET_DIR: /cache/target/ninjacrawler-release
+      actions: read
     outputs:
       tag: ${{ steps.version.outputs.tag }}
       version: ${{ steps.version.outputs.version }}
       sha: ${{ steps.version.outputs.sha }}
+      artifact: ${{ steps.artifact.outputs.name }}
+      artifact_run_id: ${{ steps.artifact.outputs.run_id }}
+      reuse_artifact: ${{ steps.artifact.outputs.reuse }}
     defaults:
       run:
         working-directory: .release-source
 
     steps:
-      - name: Check out trusted release tooling
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-        with:
-          fetch-depth: 1
-          ref: ${{ github.sha }}
-          path: .release-tooling
-          persist-credentials: false
-
       - name: Check out release commit
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 0
-          # Prefer the commit SHA (the tag may not exist yet for a draft release),
-          # then the dispatch tag, then the pushed ref.
           ref: ${{ inputs.sha || inputs.tag || github.ref }}
           path: .release-source
           persist-credentials: false
-
-      - name: Overlay trusted release tooling
-        shell: bash
-        run: |
-          set -euo pipefail
-          for script in \
-            Build-NinjaCrawler.ps1 \
-            New-NinjaCrawlerChangelog.ps1 \
-            Package-NinjaCrawlerRelease.ps1; do
-            cp "../.release-tooling/Tools/$script" "Tools/$script"
-            sha256sum "Tools/$script"
-          done
 
       - name: Validate release version
         id: version
@@ -82,8 +66,8 @@ jobs:
           }
 
           $version = $Matches.version
-          # Keep this validation self-contained. Recovery checks out the historical
-          # release SHA, which may predate helper scripts in the current workflow.
+          # Keep this validation self-contained. Recovery may inspect a historical
+          # release SHA that predates helper scripts in the current workflow.
           $packageVersion = (Get-Content package.json -Raw | ConvertFrom-Json).version
           $tauriVersion = (Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
           $cargoVersion = (
@@ -114,8 +98,146 @@ jobs:
 
           "tag=$env:RELEASE_TAG" >> $env:GITHUB_OUTPUT
           "version=$version" >> $env:GITHUB_OUTPUT
-          $releaseSha = (git rev-parse HEAD).Trim()
-          "sha=$releaseSha" >> $env:GITHUB_OUTPUT
+          "sha=$((git rev-parse HEAD).Trim())" >> $env:GITHUB_OUTPUT
+
+      - name: Resolve reusable build artifact
+        id: artifact
+        shell: bash
+        working-directory: .
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+          RELEASE_SHA: ${{ steps.version.outputs.sha }}
+          REQUESTED_RUN_ID: ${{ inputs.artifact_run_id }}
+        run: |
+          set -euo pipefail
+          name="NinjaCrawler-$VERSION-windows-x64-$RELEASE_SHA"
+          run_id=""
+
+          if [ -n "$REQUESTED_RUN_ID" ]; then
+            if ! [[ "$REQUESTED_RUN_ID" =~ ^[0-9]+$ ]]; then
+              echo "artifact_run_id must be a numeric Actions run ID." >&2
+              exit 1
+            fi
+            count="$(gh api "repos/${{ github.repository }}/actions/runs/$REQUESTED_RUN_ID/artifacts" \
+              --jq "[.artifacts[] | select(.name == \"$name\" and .expired == false)] | length")"
+            if [ "$count" != "1" ]; then
+              echo "Run $REQUESTED_RUN_ID does not contain one reusable artifact named $name." >&2
+              exit 1
+            fi
+            run_id="$REQUESTED_RUN_ID"
+          else
+            run_id="$(gh api "repos/${{ github.repository }}/actions/artifacts?name=$name&per_page=100" \
+              --jq '[.artifacts[] | select(.expired == false)] | sort_by(.created_at) | reverse | .[0].workflow_run.id // empty')"
+          fi
+
+          reuse=false
+          if [ -n "$run_id" ]; then
+            candidate="$RUNNER_TEMP/release-artifact-candidate"
+            rm -rf "$candidate"
+            mkdir -p "$candidate"
+            valid=true
+            run_json="$(gh api "repos/${{ github.repository }}/actions/runs/$run_id")"
+            workflow_path="$(jq -r '.path' <<< "$run_json")"
+            run_event="$(jq -r '.event' <<< "$run_json")"
+            run_repository="$(jq -r '.repository.full_name' <<< "$run_json")"
+            tooling_sha="$(jq -r '.head_sha' <<< "$run_json")"
+            if [ "$workflow_path" != '.github/workflows/release.yml' ] ||
+               [[ ! "$run_event" =~ ^(workflow_dispatch|push)$ ]] ||
+               [ "$run_repository" != '${{ github.repository }}' ] ||
+               [[ ! "$tooling_sha" =~ ^[0-9a-f]{40}$ ]]; then
+              valid=false
+            fi
+            gh run download "$run_id" --repo "${{ github.repository }}" \
+              --name "$name" --dir "$candidate" || valid=false
+            jq -e --arg version "$VERSION" --arg sha "$RELEASE_SHA" --arg tooling "$tooling_sha" \
+              '.schemaVersion == 1 and .version == $version and .releaseSha == $sha and .toolingSha == $tooling' \
+              "$candidate/BUILD-PROVENANCE.json" >/dev/null || valid=false
+            (cd "$candidate" && sha256sum --check SHA256SUMS.txt) || valid=false
+
+            expected="$(printf '%s\n' \
+              BUILD-PROVENANCE.json \
+              CHANGELOG.md \
+              "NinjaCrawler-$VERSION-windows-x64-portable.exe" \
+              "NinjaCrawler-$VERSION-windows-x64-setup.exe" \
+              SHA256SUMS.txt | sort)"
+            actual="$(find "$candidate" -maxdepth 1 -type f -printf '%f\n' | sort)"
+            if [ "$actual" != "$expected" ]; then
+              valid=false
+            fi
+
+            if [ "$valid" = true ]; then
+              reuse=true
+              echo "Reusing verified build candidate from Release run $run_id."
+            elif [ -n "$REQUESTED_RUN_ID" ]; then
+              echo "The explicitly requested artifact from run $run_id failed validation." >&2
+              exit 1
+            else
+              echo "Ignoring invalid reusable artifact from run $run_id; a new JIT build is required." >&2
+              run_id=""
+            fi
+          fi
+
+          if [ -z "$run_id" ]; then
+            run_id="${{ github.run_id }}"
+            echo "No reusable build candidate found; a new JIT build is required."
+          fi
+
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+          echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
+          echo "reuse=$reuse" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build Windows release assets
+    needs: prepare
+    if: ${{ needs.prepare.outputs.reuse_artifact != 'true' }}
+    runs-on: [self-hosted, proxmox-lxc, crossbuild, mode-ephemeral]
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    env:
+      WINDOWS_TARGET: x86_64-pc-windows-msvc
+      CARGO_TARGET_DIR: /cache/target/ninjacrawler-release
+    defaults:
+      run:
+        working-directory: .release-source
+
+    steps:
+      - name: Check out trusted release tooling
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 1
+          ref: ${{ github.sha }}
+          path: .release-tooling
+          persist-credentials: false
+
+      - name: Check out release commit
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+          ref: ${{ needs.prepare.outputs.sha }}
+          path: .release-source
+          persist-credentials: false
+
+      - name: Overlay trusted release tooling
+        shell: bash
+        run: |
+          set -euo pipefail
+          for script in \
+            Build-NinjaCrawler.ps1 \
+            New-NinjaCrawlerChangelog.ps1 \
+            Package-NinjaCrawlerRelease.ps1; do
+            cp "../.release-tooling/Tools/$script" "Tools/$script"
+            sha256sum "Tools/$script"
+          done
+
+      - name: Verify release checkout
+        shell: bash
+        env:
+          RELEASE_SHA: ${{ needs.prepare.outputs.sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$RELEASE_SHA"
 
       - name: Verify self-hosted golden toolchain
         shell: bash
@@ -148,6 +270,18 @@ jobs:
           pkg-config --modversion ayatana-appindicator3-0.1
           dpkg-query --show --showformat='${Version}\n' libayatana-appindicator3-dev
 
+      - name: Configure shared compiler cache
+        shell: bash
+        run: |
+          set -euo pipefail
+          if command -v sccache >/dev/null; then
+            echo "RUSTC_WRAPPER=$(command -v sccache)" >> "$GITHUB_ENV"
+            echo 'SCCACHE_DIR=/cache/sccache/ninjacrawler' >> "$GITHUB_ENV"
+            sccache --show-stats
+          else
+            echo '::notice::sccache is not installed in the golden image; using the release Cargo target cache.'
+          fi
+
       - name: Install dependencies
         run: npm ci
 
@@ -155,8 +289,8 @@ jobs:
         shell: pwsh
         env:
           NINJACRAWLER_RELEASE_BUILD: "true"
-          NINJACRAWLER_RELEASE_VERSION: ${{ steps.version.outputs.version }}
-          NINJACRAWLER_BUILD_SHA: ${{ steps.version.outputs.sha }}
+          NINJACRAWLER_RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+          NINJACRAWLER_BUILD_SHA: ${{ needs.prepare.outputs.sha }}
         run: >
           pwsh -File Tools/Build-NinjaCrawler.ps1
           -Configuration Release
@@ -169,12 +303,12 @@ jobs:
           # when the release is published in the last step), so passing the tag
           # as the ref made `git rev-parse` fail and stalled the release as a
           # draft. The SHA is always present (it is the checked-out commit).
-          RELEASE_SHA: ${{ steps.version.outputs.sha }}
+          RELEASE_SHA: ${{ needs.prepare.outputs.sha }}
         run: |
           pwsh -File Tools/New-NinjaCrawlerChangelog.ps1 `
-            -Version "${{ steps.version.outputs.version }}" `
+            -Version "${{ needs.prepare.outputs.version }}" `
             -CurrentRef "$env:RELEASE_SHA" `
-            -CurrentTag "${{ steps.version.outputs.tag }}" `
+            -CurrentTag "${{ needs.prepare.outputs.tag }}" `
             -Repository "${{ github.repository }}" `
             -OutputPath "artifacts/CHANGELOG.md"
 
@@ -182,49 +316,102 @@ jobs:
         shell: pwsh
         run: >
           pwsh -File Tools/Package-NinjaCrawlerRelease.ps1
-          -Version ${{ steps.version.outputs.version }}
+          -Version ${{ needs.prepare.outputs.version }}
           -TargetTriple x86_64-pc-windows-msvc
           -ChangelogPath artifacts/CHANGELOG.md
           -SkipCompanion
 
+      - name: Record build provenance
+        shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+          RELEASE_SHA: ${{ needs.prepare.outputs.sha }}
+          TOOLING_SHA: ${{ github.sha }}
+        run: |
+          [ordered]@{
+            schemaVersion = 1
+            version = $env:RELEASE_VERSION
+            releaseSha = $env:RELEASE_SHA
+            toolingSha = $env:TOOLING_SHA
+          } | ConvertTo-Json | Set-Content release/BUILD-PROVENANCE.json -NoNewline
+
       - name: Upload release build artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: NinjaCrawler-${{ steps.version.outputs.version }}-windows-x64
+          name: ${{ needs.prepare.outputs.artifact }}
           path: .release-source/release/*
           if-no-files-found: error
           retention-days: 30
 
   publish:
     name: Publish Windows release
-    needs: build
+    needs: [prepare, build]
+    if: >-
+      ${{
+        always() &&
+        needs.prepare.result == 'success' &&
+        (needs.build.result == 'success' ||
+         (needs.build.result == 'skipped' && needs.prepare.outputs.reuse_artifact == 'true'))
+      }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
       contents: write
+      actions: read
 
     steps:
       - name: Check out trusted release commit
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 0
-          ref: ${{ needs.build.outputs.sha }}
+          ref: ${{ needs.prepare.outputs.sha }}
           persist-credentials: false
 
       - name: Download verified build artifact
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: NinjaCrawler-${{ needs.build.outputs.version }}-windows-x64
+          name: ${{ needs.prepare.outputs.artifact }}
           path: release
+          github-token: ${{ github.token }}
+          run-id: ${{ needs.prepare.outputs.artifact_run_id }}
+
+      - name: Verify build provenance and checksums
+        shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+          RELEASE_SHA: ${{ needs.prepare.outputs.sha }}
+        run: |
+          $provenancePath = 'release/BUILD-PROVENANCE.json'
+          if (-not (Test-Path -LiteralPath $provenancePath)) {
+            throw 'The downloaded build artifact has no provenance record.'
+          }
+          $provenance = Get-Content -LiteralPath $provenancePath -Raw | ConvertFrom-Json
+          if ($provenance.schemaVersion -ne 1 -or
+              $provenance.version -ne $env:RELEASE_VERSION -or
+              $provenance.releaseSha -ne $env:RELEASE_SHA -or
+              $provenance.toolingSha -notmatch '^[0-9a-f]{40}$') {
+            throw 'The downloaded build artifact does not match the requested release identity.'
+          }
+
+          Push-Location release
+          try {
+            & sha256sum --check SHA256SUMS.txt
+            if ($LASTEXITCODE -ne 0) {
+              throw 'Release artifact checksum validation failed.'
+            }
+          } finally {
+            Pop-Location
+          }
+          Remove-Item -LiteralPath $provenancePath
 
       - name: Publish GitHub Release
         id: publish_release
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ needs.build.outputs.tag }}
-          RELEASE_VERSION: ${{ needs.build.outputs.version }}
-          RELEASE_SHA: ${{ needs.build.outputs.sha }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+          RELEASE_SHA: ${{ needs.prepare.outputs.sha }}
         run: |
           $assets = @(Get-ChildItem release -File | ForEach-Object FullName)
           if ($assets.Count -eq 0) {
@@ -271,8 +458,8 @@ jobs:
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
-          RELEASE_TAG: ${{ needs.build.outputs.tag }}
-          RELEASE_VERSION: ${{ needs.build.outputs.version }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
         run: |
           $branch = "automation/readme-release-$env:RELEASE_TAG"
           git fetch origin main
@@ -411,4 +598,4 @@ jobs:
           gh workflow run release-back-sync.yml `
             --repo ${{ github.repository }} `
             --ref main `
-            -f tag=${{ needs.build.outputs.tag }}
+            -f tag=${{ needs.prepare.outputs.tag }}

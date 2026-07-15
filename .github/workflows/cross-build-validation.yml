@@ -69,6 +69,18 @@ jobs:
           pkg-config --modversion ayatana-appindicator3-0.1
           dpkg-query --show --showformat='${Version}\n' libayatana-appindicator3-dev
 
+      - name: Configure shared compiler cache
+        shell: bash
+        run: |
+          set -euo pipefail
+          if command -v sccache >/dev/null; then
+            echo "RUSTC_WRAPPER=$(command -v sccache)" >> "$GITHUB_ENV"
+            echo 'SCCACHE_DIR=/cache/sccache/ninjacrawler' >> "$GITHUB_ENV"
+            sccache --show-stats
+          else
+            echo '::notice::sccache is not installed in the golden image; using the E2E Cargo target cache.'
+          fi
+
       - name: Install dependencies
         run: npm ci
 
