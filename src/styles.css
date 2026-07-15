@@ -8034,10 +8034,12 @@ p {
 
 .source-editor-note-field textarea {
   min-height: 4.5rem;
-  max-height: 10rem;
+  max-height: none;
   height: auto;
-  resize: vertical;
+  resize: none;
+  overflow-y: hidden;
   line-height: 1.4;
+  box-sizing: border-box;
 }
 
 .source-editor-color-field {

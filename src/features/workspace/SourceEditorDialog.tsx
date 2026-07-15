@@ -1,4 +1,13 @@
-import { useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent as ReactKeyboardEvent } from 'react'
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type FormEvent,
+  type KeyboardEvent as ReactKeyboardEvent,
+} from 'react'
 import { emitFocusSourceRequest, upsertSchedulerGroup } from '../../bridge/desktop'
 import { createSourceSyncOptions, resolveInstagramSourceSyncOptions, resolveTikTokSourceSyncOptions, resolveTwitterSourceSyncOptions } from '../../domain/sourceSyncOptions'
 import type {
@@ -65,7 +74,36 @@ export function SourceEditorDialog({
   // recuperar perfis renomeados quando a resolução automática não for possível.
   const [handleUnlocked, setHandleUnlocked] = useState(false)
   const appliedDefaultsAccountId = useRef<string | undefined>(undefined)
+  const profileNoteRef = useRef<HTMLTextAreaElement>(null)
   const isEditMode = Boolean(source)
+
+  // Profile note grows with content and caps only at remaining tab/window space.
+  const fitProfileNoteHeight = useCallback(() => {
+    const el = profileNoteRef.current
+    if (!el || activeTab !== 'profile') {
+      return
+    }
+
+    const minHeight = 72
+    el.style.height = '0px'
+    el.style.overflowY = 'hidden'
+    const contentHeight = el.scrollHeight
+
+    const panel = el.closest('.source-editor-tab-panel-profile') as HTMLElement | null
+    let maxHeight = Math.max(minHeight, Math.floor(window.innerHeight * 0.55))
+    if (panel) {
+      const panelRect = panel.getBoundingClientRect()
+      const styles = window.getComputedStyle(panel)
+      const padBottom = Number.parseFloat(styles.paddingBottom) || 0
+      // Measure from textarea top so the field can use leftover panel space.
+      const top = el.getBoundingClientRect().top
+      maxHeight = Math.max(minHeight, Math.floor(panelRect.bottom - top - padBottom - 8))
+    }
+
+    const nextHeight = Math.min(Math.max(contentHeight, minHeight), maxHeight)
+    el.style.height = `${nextHeight}px`
+    el.style.overflowY = contentHeight > maxHeight ? 'auto' : 'hidden'
+  }, [activeTab])
 
   const availableAccounts = useMemo(
     () => snapshot.accounts.filter((account) => account.provider === draft.provider),
@@ -88,6 +126,31 @@ export function SourceEditorDialog({
     () => resolveInstagramSourceSyncOptions(draft.provider, draft.syncOptions),
     [draft.provider, draft.syncOptions],
   )
+
+  useLayoutEffect(() => {
+    fitProfileNoteHeight()
+  }, [fitProfileNoteHeight, instagramSyncOptions?.description, activeTab])
+
+  useEffect(() => {
+    if (activeTab !== 'profile') {
+      return undefined
+    }
+
+    const onResize = () => fitProfileNoteHeight()
+    window.addEventListener('resize', onResize)
+    const panel = profileNoteRef.current?.closest('.source-editor-tab-panel-profile') ?? null
+    const Observer = typeof ResizeObserver === 'undefined' ? undefined : ResizeObserver
+    const observer = panel && Observer ? new Observer(onResize) : undefined
+    if (panel && observer) {
+      observer.observe(panel)
+    }
+
+    return () => {
+      window.removeEventListener('resize', onResize)
+      observer?.disconnect()
+    }
+  }, [activeTab, fitProfileNoteHeight])
+
   const labelsSuggestionListId = useMemo(
     () => `source-editor-label-suggestions-${source?.id ?? 'new'}`,
     [source?.id],
@@ -693,7 +756,13 @@ export function SourceEditorDialog({
                 <label className="field source-editor-note-field">
                   <span>Profile note</span>
                   <textarea
-                    onChange={(event) => updateInstagramSyncOptions((current) => ({ ...current, description: event.target.value }))}
+                    ref={profileNoteRef}
+                    onChange={(event) => {
+                      updateInstagramSyncOptions((current) => ({ ...current, description: event.target.value }))
+                      // Grow immediately before React re-renders description into effect.
+                      requestAnimationFrame(() => fitProfileNoteHeight())
+                    }}
+                    onInput={() => fitProfileNoteHeight()}
                     placeholder="Optional profile note"
                     rows={3}
                     value={instagramSyncOptions.description ?? ''}
