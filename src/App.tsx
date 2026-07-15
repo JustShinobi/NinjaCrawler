@@ -44,9 +44,11 @@ import type {
 } from './domain/models'
 import { SettingsPage } from './features/settings/SettingsPage'
 import { ConnectorPreparationScreen } from './features/connectors/ConnectorPreparationScreen'
+import { MainTitlebar } from './features/brand/MainTitlebar'
 import { connectorsNeedPreparation } from './features/connectors/connectorPreparation'
 import { SourceDeleteConfirmDialog } from './features/sources/SourceDeleteConfirmDialog'
 import { AccountsMenu } from './features/workspace/AccountsMenu'
+import { AboutPanel } from './features/workspace/AboutPanel'
 import { InternalDialog } from './features/workspace/InternalDialog'
 import { ProfileWorkspace, type SourceSelectionOptions } from './features/workspace/ProfileWorkspace'
 import { RuntimeLogWindowPage } from './features/workspace/RuntimeLogWindowPage'
@@ -418,10 +420,6 @@ function App() {
     () => (selectedSourceId ? sourcesById.get(selectedSourceId) : undefined),
     [selectedSourceId, sourcesById],
   )
-  const selectedSources = useMemo(
-    () => selectedSourceIds.map((id) => sourcesById.get(id)).filter((source): source is NonNullable<typeof source> => Boolean(source)),
-    [selectedSourceIds, sourcesById],
-  )
   const contextMenuSource = useMemo(
     () => (profileContextMenu ? sourcesById.get(profileContextMenu.sourceId) : undefined),
     [profileContextMenu, sourcesById],
@@ -461,11 +459,6 @@ function App() {
     () => contextMenuSelectionIds.some((sourceId) => deletingSourceIds.has(sourceId)),
     [contextMenuSelectionIds, deletingSourceIds],
   )
-  const selectedDeletingCount = useMemo(
-    () => selectedSourceIds.filter((sourceId) => deletingSourceIds.has(sourceId)).length,
-    [deletingSourceIds, selectedSourceIds],
-  )
-  const selectedDeleteBlocked = selectedDeletingCount > 0
   const contextMenuSourceUrl = useMemo(
     () => (contextMenuSource ? buildSourceProfileUrl(contextMenuSource) : undefined),
     [contextMenuSource],
@@ -688,7 +681,6 @@ function App() {
   const instagramAccounts = workspaceSnapshot.accounts.filter((account) => account.provider === 'instagram')
 
   const openSection = activeSection === 'settings' ? 'settings' : undefined
-  const selectedCount = selectedSources.length
   const combinedQueueCounts = combineQueueCounts(queueStatus, deleteQueueStatus)
   const workspaceInfo = `${filteredSources.length}/${workspaceSnapshot.sources.length} profiles`
   const queueFinishedCount = combinedQueueCounts.completedCount + combinedQueueCounts.failedCount
@@ -714,13 +706,7 @@ function App() {
   const fileMenuItems: MenuItem[] = [
     { label: 'Import', onSelect: () => void handleOpenImportWindow() },
     { label: 'Add profile', onSelect: () => void openAddDialog() },
-    { label: 'Edit selected', disabled: selectedCount !== 1 || selectedDeleteBlocked, onSelect: () => void openEditDialog() },
     { label: 'Refresh workspace', onSelect: () => void handleRefreshWorkspace() },
-  ]
-  const downloadMenuItems: MenuItem[] = [
-    { label: 'Run selected sync', disabled: selectedCount === 0 || selectedDeleteBlocked, onSelect: () => void handleRunSelectedSync() },
-    { label: 'Run preset 1 (Ctrl/Cmd+1)', disabled: selectedCount === 0 || selectedDeleteBlocked, onSelect: () => void handleRunPresetSync('preset1') },
-    { label: 'Run preset 2 (Ctrl/Cmd+2)', disabled: selectedCount === 0 || selectedDeleteBlocked, onSelect: () => void handleRunPresetSync('preset2') },
   ]
   const toolsMenuItems: MenuItem[] = [
     { label: 'Scheduler', onSelect: () => void handleOpenSchedulerConsole() },
@@ -1456,103 +1442,83 @@ function App() {
 
   return (
     <div className="app-shell">
-      <header className="menu-bar" data-menu-root>
-        <div className="menu-bar-group">
-          <MenuButton items={fileMenuItems} label="File" openMenu={openMenu} setOpenMenu={setOpenMenu} />
-          <div className="menu-root">
-            <button
-              className={openMenu === 'Accounts' ? 'menu-button menu-button-open' : 'menu-button'}
-              onClick={() => setOpenMenu(openMenu === 'Accounts' ? null : 'Accounts')}
-              type="button"
-            >
-              Accounts
-            </button>
-            {openMenu === 'Accounts' ? (
-              <AccountsMenu
-                accounts={workspaceSnapshot.accounts}
-                onAccountAction={(accountId, action) => void handleAccountsMenuAccountAction(accountId, action)}
-                onCreateAccount={(provider) => handleAccountsMenuCreateAccount(provider)}
-                onOpenSettings={(provider, accountId) => handleAccountsMenuOpenSettings(provider, accountId)}
-                providerCatalog={workspaceSnapshot.providerCatalog}
-              />
-            ) : null}
-          </div>
-          <MenuButton items={downloadMenuItems} label="Download" openMenu={openMenu} setOpenMenu={setOpenMenu} />
-          <MenuButton items={toolsMenuItems} label="Tools" openMenu={openMenu} setOpenMenu={setOpenMenu} />
-          <MenuButton items={helpMenuItems} label="Help" openMenu={openMenu} setOpenMenu={setOpenMenu} />
-        </div>
-        <div className="menu-bar-title">NinjaCrawler</div>
-      </header>
-
-      <section className="toolbar-strip">
-        <div className="toolbar-group">
-          <button className="toolbar-button toolbar-button-primary" onClick={() => void openAddDialog()} type="button">
-            + Add
+      <MainTitlebar>
+        <MenuButton items={fileMenuItems} label="File" openMenu={openMenu} setOpenMenu={setOpenMenu} />
+        <div className="menu-root">
+          <button
+            className={openMenu === 'Accounts' ? 'menu-button menu-button-open' : 'menu-button'}
+            onClick={() => setOpenMenu(openMenu === 'Accounts' ? null : 'Accounts')}
+            type="button"
+          >
+            Accounts
           </button>
-          <div aria-hidden="true" className="toolbar-separator" />
-          <button className="toolbar-button" disabled={selectedCount !== 1 || selectedDeleteBlocked} onClick={() => void openEditDialog()} type="button">
-            Edit
-          </button>
-          <button className="toolbar-button" onClick={() => void handleRefreshWorkspace()} type="button">
-            Refresh
-          </button>
-          <div aria-hidden="true" className="toolbar-separator" />
-          <button className="toolbar-button" disabled={selectedCount === 0 || selectedDeleteBlocked} onClick={() => void handleRunSelectedSync()} type="button">
-            Download
-          </button>
-          <button className="toolbar-button" disabled={selectedCount === 0 || selectedDeleteBlocked} onClick={() => void handleRunPresetSync('preset1')} type="button">
-            P1
-          </button>
-          <button className="toolbar-button" disabled={selectedCount === 0 || selectedDeleteBlocked} onClick={() => void handleRunPresetSync('preset2')} type="button">
-            P2
-          </button>
-          <div aria-hidden="true" className="toolbar-separator" />
-          <button className="toolbar-button" onClick={() => void handleOpenQueueStatus()} type="button">
-            Queue
-          </button>
-          <button className="toolbar-button" onClick={() => void handleOpenSchedulerConsole()} type="button">
-            Scheduler
-          </button>
-          <button className="toolbar-button" onClick={() => void handleOpenRuntimeLog()} type="button">
-            Log
-          </button>
-        </div>
-        <div className="toolbar-trailing">
-          <label className="toolbar-search-field">
-            <span>Search</span>
-            <input
-              aria-label="Search current service tab"
-              ref={searchInputRef}
-              onChange={(event) => setSearchText(event.target.value)}
-              placeholder="Search by handle, name or bio"
-              type="search"
-              value={searchText}
+          {openMenu === 'Accounts' ? (
+            <AccountsMenu
+              accounts={workspaceSnapshot.accounts}
+              onAccountAction={(accountId, action) => void handleAccountsMenuAccountAction(accountId, action)}
+              onCreateAccount={(provider) => handleAccountsMenuCreateAccount(provider)}
+              onOpenSettings={(provider, accountId) => handleAccountsMenuOpenSettings(provider, accountId)}
+              providerCatalog={workspaceSnapshot.providerCatalog}
             />
-          </label>
+          ) : null}
         </div>
-      </section>
+        <MenuButton items={toolsMenuItems} label="Tools" openMenu={openMenu} setOpenMenu={setOpenMenu} />
+        <MenuButton items={helpMenuItems} label="Help" openMenu={openMenu} setOpenMenu={setOpenMenu} />
+      </MainTitlebar>
 
       <main className="workspace-main">
-        <ProfileWorkspace
-          deletingSourceIds={Array.from(deletingSourceIds)}
-          onClearSelection={handleClearSelection}
-          onEditSource={handleSourceSavedFromDoubleClick}
-          onReorderGroup={(swap) => void handleReorderGroup(swap)}
-          onSelectSource={handleSelectSource}
-          onServiceTabChange={setServiceTab}
-          onSavePathFilterChange={setSavePathFilter}
-          onVisibleSourceIdsChange={(sourceIds) => {
-            setVisibleSourceIds((current) => (
-              arraysEqual(current ?? [], sourceIds) ? current : sourceIds
-            ))
-          }}
-          onOpenSourceContextMenu={handleOpenSourceContextMenu}
-          searchText={searchText}
-          savePathFilter={savePathFilter}
-          selectedSourceIds={selectedSourceIds}
-          serviceTab={serviceTab}
-          snapshot={snapshot}
-        />
+        <section className="workspace-operational-surface">
+          <section aria-label="Workspace commands" className="toolbar-strip">
+            <div className="toolbar-group">
+              <button className="toolbar-button toolbar-button-primary" onClick={() => void openAddDialog()} type="button">
+                + Add
+              </button>
+              <button className="toolbar-button" onClick={() => void handleRefreshWorkspace()} type="button">
+                Refresh
+              </button>
+            </div>
+            <label className="toolbar-search-field">
+              <span className="visually-hidden">Search profiles</span>
+              <input
+                aria-label="Search current service tab"
+                ref={searchInputRef}
+                onChange={(event) => setSearchText(event.target.value)}
+                placeholder="Search by handle, name or bio"
+                type="search"
+                value={searchText}
+              />
+            </label>
+            <div className="toolbar-utility-group">
+              <button className="toolbar-button" onClick={() => void handleOpenSchedulerConsole()} type="button">
+                Scheduler
+              </button>
+              <button className="toolbar-button" onClick={() => void handleOpenRuntimeLog()} type="button">
+                Log
+              </button>
+            </div>
+          </section>
+
+          <ProfileWorkspace
+            deletingSourceIds={Array.from(deletingSourceIds)}
+            onClearSelection={handleClearSelection}
+            onEditSource={handleSourceSavedFromDoubleClick}
+            onReorderGroup={(swap) => void handleReorderGroup(swap)}
+            onSelectSource={handleSelectSource}
+            onServiceTabChange={setServiceTab}
+            onSavePathFilterChange={setSavePathFilter}
+            onVisibleSourceIdsChange={(sourceIds) => {
+              setVisibleSourceIds((current) => (
+                arraysEqual(current ?? [], sourceIds) ? current : sourceIds
+              ))
+            }}
+            onOpenSourceContextMenu={handleOpenSourceContextMenu}
+            searchText={searchText}
+            savePathFilter={savePathFilter}
+            selectedSourceIds={selectedSourceIds}
+            serviceTab={serviceTab}
+            snapshot={snapshot}
+          />
+        </section>
       </main>
 
       {contextMenuSource && profileContextMenu ? (
@@ -1842,124 +1808,27 @@ function App() {
 
       {aboutOpen ? (
         <InternalDialog
+          closeVariant="icon"
+          headerDensity="compact"
+          height="fit"
           onClose={() => setAboutOpen(false)}
-          subtitle="Build identity, update availability, and local workspace paths."
           title="About NinjaCrawler"
           width="medium"
         >
-          <section className="about-grid">
-            <article className={appUpdateStatus?.updateAvailable ? 'panel panel-accent about-version-panel' : 'panel about-version-panel'}>
-              <div className="panel-header compact-header">
-                <div>
-                  <p className="eyebrow">Application</p>
-                  <h2>Version</h2>
-                </div>
-              </div>
-              <div className="section-stack">
-                <div className="list-row">
-                  <div>
-                    <strong>Current build</strong>
-                    <p>{appBuildInfo?.displayVersion ?? 'Loading build information...'}</p>
-                  </div>
-                </div>
-                {appBuildInfo?.channel === 'development' ? (
-                  <div className="list-row">
-                    <div>
-                      <strong>Build channel</strong>
-                      <p>Development build; release age is not inferred from its commit SHA.</p>
-                    </div>
-                  </div>
-                ) : null}
-                <div className="list-row">
-                  <div>
-                    <strong>Latest stable release</strong>
-                    <p>{appUpdateChecking
-                      ? 'Checking GitHub...'
-                      : appUpdateError
-                        ? appUpdateError
-                        : appUpdateStatus
-                          ? `v${appUpdateStatus.latestVersion}${appUpdateStatus.updateAvailable ? ' is available.' : ' is the latest release.'}`
-                          : 'Not checked yet.'}</p>
-                  </div>
-                </div>
-                <div className="about-version-actions">
-                  <button
-                    className="ghost-button"
-                    disabled={appUpdateChecking}
-                    onClick={() => void runAppUpdateCheck()}
-                    type="button"
-                  >
-                    {appUpdateChecking ? 'Checking...' : 'Check again'}
-                  </button>
-                  {appUpdateStatus?.releaseUrl ? (
-                    <button
-                      className="primary-button"
-                      onClick={() => void openExternalTarget(appUpdateStatus.releaseUrl)}
-                      type="button"
-                    >
-                      View / Download v{appUpdateStatus.latestVersion} on GitHub
-                    </button>
-                  ) : null}
-                </div>
-              </div>
-            </article>
-            <article className="panel panel-accent">
-              <div className="panel-header compact-header">
-                <div>
-                  <p className="eyebrow">Workspace root</p>
-                  <h2>Paths</h2>
-                </div>
-              </div>
-              <div className="section-stack">
-                <div className="list-row">
-                  <div>
-                    <strong>Workspace</strong>
-                    <p>{workspaceSnapshot.workspaceRoot}</p>
-                  </div>
-                </div>
-                <div className="list-row">
-                  <div>
-                    <strong>Database</strong>
-                    <p>{workspaceSnapshot.dbPath}</p>
-                  </div>
-                </div>
-                <div className="list-row">
-                  <div>
-                    <strong>Media root</strong>
-                    <p>{workspaceSnapshot.mediaRoot}</p>
-                  </div>
-                </div>
-              </div>
-            </article>
-            <article className="panel">
-              <div className="panel-header compact-header">
-                <div>
-                  <p className="eyebrow">Runtime</p>
-                  <h2>Environment</h2>
-                </div>
-              </div>
-              <div className="section-stack">
-                <div className="list-row">
-                  <div>
-                    <strong>Profiles</strong>
-                    <p>{workspaceSnapshot.sources.length} registered</p>
-                  </div>
-                </div>
-                <div className="list-row">
-                  <div>
-                    <strong>Accounts</strong>
-                    <p>{workspaceSnapshot.accounts.length} configured</p>
-                  </div>
-                </div>
-                <div className="list-row">
-                  <div>
-                    <strong>Plans</strong>
-                    <p>{workspaceSnapshot.schedulerSets.reduce((count, schedulerSet) => count + schedulerSet.plans.length, 0)} scheduled</p>
-                  </div>
-                </div>
-              </div>
-            </article>
-          </section>
+          <AboutPanel
+            accountCount={workspaceSnapshot.accounts.length}
+            buildInfo={appBuildInfo}
+            databasePath={workspaceSnapshot.dbPath}
+            mediaRoot={workspaceSnapshot.mediaRoot}
+            onCheckUpdate={() => void runAppUpdateCheck()}
+            onOpenRelease={(url) => void openExternalTarget(url)}
+            planCount={workspaceSnapshot.schedulerSets.reduce((count, schedulerSet) => count + schedulerSet.plans.length, 0)}
+            profileCount={workspaceSnapshot.sources.length}
+            updateChecking={appUpdateChecking}
+            updateError={appUpdateError}
+            updateStatus={appUpdateStatus}
+            workspaceRoot={workspaceSnapshot.workspaceRoot}
+          />
         </InternalDialog>
       ) : null}
     </div>

@@ -1,4 +1,4 @@
-import { useEffect, type ReactNode } from 'react'
+import { useEffect, useId, useRef, type ReactNode } from 'react'
 
 interface InternalDialogProps {
   children: ReactNode
@@ -21,29 +21,65 @@ export function InternalDialog({
   title,
   width = 'large',
 }: InternalDialogProps) {
+  const dialogRef = useRef<HTMLDialogElement>(null)
+  const titleId = useId()
+  const subtitleId = useId()
+
   useEffect(() => {
-    function handleEscape(event: KeyboardEvent) {
-      if (event.key === 'Escape') {
-        onClose()
-      }
+    const dialog = dialogRef.current
+    const returnFocusTo = document.activeElement instanceof HTMLElement ? document.activeElement : undefined
+    if (!dialog) {
+      return
     }
 
-    window.addEventListener('keydown', handleEscape)
-    return () => window.removeEventListener('keydown', handleEscape)
-  }, [onClose])
+    if (typeof dialog.showModal === 'function') {
+      if (dialog.open && typeof dialog.close === 'function') {
+        dialog.close()
+      }
+      dialog.showModal()
+    } else {
+      dialog.setAttribute('open', '')
+    }
+
+    const firstFocusable = dialog.querySelector<HTMLElement>(
+      '[autofocus], button:not(:disabled), [href], input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])',
+    )
+    firstFocusable?.focus()
+
+    return () => {
+      if (dialog.open && typeof dialog.close === 'function') {
+        dialog.close()
+      } else {
+        dialog.removeAttribute('open')
+      }
+      returnFocusTo?.focus()
+    }
+  }, [])
 
   return (
-    <div className="dialog-overlay" onMouseDown={onClose}>
+    <dialog
+      aria-describedby={subtitle ? subtitleId : undefined}
+      aria-labelledby={titleId}
+      className="dialog-overlay"
+      open
+      onCancel={(event) => {
+        event.preventDefault()
+        onClose()
+      }}
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget) {
+          onClose()
+        }
+      }}
+      ref={dialogRef}
+    >
       <section
-        aria-label={title}
         className={`dialog-shell dialog-shell-${width} dialog-shell-height-${height}`}
-        onMouseDown={(event) => event.stopPropagation()}
-        role="dialog"
       >
         <header className={`dialog-header ${headerDensity === 'compact' ? 'dialog-header-compact' : ''}`}>
           <div className="dialog-title-block">
-            <h2>{title}</h2>
-            {subtitle ? <p className="dialog-subtitle">{subtitle}</p> : null}
+            <h2 id={titleId}>{title}</h2>
+            {subtitle ? <p className="dialog-subtitle" id={subtitleId}>{subtitle}</p> : null}
           </div>
           {closeVariant === 'icon' ? (
             <button aria-label="Close" className="ghost-button dialog-close-button dialog-close-button-icon" onClick={onClose} type="button">
@@ -57,6 +93,6 @@ export function InternalDialog({
         </header>
         <div className="dialog-body">{children}</div>
       </section>
-    </div>
+    </dialog>
   )
 }

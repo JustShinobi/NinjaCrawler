@@ -1,6 +1,9 @@
 <div align="center">
 
-# NinjaCrawler
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/brand/ninjacrawler-lockup-horizontal-dark.svg">
+  <img src="assets/brand/ninjacrawler-lockup-horizontal.svg" alt="NinjaCrawler" width="520">
+</picture>
 
 **Windows desktop workspace for organizing social profiles, downloading media, and running recurring syncs.**
 

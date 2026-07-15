@@ -6,6 +6,14 @@ const popupSource = readFileSync(new URL('./popup.js', import.meta.url), 'utf8')
 const manifest = JSON.parse(readFileSync(new URL('../manifest.json', import.meta.url), 'utf8'))
 
 describe('Companion popup layout', () => {
+  it('uses the NinjaCrawler visual identity in the popup and extension chrome', () => {
+    expect(popupHtml).toContain('class="companion-brand"')
+    expect(popupHtml).toContain('class="brand-mark"')
+    expect(popupHtml).toContain('<h1>NinjaCrawler</h1>')
+    expect(manifest.action.default_icon['16']).toBe('icons/16.png')
+    expect(manifest.icons['128']).toBe('icons/128.png')
+  })
+
   it('keeps active-tab controls above the open-profiles section', () => {
     expect(popupHtml.indexOf('id="profileForm"')).toBeGreaterThan(-1)
     expect(popupHtml.indexOf('id="profilesPanel"')).toBeGreaterThan(

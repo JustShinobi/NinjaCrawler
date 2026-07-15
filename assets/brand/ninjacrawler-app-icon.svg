@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">NinjaCrawler app icon</title>
+  <desc id="desc">The NinjaCrawler angular trail symbol on a charcoal tile.</desc>
+  <rect x="24" y="24" width="464" height="464" rx="104" fill="#20232A"/>
+  <path d="M136 376V136L376 376V136" fill="none" stroke="#C87832" stroke-width="72" stroke-linecap="square" stroke-linejoin="bevel"/>
+</svg>

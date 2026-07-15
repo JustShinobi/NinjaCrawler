@@ -189,13 +189,15 @@ describe('App search shortcut', () => {
 
   it('keeps menu sections grouped by responsibility', () => {
     render(<App />)
-    const menuBar = document.querySelector('.menu-bar')
-    expect(menuBar).toBeTruthy()
-    const menuBarWithin = within(menuBar as HTMLElement)
+    const titlebar = document.querySelector('.main-titlebar')
+    expect(titlebar).toBeTruthy()
+    const titlebarWithin = within(titlebar as HTMLElement)
 
-    expect(menuBarWithin.queryByRole('button', { name: 'View' })).toBeNull()
+    expect(titlebarWithin.getAllByLabelText('NinjaCrawler')).toHaveLength(1)
+    expect(titlebarWithin.queryByRole('button', { name: 'View' })).toBeNull()
+    expect(titlebarWithin.queryByRole('button', { name: 'Download' })).toBeNull()
 
-    fireEvent.click(menuBarWithin.getByRole('button', { name: 'Tools' }))
+    fireEvent.click(titlebarWithin.getByRole('button', { name: 'Tools' }))
     const toolsMenu = document.querySelector('.menu-dropdown')
     expect(toolsMenu).toBeTruthy()
     const toolsWithin = within(toolsMenu as HTMLElement)
@@ -205,11 +207,14 @@ describe('App search shortcut', () => {
     expect(toolsWithin.getByRole('button', { name: 'Connectors' })).toBeTruthy()
     expect(toolsWithin.getByRole('button', { name: 'Settings' })).toBeTruthy()
 
-    fireEvent.click(menuBarWithin.getByRole('button', { name: 'Download' }))
-    const downloadMenu = document.querySelector('.menu-dropdown')
-    expect(downloadMenu).toBeTruthy()
-    const downloadWithin = within(downloadMenu as HTMLElement)
-    expect(downloadWithin.getByRole('button', { name: 'Run selected sync' })).toBeTruthy()
+    const toolbar = document.querySelector('.toolbar-strip')
+    expect(toolbar).toBeTruthy()
+    const toolbarWithin = within(toolbar as HTMLElement)
+    expect(toolbarWithin.getByRole('button', { name: '+ Add' })).toBeTruthy()
+    expect(toolbarWithin.getByRole('button', { name: 'Refresh' })).toBeTruthy()
+    expect(toolbarWithin.getByRole('button', { name: 'Scheduler' })).toBeTruthy()
+    expect(toolbarWithin.getByRole('button', { name: 'Log' })).toBeTruthy()
+    expect(toolbarWithin.queryByRole('button', { name: /^(Edit|Download|P1|P2|Queue)$/ })).toBeNull()
   })
 
   it('shows build identity and offers the newer GitHub release after one automatic check', async () => {

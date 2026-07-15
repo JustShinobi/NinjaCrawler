@@ -1,25 +1,26 @@
 :root {
   color-scheme: light;
-  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  --page: #f6f7f9;
-  --surface: #ffffff;
-  --surface-subtle: #f7f8fa;
-  --text: #18202a;
-  --text-secondary: #586270;
-  --text-field: #303a48;
-  --border: #d9dee7;
-  --border-strong: #b9c3d3;
-  --border-soft: #e8ebf0;
-  --accent: #1d4ed8;
-  --accent-strong: #2563eb;
+  font-family: Corbel, "Segoe UI", sans-serif;
+  --font-display: "Bahnschrift SemiCondensed", Bahnschrift, "Arial Narrow", sans-serif;
+  --page: #f4f0e8;
+  --surface: #fffdf8;
+  --surface-subtle: #f0ebe1;
+  --text: #20232a;
+  --text-secondary: #67625b;
+  --text-field: #353840;
+  --border: #d8d0c4;
+  --border-strong: #b9ad9d;
+  --border-soft: #e9e2d8;
+  --accent: #a9591f;
+  --accent-strong: #c87832;
   --success: #146c43;
   --success-strong: #25835a;
   --success-surface: #effaf3;
   --success-border: #b7e4ca;
   --danger: #a5261b;
   --danger-surface: #fde2df;
-  --neutral-surface: #e8ecf2;
-  --ready-surface: #dbeafe;
+  --neutral-surface: #e8e1d7;
+  --ready-surface: #dcebea;
   --shadow: rgba(22, 31, 43, 0.08);
   color: var(--text);
   background: var(--page);
@@ -27,50 +28,50 @@
 
 :root[data-theme="dark"] {
   color-scheme: dark;
-  --page: #111827;
-  --surface: #1f2937;
-  --surface-subtle: #182231;
-  --text: #f3f4f6;
-  --text-secondary: #aeb8c7;
-  --text-field: #dbe3ee;
-  --border: #3b4758;
-  --border-strong: #56657a;
-  --border-soft: #334155;
-  --accent: #7da8ff;
-  --accent-strong: #2563eb;
+  --page: #191c22;
+  --surface: #24272f;
+  --surface-subtle: #20232a;
+  --text: #f1ece4;
+  --text-secondary: #b9b1a7;
+  --text-field: #ddd6cc;
+  --border: #3b3f49;
+  --border-strong: #555a66;
+  --border-soft: #323640;
+  --accent: #e09a5b;
+  --accent-strong: #c87832;
   --success: #79d7a7;
   --success-strong: #23845c;
   --success-surface: #15382b;
   --success-border: #2d6d52;
   --danger: #ff9d94;
   --danger-surface: #4a211f;
-  --neutral-surface: #334155;
-  --ready-surface: #1e3a5f;
+  --neutral-surface: #343842;
+  --ready-surface: #203d42;
   --shadow: rgba(0, 0, 0, 0.28);
 }
 
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme]) {
     color-scheme: dark;
-    --page: #111827;
-    --surface: #1f2937;
-    --surface-subtle: #182231;
-    --text: #f3f4f6;
-    --text-secondary: #aeb8c7;
-    --text-field: #dbe3ee;
-    --border: #3b4758;
-    --border-strong: #56657a;
-    --border-soft: #334155;
-    --accent: #7da8ff;
-    --accent-strong: #2563eb;
+    --page: #191c22;
+    --surface: #24272f;
+    --surface-subtle: #20232a;
+    --text: #f1ece4;
+    --text-secondary: #b9b1a7;
+    --text-field: #ddd6cc;
+    --border: #3b3f49;
+    --border-strong: #555a66;
+    --border-soft: #323640;
+    --accent: #e09a5b;
+    --accent-strong: #c87832;
     --success: #79d7a7;
     --success-strong: #23845c;
     --success-surface: #15382b;
     --success-border: #2d6d52;
     --danger: #ff9d94;
     --danger-surface: #4a211f;
-    --neutral-surface: #334155;
-    --ready-surface: #1e3a5f;
+    --neutral-surface: #343842;
+    --ready-surface: #203d42;
     --shadow: rgba(0, 0, 0, 0.28);
   }
 }
@@ -103,24 +104,62 @@ textarea {
 
 .header {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: space-between;
   gap: 12px;
   padding: 2px 1px;
 }
 
+.brand-stack {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+
+.companion-brand {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.brand-mark {
+  width: 28px;
+  height: 28px;
+  flex: 0 0 auto;
+  fill: none;
+  stroke: var(--accent-strong);
+  stroke-width: 40;
+  stroke-linecap: square;
+  stroke-linejoin: bevel;
+}
+
+.brand-name {
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.brand-name span {
+  color: var(--text-secondary);
+  font-family: var(--font-display);
+  font-size: 11px;
+  font-weight: 600;
+}
+
 h1 {
   margin: 0;
+  font-family: var(--font-display);
   font-size: 16px;
-  font-weight: 760;
-  letter-spacing: 0;
+  font-weight: 600;
 }
 
 h2 {
   margin: 0;
+  font-family: var(--font-display);
   font-size: 12px;
-  font-weight: 760;
-  letter-spacing: 0;
+  font-weight: 600;
   text-transform: uppercase;
 }
 
@@ -140,7 +179,7 @@ h2 {
   border: 1px solid var(--border);
   border-radius: 8px;
   background: var(--surface);
-  box-shadow: 0 6px 18px var(--shadow);
+  box-shadow: 0 3px 12px var(--shadow);
 }
 
 .section-heading,
@@ -357,14 +396,15 @@ h2 {
   border-radius: 7px;
   background: var(--surface);
   color: var(--text);
-  font-weight: 760;
+  font-family: var(--font-display);
+  font-weight: 600;
   cursor: pointer;
 }
 
 .actions button.primary {
   border-color: var(--accent-strong);
   background: var(--accent-strong);
-  color: #ffffff;
+  color: #20232a;
 }
 
 .actions button.secondary {
@@ -428,9 +468,9 @@ h2 {
 }
 
 .actions button.update-primary {
-  border-color: #b45309;
-  background: #b45309;
-  color: #ffffff;
+  border-color: var(--accent-strong);
+  background: var(--accent-strong);
+  color: #20232a;
 }
 
 .update-release-link {
@@ -504,7 +544,8 @@ kbd {
   border-radius: 7px;
   background: var(--surface);
   color: var(--text);
-  font-weight: 720;
+  font-family: var(--font-display);
+  font-weight: 600;
   cursor: pointer;
 }
 

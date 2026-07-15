@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { useEffect } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import App from './App'
@@ -224,20 +224,11 @@ describe('App shift selection range', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Select anchor source' }))
     fireEvent.click(screen.getByRole('button', { name: 'Shift select source' }))
 
-    const toolbar = document.querySelector('.toolbar-strip')
-    expect(toolbar).toBeTruthy()
-    const downloadButton = within(toolbar as HTMLElement).getByRole('button', { name: 'Download' }) as HTMLButtonElement
-
-    await waitFor(() => expect(downloadButton.disabled).toBe(false))
-
-    fireEvent.click(downloadButton)
-
-    await waitFor(() => expect(runSourceSyncMock).toHaveBeenCalledTimes(3))
-    expect(runSourceSyncMock.mock.calls.map(([sourceId]) => sourceId)).toEqual([
-      'source-e',
-      'source-b',
-      'source-c',
-    ])
+    await waitFor(() => {
+      expect(screen.getByLabelText('Selected sources').textContent).toBe(
+        'source-e,source-b,source-c',
+      )
+    })
   })
 
   it('deselects when clicking the same single profile twice', async () => {
@@ -246,11 +237,7 @@ describe('App shift selection range', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Select single source' }))
     fireEvent.click(screen.getByRole('button', { name: 'Toggle same source' }))
 
-    const toolbar = document.querySelector('.toolbar-strip')
-    expect(toolbar).toBeTruthy()
-    const downloadButton = within(toolbar as HTMLElement).getByRole('button', { name: 'Download' }) as HTMLButtonElement
-
-    await waitFor(() => expect(downloadButton.disabled).toBe(true))
+    await waitFor(() => expect(screen.getByLabelText('Selected sources').textContent).toBe(''))
   })
 
   it('selects every currently filtered profile with Ctrl+A', async () => {

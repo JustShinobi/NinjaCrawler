@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 180" role="img" aria-labelledby="title desc">
+  <title id="title">NinjaCrawler</title>
+  <desc id="desc">NinjaCrawler horizontal logo with its angular trail symbol.</desc>
+  <path d="M42 142V38L150 142V38" fill="none" stroke="#C87832" stroke-width="30" stroke-linecap="square" stroke-linejoin="bevel"/>
+  <text x="205" y="116" fill="#20232A" font-family="Bahnschrift SemiCondensed, Bahnschrift, Arial Narrow, sans-serif" font-size="82" font-weight="600">NinjaCrawler</text>
+</svg>

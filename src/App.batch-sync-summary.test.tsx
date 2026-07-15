@@ -79,7 +79,7 @@ vi.mock('./features/workspace/ProfileWorkspace', () => ({
         onClick={() => {
           const first = snapshot.sources[0]
           if (first) {
-            onOpenSourceContextMenu(first.id, 10, 10, false)
+            onOpenSourceContextMenu(first.id, 10, 10, true)
           }
         }}
         type="button"
@@ -237,10 +237,9 @@ describe('App batch sync summary', () => {
     render(<App />)
 
     fireEvent.click(screen.getByRole('button', { name: /select all sources/i }))
-    const presetButton = screen.getByRole('button', { name: 'P1' }) as HTMLButtonElement
-    await waitFor(() => expect(presetButton.disabled).toBe(false))
-
-    fireEvent.click(presetButton)
+    fireEvent.click(screen.getByRole('button', { name: /open source context menu/i }))
+    const contextMenu = await screen.findByRole('menu')
+    fireEvent.click(within(contextMenu).getByRole('menuitem', { name: /Preset 1/i }))
 
     // Apenas enfileira o source suportado; nenhum modal de resumo aparece.
     await waitFor(() => {
@@ -258,12 +257,9 @@ describe('App batch sync summary', () => {
     render(<App />)
 
     fireEvent.click(screen.getByRole('button', { name: /select all sources/i }))
-    const toolbar = document.querySelector('.toolbar-strip')
-    expect(toolbar).toBeTruthy()
-    const downloadButton = within(toolbar as HTMLElement).getByRole('button', { name: 'Download' }) as HTMLButtonElement
-    await waitFor(() => expect(downloadButton.disabled).toBe(false))
-
-    fireEvent.click(downloadButton)
+    fireEvent.click(screen.getByRole('button', { name: /open source context menu/i }))
+    const contextMenu = await screen.findByRole('menu')
+    fireEvent.click(within(contextMenu).getByRole('menuitem', { name: /Download now/i }))
 
     await waitFor(() => {
       expect(runSourceSyncMock).toHaveBeenCalledWith('failed', undefined)
