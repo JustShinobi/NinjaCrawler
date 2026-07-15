@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.18.2](https://github.com/MetalDevOps/NinjaCrawler/compare/v0.18.1...v0.18.2) (2026-07-14)
+
+
+### Bug Fixes
+
+* **tiktok:** reject audio-only video downloads ([#185](https://github.com/MetalDevOps/NinjaCrawler/issues/185)) ([6e3deae](https://github.com/MetalDevOps/NinjaCrawler/commit/6e3deaed49aad17a9952a95f5efe53fa2cc3915b))
+
 ## [0.18.1](https://github.com/MetalDevOps/NinjaCrawler/compare/v0.18.0...v0.18.1) (2026-07-14)
 
 
