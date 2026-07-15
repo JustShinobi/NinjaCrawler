@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.19.1](https://github.com/MetalDevOps/NinjaCrawler/compare/v0.19.0...v0.19.1) (2026-07-15)
+
+
+### Bug Fixes
+
+* **release:** handle missing draft releases safely ([#206](https://github.com/MetalDevOps/NinjaCrawler/issues/206)) ([2258472](https://github.com/MetalDevOps/NinjaCrawler/commit/2258472d3a9a0bd55e57459014258b0a9fbc0a42))
+
 ## [0.19.0](https://github.com/MetalDevOps/NinjaCrawler/compare/v0.18.2...v0.19.0) (2026-07-15)
 
 
