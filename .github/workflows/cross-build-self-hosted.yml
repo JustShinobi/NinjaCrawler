@@ -42,6 +42,18 @@ jobs:
             command -v "$tool"
           done
 
+      - name: Configure shared compiler cache
+        shell: bash
+        run: |
+          set -euo pipefail
+          if command -v sccache >/dev/null; then
+            echo "RUSTC_WRAPPER=$(command -v sccache)" >> "$GITHUB_ENV"
+            echo 'SCCACHE_DIR=/cache/sccache/ninjacrawler' >> "$GITHUB_ENV"
+            sccache --show-stats
+          else
+            echo '::notice::sccache is not installed in the golden image; using the smoke-test Cargo target cache.'
+          fi
+
       - name: Install frontend dependencies
         shell: bash
         run: npm ci

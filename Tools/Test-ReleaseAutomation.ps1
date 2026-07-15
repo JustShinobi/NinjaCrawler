@@ -15,6 +15,7 @@ $promoteMergeWorkflowPath = Join-Path $repoRoot ".github\workflows\promote-merge
 $releaseBackSyncWorkflowPath = Join-Path $repoRoot ".github\workflows\release-back-sync.yml"
 $cargoLockPath = Join-Path $repoRoot "src-tauri\Cargo.lock"
 $buildScriptPath = Join-Path $repoRoot "Tools\Build-NinjaCrawler.ps1"
+$ciBuildImpactTestPath = Join-Path $repoRoot "Tools\Test-CIBuildImpact.ps1"
 $versionTestPath = Join-Path $repoRoot "Tools\Test-NinjaCrawlerVersion.ps1"
 $config = Get-Content -LiteralPath $configPath -Raw | ConvertFrom-Json
 $companionConfig = Get-Content -LiteralPath $companionConfigPath -Raw | ConvertFrom-Json
@@ -135,15 +136,21 @@ foreach ($forbiddenFragment in @('contents: write', 'runs-on: ubuntu-latest', 's
 }
 
 foreach ($requiredFragment in @(
+    'Detect Windows build impact',
+    'Tools/Get-CIBuildImpact.ps1',
+    "cancel-in-progress: `${{ github.event_name == 'pull_request' }}",
     'Stage versioned portable',
     'NinjaCrawler-$version-windows-x64-portable.exe',
     'steps.portable.outputs.path',
-    "github.event_name == 'pull_request' || github.ref == 'refs/heads/main'",
+    "needs.changes.outputs.windows == 'true'",
+    'Windows cross-build execution',
+    'Report Windows build decision',
     '["OWNER","MEMBER","COLLABORATOR"]',
     'github.event.pull_request.author_association',
     '["self-hosted","proxmox-lxc","crossbuild","mode-ephemeral"]',
     '["ubuntu-latest"]',
     'CARGO_TARGET_DIR=/cache/target/ninjacrawler-ci'
+    'SCCACHE_DIR=/cache/sccache/ninjacrawler'
     'Validate app version manifests'
     'Tools/Test-NinjaCrawlerVersion.ps1'
 )) {
@@ -156,8 +163,12 @@ $appReleaseSections = [regex]::Split($appReleaseWorkflow, '(?m)^  publish:\s*$')
 if ($appReleaseSections.Count -ne 2) {
     throw "App release workflow must have one isolated publish job."
 }
+$appReleaseBuildSections = [regex]::Split($appReleaseSections[0], '(?m)^  build:\s*$')
+if ($appReleaseBuildSections.Count -ne 2) {
+    throw "App release workflow must have one isolated JIT build job."
+}
 foreach ($forbiddenFragment in @('contents: write', 'runs-on: ubuntu-latest', 'actions/cache@', 'secrets.')) {
-    if ($appReleaseSections[0].Contains($forbiddenFragment)) {
+    if ($appReleaseBuildSections[1].Contains($forbiddenFragment)) {
         throw "App release build job contains privileged or hosted-only behavior: $forbiddenFragment"
     }
 }
@@ -169,6 +180,7 @@ foreach ($requiredFragment in @(
     'persist-credentials: false',
     'cancel-in-progress: false',
     'CARGO_TARGET_DIR: /cache/target/ninjacrawler-smoke',
+    'SCCACHE_DIR=/cache/sccache/ninjacrawler',
     'Tools/Build-NinjaCrawler.ps1',
     '-PortableOnly',
     'test ! -e connectors/bootstrap',
@@ -185,6 +197,7 @@ foreach ($requiredFragment in @(
     'persist-credentials: false',
     'cancel-in-progress: false',
     'CARGO_TARGET_DIR: /cache/target/ninjacrawler-release-e2e',
+    'SCCACHE_DIR=/cache/sccache/ninjacrawler',
     'Tools/Build-NinjaCrawler.ps1',
     'libayatana-appindicator3-dev',
     'Publish and verify isolated prerelease',
@@ -313,8 +326,23 @@ foreach ($requiredFragment in @(
 }
 
 foreach ($requiredFragment in @(
+    'Resolve Windows release inputs',
+    'artifact_run_id:',
+    'Resolve reusable build artifact',
+    'reuse_artifact:',
+    'NinjaCrawler-$VERSION-windows-x64-$RELEASE_SHA',
+    'gh run download "$run_id"',
+    'workflow_path="$(jq -r ''.path''',
+    'run_event="$(jq -r ''.event''',
+    'run_repository="$(jq -r ''.repository.full_name''',
+    '.toolingSha == $tooling',
+    'Ignoring invalid reusable artifact',
+    'BUILD-PROVENANCE.json',
+    'Verify build provenance and checksums',
+    'run-id: ${{ needs.prepare.outputs.artifact_run_id }}',
     'runs-on: [self-hosted, proxmox-lxc, crossbuild, mode-ephemeral]',
     'CARGO_TARGET_DIR: /cache/target/ninjacrawler-release',
+    'SCCACHE_DIR=/cache/sccache/ninjacrawler',
     'Verify self-hosted golden toolchain',
     'libayatana-appindicator3-dev',
     'Check out trusted release tooling',
@@ -348,7 +376,7 @@ if ($promoteMergeWorkflow.Contains("--jq '.[0].number' || true")) {
 }
 
 if (-not $appReleaseWorkflow.Contains('gh workflow run release-back-sync.yml') -or
-    -not $appReleaseWorkflow.Contains('-f tag=${{ needs.build.outputs.tag }}')) {
+    -not $appReleaseWorkflow.Contains('-f tag=${{ needs.prepare.outputs.tag }}')) {
     throw "The app release must back-sync the tag produced by its isolated build job."
 }
 if (-not $companionReleaseWorkflow.Contains('gh workflow run release-back-sync.yml') -or
@@ -366,6 +394,11 @@ foreach ($requiredFragment in @(
     if (-not $releaseBackSyncWorkflow.Contains($requiredFragment)) {
         throw "Release back-sync workflow is missing a safety invariant: $requiredFragment"
     }
+}
+
+& $ciBuildImpactTestPath
+if ($LASTEXITCODE -ne 0) {
+    throw "CI build-impact tests failed."
 }
 
 Write-Host "Release automation configuration tests passed."

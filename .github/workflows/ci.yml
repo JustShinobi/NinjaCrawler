@@ -16,9 +16,45 @@ permissions:
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  changes:
+    name: Detect Windows build impact
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      windows: ${{ steps.impact.outputs.windows }}
+      reason: ${{ steps.impact.outputs.reason }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Classify build impact
+        id: impact
+        shell: pwsh
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_REF: ${{ github.head_ref }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          $result = & Tools/Get-CIBuildImpact.ps1 `
+            -EventName $env:EVENT_NAME `
+            -HeadRef $env:HEAD_REF `
+            -BaseSha $env:BASE_SHA `
+            -HeadSha $env:HEAD_SHA |
+            ConvertFrom-Json
+          $windows = $result.windowsBuild.ToString().ToLowerInvariant()
+          "windows=$windows" >> $env:GITHUB_OUTPUT
+          "reason=$($result.reason)" >> $env:GITHUB_OUTPUT
+          Write-Host "Windows build required: $windows"
+          Write-Host "Reason: $($result.reason)"
+
   quality:
     name: Frontend quality
     runs-on: ubuntu-latest
@@ -91,8 +127,9 @@ jobs:
         run: npm audit --omit=dev --audit-level=high
 
   windows-build:
-    name: Windows cross-build
-    if: ${{ github.event_name == 'pull_request' || github.ref == 'refs/heads/main' }}
+    name: Windows cross-build execution
+    needs: [changes, quality]
+    if: ${{ needs.changes.outputs.windows == 'true' }}
     runs-on: ${{ fromJSON((github.event_name != 'pull_request' || contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association)) && '["self-hosted","proxmox-lxc","crossbuild","mode-ephemeral"]' || '["ubuntu-latest"]') }}
     timeout-minutes: 45
 
@@ -160,6 +197,19 @@ jobs:
           done
           echo 'CARGO_TARGET_DIR=/cache/target/ninjacrawler-ci' >> "$GITHUB_ENV"
 
+      - name: Configure shared compiler cache
+        if: ${{ github.event_name != 'pull_request' || contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association) }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if command -v sccache >/dev/null; then
+            echo "RUSTC_WRAPPER=$(command -v sccache)" >> "$GITHUB_ENV"
+            echo 'SCCACHE_DIR=/cache/sccache/ninjacrawler' >> "$GITHUB_ENV"
+            sccache --show-stats
+          else
+            echo '::notice::sccache is not installed in the golden image; using the workflow-specific Cargo target cache.'
+          fi
+
       - name: Install dependencies
         run: npm ci
 
@@ -196,3 +246,27 @@ jobs:
           path: ${{ steps.portable.outputs.path }}
           if-no-files-found: error
           retention-days: 7
+
+  windows-check:
+    name: Windows cross-build
+    if: ${{ always() }}
+    needs: [changes, windows-build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Report Windows build decision
+        shell: bash
+        env:
+          BUILD_REQUIRED: ${{ needs.changes.outputs.windows }}
+          BUILD_REASON: ${{ needs.changes.outputs.reason }}
+          BUILD_RESULT: ${{ needs.windows-build.result }}
+        run: |
+          set -euo pipefail
+          echo "Windows build required: $BUILD_REQUIRED"
+          echo "Reason: $BUILD_REASON"
+          echo "Execution result: $BUILD_RESULT"
+          if [ "$BUILD_REQUIRED" = "true" ] && [ "$BUILD_RESULT" != "success" ]; then
+            echo "The required Windows cross-build did not succeed." >&2
+            exit 1
+          fi

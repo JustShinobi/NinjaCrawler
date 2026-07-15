@@ -56,14 +56,32 @@ Pull requests opened by repository owners, organization members, or explicit
 collaborators execute the cross-build on the ephemeral Proxmox JIT runner. PRs
 from every other author association, including public forks, remain on the
 hosted runner. Both paths use read-only repository permissions,
-`persist-credentials: false`, and no build secrets. Trusted pushes to `main` and
-manual CI dispatches also use the JIT runner; the job is skipped for manual
-dispatches against any other ref. The release workflow separates concerns:
+`persist-credentials: false`, and no build secrets. A lightweight hosted job
+classifies the pull-request paths before allocating a JIT runner. Application,
+frontend, Tauri, dependency, build-script, and build-workflow changes require the
+portable cross-build. Documentation and generated release-metadata changes do
+not. Manual CI dispatches always build fail-closed; pushes to `main` reuse the
+promotion PR validation and do not compile the portable again. The release
+workflow separates concerns:
 
-1. `build` checks out the trusted release ref, compiles and uploads an Actions
-   artifact with read-only permissions;
-2. `publish` downloads that artifact and is the only job granted
+1. `prepare` validates the release identity and searches for a reusable artifact
+   produced for the exact version and release commit;
+2. `build` runs only when no matching artifact exists, compiles and uploads the
+   assets plus an internal provenance record with read-only permissions;
+3. `publish` validates the provenance and checksums, removes the internal record,
+   and is the only job granted
    `contents: write`.
+
+An explicit recovery may provide `artifact_run_id`. Otherwise `prepare` selects
+the newest non-expired artifact whose name includes both version and release SHA.
+Artifacts are never reused by version alone. A retry after a publish-only failure
+therefore does not allocate another JIT runner, while a different source commit
+still forces a new build. The internal provenance file is not uploaded as a
+public release asset. Reuse also requires the artifact to originate from the
+official `.github/workflows/release.yml` workflow in this repository, from a
+trusted dispatch or tag push, and its recorded tooling SHA must equal the source
+SHA of that Actions run. A same-named artifact from a pull-request workflow is
+rejected.
 
 The official build job and its persistent compilation cache run on the JIT
 runner. Publication remains hosted regardless of the build runner. Because the
@@ -132,9 +150,13 @@ package connector runtimes, receive repository secrets, or publish a release.
 The regular CI workflow may use the same runner labels for trusted collaborator
 pull requests, but never for PRs from unknown author associations.
 
-Each trusted workflow has a separate stable `CARGO_TARGET_DIR`, protected by
-workflow concurrency without cancellation so two compiler processes cannot
-write to the same target at the same time. The workspace and JIT runner remain
+Each trusted workflow has a separate stable `CARGO_TARGET_DIR`. Release and E2E
+concurrency never cancel an in-progress compiler. CI cancels an obsolete run only
+when a newer commit updates the same pull request, allowing the ephemeral runner
+to terminate before the replacement is scheduled. When the golden image provides
+`sccache`, all trusted workflows share `/cache/sccache/ninjacrawler` while keeping
+their Cargo target directories isolated; without it they fall back to the
+workflow-specific persistent target cache. The workspace and JIT runner remain
 disposable. Manual publication validation is available only through
 `workflow_dispatch` in this repository.
 
