@@ -16,6 +16,7 @@ use crate::infrastructure::{atomic_file, connector_debug};
 /// App id público da web do Instagram, usado em consultas anônimas de identidade.
 const INSTAGRAM_PUBLIC_APP_ID: &str = "936619743392459";
 const INSTAGRAM_PUBLIC_ASBD_ID: &str = "129477";
+const INSTAGRAM_WEB_ORIGIN: &str = "https://www.instagram.com";
 /// Instagram's Relay GraphQL endpoint. It only accepts POST requests with the
 /// query parameters in a form-urlencoded body; a GET with the same parameters in
 /// the query string is rejected with `400 Bad Request` (an HTML error page).
@@ -152,6 +153,7 @@ pub struct InstagramConnectorResult {
     pub auth_disabled_sections: Vec<String>,
     pub resolved_username: Option<String>,
     pub profile_description: Option<String>,
+    pub profile_description_error: Option<String>,
     pub manifest_summary: Option<InstagramManifestSummary>,
     /// Associação post→álbum de highlight para TODOS os itens descobertos nos
     /// destaques (inclusive os já existentes no ledger, que não rebaixam bytes).
@@ -775,13 +777,8 @@ where
         request.pacing,
     )?;
     let profile = load_profile(&mut client, &request.username)?;
-    let profile_description =
-        load_profile_description_by_user_id(&mut client, &profile.username, &profile.user_id)
-            .or_else(|| profile.description.clone())
-            .or_else(|| {
-                load_profile_description_gql(&mut client, &profile.username, &profile.user_id)
-            })
-            .or_else(|| load_profile_description(&mut client, &profile.username));
+    let (profile_description, profile_description_error) =
+        resolve_profile_description(&mut client, &profile);
     let mut effective_request = request.clone();
     effective_request.username = profile.username.clone();
     let mut section_errors = Vec::new();
@@ -1231,6 +1228,7 @@ where
         auth_disabled_sections,
         resolved_username: Some(profile.username.clone()),
         profile_description,
+        profile_description_error,
         manifest_summary: Some(manifest_summary),
         highlight_memberships: collect_highlight_memberships(&manifest),
         updated_headers: client.headers.clone(),
@@ -1294,6 +1292,7 @@ where
             auth_disabled_sections: Vec::new(),
             resolved_username: None,
             profile_description: None,
+            profile_description_error: None,
             manifest_summary: None,
             highlight_memberships: Vec::new(),
             updated_headers: request.headers.clone(),
@@ -1358,6 +1357,7 @@ where
         auth_disabled_sections,
         resolved_username: None,
         profile_description: None,
+        profile_description_error: None,
         manifest_summary: None,
         highlight_memberships: Vec::new(),
         updated_headers: client.headers.clone(),
@@ -1856,10 +1856,7 @@ fn load_profile_identity_by_user_id(
     user_id: &str,
 ) -> Result<InstagramProfileIdentity, String> {
     let referer = format!("https://www.instagram.com/{current_username}/");
-    let payload = client.get_json(
-        &format!("https://i.instagram.com/api/v1/users/{user_id}/info/"),
-        Some(&referer),
-    )?;
+    let payload = client.get_json(&instagram_user_info_url(user_id), Some(&referer))?;
     let user = payload
         .get("user")
         .ok_or_else(|| "Instagram user info response is missing user data.".to_string())?;
@@ -2558,65 +2555,105 @@ fn infer_missing_timeline_user_data_from_html_probe(
     "Instagram timeline response is missing user data.".to_string()
 }
 
-fn load_profile_description(client: &mut InstagramClient, username: &str) -> Option<String> {
-    let referer = format!("https://www.instagram.com/{username}/");
-    let payload = client
-        .get_json(
-            &format!("https://i.instagram.com/api/v1/users/web_profile_info/?username={username}"),
-            Some(&referer),
-        )
-        .ok()?;
+fn instagram_user_info_url(user_id: &str) -> String {
+    format!("{INSTAGRAM_WEB_ORIGIN}/api/v1/users/{user_id}/info/")
+}
 
-    parse_profile_description(&payload)
+fn resolve_profile_description(
+    client: &mut InstagramClient,
+    profile: &UserProfile,
+) -> (Option<String>, Option<String>) {
+    let mut errors = Vec::new();
+
+    match load_profile_description_by_user_id(client, &profile.username, &profile.user_id) {
+        Ok(description) => return (description, None),
+        Err(error) => errors.push(format!("user info: {error}")),
+    }
+
+    if let Some(description) = profile.description.clone() {
+        return (Some(description), None);
+    }
+
+    match load_profile_description_gql(client, &profile.username, &profile.user_id) {
+        Ok(description) => return (description, None),
+        Err(error) => errors.push(format!("GraphQL: {error}")),
+    }
+
+    match load_profile_description(client, &profile.username) {
+        Ok(description) => (description, None),
+        Err(error) => {
+            errors.push(format!("web profile: {error}"));
+            (
+                None,
+                Some(format!(
+                    "Instagram profile description lookup failed: {}",
+                    errors.join(" | ")
+                )),
+            )
+        }
+    }
+}
+
+fn load_profile_description(
+    client: &mut InstagramClient,
+    username: &str,
+) -> Result<Option<String>, String> {
+    let referer = format!("https://www.instagram.com/{username}/");
+    let payload = client.get_json(
+        &format!("https://i.instagram.com/api/v1/users/web_profile_info/?username={username}"),
+        Some(&referer),
+    )?;
+
+    parse_profile_description_response(&payload)
 }
 
 fn load_profile_description_by_user_id(
     client: &mut InstagramClient,
     username: &str,
     user_id: &str,
-) -> Option<String> {
+) -> Result<Option<String>, String> {
     let referer = format!("https://www.instagram.com/{username}/");
-    let payload = client
-        .get_json(
-            &format!("https://i.instagram.com/api/v1/users/{user_id}/info/"),
-            Some(&referer),
-        )
-        .ok()?;
+    let payload = client.get_json(&instagram_user_info_url(user_id), Some(&referer))?;
 
-    parse_profile_description(&payload)
+    parse_profile_description_response(&payload)
 }
 
 fn load_profile_description_gql(
     client: &mut InstagramClient,
     username: &str,
     user_id: &str,
-) -> Option<String> {
-    let (lsd, dtsg) = gql_tokens(&client.headers)?;
+) -> Result<Option<String>, String> {
+    let (lsd, dtsg) = gql_tokens(&client.headers)
+        .ok_or_else(|| "Instagram GraphQL tokens are unavailable.".to_string())?;
     let friendly_name = "PolarisProfilePageContentQuery";
     let variables = format!(
         "{{\"id\":\"{}\",\"relay_header\":false,\"render_surface\":\"PROFILE\"}}",
         escape_json(user_id)
     );
     let referer = format!("https://www.instagram.com/{username}/");
-    let payload = client
-        .post_graphql_json(
-            "7381344031985950",
-            &lsd,
-            &dtsg,
-            friendly_name,
-            &variables,
-            Some(&referer),
-        )
-        .ok()?;
+    let payload = client.post_graphql_json(
+        "7381344031985950",
+        &lsd,
+        &dtsg,
+        friendly_name,
+        &variables,
+        Some(&referer),
+    )?;
 
-    parse_profile_description(&payload)
+    parse_profile_description_response(&payload)
 }
 
+#[cfg(test)]
 fn parse_profile_description(payload: &Value) -> Option<String> {
-    payload
+    parse_profile_description_response(payload).ok().flatten()
+}
+
+fn parse_profile_description_response(payload: &Value) -> Result<Option<String>, String> {
+    let user = payload
         .pointer("/data/user")
         .or_else(|| payload.pointer("/user"))
-        .and_then(parse_profile_description_from_user)
+        .ok_or_else(|| "Instagram profile response is missing user data.".to_string())?;
+    Ok(parse_profile_description_from_user(user))
 }
 
 fn parse_profile_description_from_user(user: &Value) -> Option<String> {
@@ -4460,8 +4497,9 @@ mod tests {
         append_single_asset, best_image_url, build_graphql_body, build_manifest_section,
         build_media_file_name, classify_section_error, collect_media_assets, compute_jazoest,
         cookie_value, execute_manifest_section, extract_reels_payload_items, interruptible_sleep,
-        manifest_observed_posts, normalize_profile_sync_manifest, parse_profile_description,
-        parse_profile_description_from_user, provider_media_identity_from_url,
+        instagram_user_info_url, manifest_observed_posts, normalize_profile_sync_manifest,
+        parse_profile_description, parse_profile_description_from_user,
+        parse_profile_description_response, provider_media_identity_from_url,
         public_identity_headers, resolve_destination_path, should_ignore_media_download_error,
         DownloadedInstagramMedia, IncrementalDiscoveryStop, InstagramAuthHeaders, InstagramClient,
         InstagramConnectorRequest, InstagramManifestPost, InstagramMediaFileNamingMode,
@@ -4826,6 +4864,25 @@ mod tests {
         let description = parse_profile_description(&payload).expect("description should parse");
 
         assert_eq!(description, "ID biography\nhttps://example.com/id");
+    }
+
+    #[test]
+    fn instagram_user_info_uses_authenticated_web_origin() {
+        assert_eq!(
+            instagram_user_info_url("2069513520"),
+            "https://www.instagram.com/api/v1/users/2069513520/info/"
+        );
+    }
+
+    #[test]
+    fn profile_description_response_rejects_payload_without_user_data() {
+        let error = parse_profile_description_response(&json!({
+            "message": "Please wait a few minutes before you try again.",
+            "status": "fail"
+        }))
+        .expect_err("an error payload must not look like an empty biography");
+
+        assert_eq!(error, "Instagram profile response is missing user data.");
     }
 
     #[test]

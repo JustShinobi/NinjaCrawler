@@ -4078,6 +4078,23 @@ pub(super) fn execute_instagram_source_sync_with_connection(
                         );
                     }
                 }
+            } else if let Some(error) = result.profile_description_error.as_deref() {
+                log_runtime_event(
+                    layout,
+                    "sync.profile",
+                    "warning",
+                    RuntimeLogAnchor {
+                        account_id: Some(&context.account.id),
+                        provider: Some(&context.source.provider),
+                        source_id: Some(&context.source.id),
+                        source_handle: Some(&context.source.handle),
+                    },
+                    format!(
+                        "Instagram biography was not refreshed for '{}'. Media sync can still complete.",
+                        context.source.handle
+                    ),
+                    Some(error.to_string()),
+                );
             }
 
             source_sync_runtime::report_source_sync_progress(
