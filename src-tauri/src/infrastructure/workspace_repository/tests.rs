@@ -155,6 +155,16 @@ fn twitter_sync_reports_partial_completion_as_warnings() {
 }
 
 #[test]
+fn twitter_sensitive_media_warning_requires_restricted_account_and_nsfw_profile() {
+    assert!(twitter_sensitive_media_account_warning(true, true).is_none());
+    assert!(twitter_sensitive_media_account_warning(true, false).is_none());
+    assert!(twitter_sensitive_media_account_warning(false, false).is_none());
+    let warning = twitter_sensitive_media_account_warning(false, true).expect("warning");
+    assert!(warning.contains("unable to view sensitive media"));
+    assert!(warning.contains("potentially sensitive"));
+}
+
+#[test]
 fn existing_media_scan_ignores_zero_byte_download_placeholders() {
     let temp = tempfile::tempdir().expect("tempdir");
     std::fs::write(temp.path().join("empty.mp4"), []).expect("placeholder");

@@ -118,6 +118,15 @@ const TWITTER_SETTINGS_LAYOUT: ProviderAccountSettingsLayout = {
   ],
   fields: [
     { key: 'twitter.account.mediaPath', category: 'account', label: 'Path', kind: 'text', placeholder: 'F:/SCrawler/Data/Twitter', defaultValue: '', mono: true },
+    {
+      key: 'twitter.account.canViewSensitiveMedia',
+      category: 'account',
+      label: 'Can view sensitive media (NSFW)',
+      tooltip:
+        'Turn off when this X Account is restricted from sensitive/NSFW profiles (interstitial “Caution: potentially sensitive content” without full media access). During sync, if the target profile is NSFW-flagged and this is off, NinjaCrawler warns that media may be incomplete.',
+      kind: 'toggle',
+      defaultValue: 'true',
+    },
 
     { key: 'twitter.auth.useUserAgent', category: 'authorization', label: 'Use user agent', kind: 'toggle', defaultValue: 'true' },
     { key: 'twitter.auth.userAgent', category: 'authorization', label: 'User agent', kind: 'textarea', defaultValue: '', advanced: true, mono: true },

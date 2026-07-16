@@ -1635,6 +1635,18 @@ pub(super) fn execute_twitter_source_sync_with_connection(
                     result.manifest_summary.skipped_duplicate_asset_count,
                 ),
             );
+            let account_can_view_sensitive_media = parse_bool_setting(
+                settings
+                    .get("twitter.account.canViewSensitiveMedia")
+                    .map(String::as_str),
+                true,
+            );
+            if let Some(warning) = twitter_sensitive_media_account_warning(
+                account_can_view_sensitive_media,
+                result.manifest_summary.profile_sensitive_media,
+            ) {
+                result.section_errors.push(warning);
+            }
             let completed_with_warnings = twitter_sync_completed_with_warnings(
                 result.rate_limited || result.limit_aborted,
                 &result.section_errors,
@@ -1907,6 +1919,22 @@ pub(super) fn twitter_sync_completed_with_warnings(
     section_errors: &[String],
 ) -> bool {
     limit_aborted || !section_errors.is_empty()
+}
+
+/// Warning when the operator marked the Account as unable to view sensitive
+/// media and the target profile is NSFW-flagged by X
+/// (`profile_interstitial_type: sensitive_media`).
+pub(super) fn twitter_sensitive_media_account_warning(
+    account_can_view_sensitive_media: bool,
+    profile_sensitive_media: bool,
+) -> Option<String> {
+    if account_can_view_sensitive_media || !profile_sensitive_media {
+        return None;
+    }
+    Some(
+        "This Account is marked as unable to view sensitive media (NSFW), and the profile is flagged as potentially sensitive on X. Media downloads may be incomplete. Enable sensitive media for this Account on X, open the profile and accept the warning, re-import cookies — or use an Account with sensitive media access and turn on “Can view sensitive media (NSFW)” in Account settings."
+            .to_string(),
+    )
 }
 
 pub(super) fn twitter_handle_redirect(

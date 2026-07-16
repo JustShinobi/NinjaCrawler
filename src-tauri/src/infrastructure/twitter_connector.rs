@@ -141,6 +141,9 @@ pub struct TwitterManifestSummary {
     pub incremental_cutoff_timestamp: Option<i64>,
     pub selection_signature: Option<String>,
     pub full_scan_at: Option<String>,
+    /// Perfil alvo marcado no GraphQL com
+    /// `profile_interstitial_type: "sensitive_media"` (gate NSFW do X).
+    pub profile_sensitive_media: bool,
 }
 
 pub struct TwitterConnectorResult {
@@ -1061,9 +1064,31 @@ fn parse_tweets_from_pages(
             continue;
         };
         summary.parsed_page_count += 1;
+        if !summary.profile_sensitive_media && page_marks_profile_sensitive_media(&value) {
+            summary.profile_sensitive_media = true;
+        }
         collect_tweets(&value, &mut tweets);
     }
     Ok(tweets)
+}
+
+/// Detecta o gate NSFW do X no JSON das pages (`UserByScreenName` / users
+/// embutidos em `UserMedia`): `legacy.profile_interstitial_type == "sensitive_media"`.
+fn page_marks_profile_sensitive_media(value: &Value) -> bool {
+    match value {
+        Value::Object(map) => {
+            if map
+                .get("profile_interstitial_type")
+                .and_then(Value::as_str)
+                .is_some_and(|value| value.eq_ignore_ascii_case("sensitive_media"))
+            {
+                return true;
+            }
+            map.values().any(page_marks_profile_sensitive_media)
+        }
+        Value::Array(items) => items.iter().any(page_marks_profile_sensitive_media),
+        _ => false,
+    }
 }
 
 /// Travessia recursiva resiliente ao formato GraphQL do Twitter: qualquer
@@ -1467,6 +1492,38 @@ mod tests {
                 }
             }
         })
+    }
+
+    #[test]
+    fn page_marks_profile_sensitive_media_from_interstitial_type() {
+        let sensitive = serde_json::json!({
+            "data": {
+                "user": {
+                    "result": {
+                        "legacy": {
+                            "screen_name": "ruivaisabel",
+                            "possibly_sensitive": true,
+                            "profile_interstitial_type": "sensitive_media"
+                        }
+                    }
+                }
+            }
+        });
+        let clean = serde_json::json!({
+            "data": {
+                "user": {
+                    "result": {
+                        "legacy": {
+                            "screen_name": "example",
+                            "profile_interstitial_type": ""
+                        }
+                    }
+                }
+            }
+        });
+        assert!(page_marks_profile_sensitive_media(&sensitive));
+        assert!(!page_marks_profile_sensitive_media(&clean));
+        assert!(!page_marks_profile_sensitive_media(&tweet_page_json()));
     }
 
     #[test]
