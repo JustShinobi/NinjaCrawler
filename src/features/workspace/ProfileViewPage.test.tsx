@@ -20,6 +20,17 @@ const bridgeMocks = vi.hoisted(() => ({
 
 vi.mock('../../bridge/desktop', () => bridgeMocks)
 vi.mock('@tauri-apps/api/core', () => ({ convertFileSrc: (path: string) => `asset://${path}` }))
+vi.mock('@tauri-apps/api/window', () => ({
+  getCurrentWindow: () => ({
+    close: vi.fn(),
+    isMaximized: () => Promise.resolve(false),
+    minimize: vi.fn(),
+    onResized: () => Promise.resolve(() => undefined),
+    startDragging: vi.fn(),
+    toggleMaximize: vi.fn(),
+    setTitle: vi.fn(() => Promise.resolve()),
+  }),
+}))
 
 // jsdom não faz layout, então a virtualização real (que depende de medir a
 // viewport/linhas) renderizaria zero linhas. Trocamos o virtualizer por um que
@@ -237,16 +248,16 @@ describe('ProfileViewPage', () => {
     expect(localStorage.getItem('profileView.sortField')).toBe('popularity')
   })
 
-  it('switches to the "all media" grid and persists the choice', async () => {
+  it('switches to the flat grid and persists the choice', async () => {
     const { unmount } = render(<ProfileViewPage initialSourceId="src-1" />)
 
     // Default mode is grouped by day.
     expect(await screen.findByRole('button', { name: /by day/i })).toHaveProperty('ariaPressed', 'true')
 
-    fireEvent.click(screen.getByRole('button', { name: /all media/i }))
+    fireEvent.click(screen.getByRole('button', { name: /flat grid/i }))
 
     // Grid mode is active, both posts still rendered, choice persisted.
-    expect(screen.getByRole('button', { name: /all media/i })).toHaveProperty('ariaPressed', 'true')
+    expect(screen.getByRole('button', { name: /flat grid/i })).toHaveProperty('ariaPressed', 'true')
     expect(screen.getByRole('button', { name: /by day/i })).toHaveProperty('ariaPressed', 'false')
     expect(screen.getAllByRole('button', { name: /open preview/i }).length).toBe(2)
     expect(localStorage.getItem('profileView.mode')).toBe('grid')
@@ -254,7 +265,7 @@ describe('ProfileViewPage', () => {
     // Re-mounting restores the saved mode.
     unmount()
     render(<ProfileViewPage initialSourceId="src-1" />)
-    expect(await screen.findByRole('button', { name: /all media/i })).toHaveProperty('ariaPressed', 'true')
+    expect(await screen.findByRole('button', { name: /flat grid/i })).toHaveProperty('ariaPressed', 'true')
   })
 
   it('adjusts and persists the thumbnail density', async () => {
@@ -274,8 +285,8 @@ describe('ProfileViewPage', () => {
     render(<ProfileViewPage initialSourceId="ig-1" />)
 
     // Filter chips: All + Feed + Reels (timeline is labelled "Feed" on Instagram).
-    expect(await screen.findByRole('button', { name: /^Feed$/ })).toBeTruthy()
-    const reelsChip = screen.getByRole('button', { name: /^Reels$/ })
+    expect(await screen.findByRole('button', { name: /^Feed /i })).toBeTruthy()
+    const reelsChip = screen.getByRole('button', { name: /^Reels /i })
     // Both posts visible up front.
     expect(screen.getAllByRole('button', { name: /open preview/i }).length).toBe(2)
 
@@ -445,8 +456,8 @@ describe('ProfileViewPage', () => {
     // Feed + highlight expose Online; the ephemeral live story does not.
     expect(screen.getAllByRole('button', { name: 'Online' }).length).toBe(2)
     // The two story-like sections render distinct chips (Stories vs Highlights).
-    expect(screen.getByRole('button', { name: 'Highlights' })).toBeTruthy()
-    expect(screen.getByRole('button', { name: 'Stories' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: /^Highlights /i })).toBeTruthy()
+    expect(screen.getByRole('button', { name: /^Stories /i })).toBeTruthy()
   })
 
   it('groups highlights by album and can switch back to by-day', async () => {
@@ -493,10 +504,10 @@ describe('ProfileViewPage', () => {
     } as SourceMediaGallery)
 
     render(<ProfileViewPage initialSourceId="ig-1" />)
-    await screen.findByRole('button', { name: 'Highlights' })
+    await screen.findByRole('button', { name: /^Highlights /i })
 
     // Enter the Highlights section → defaults to album grouping.
-    fireEvent.click(screen.getByRole('button', { name: 'Highlights' }))
+    fireEvent.click(screen.getByRole('button', { name: /^Highlights /i }))
     expect(screen.getByRole('button', { name: /by album/i })).toBeTruthy()
     expect(screen.getByText('Venda')).toBeTruthy()
     expect(screen.getByText('CATSU')).toBeTruthy()
@@ -514,9 +525,9 @@ describe('ProfileViewPage', () => {
     render(<ProfileViewPage initialSourceId="tk-1" />)
 
     // Section chips read Timeline (not "Posts") + Likes.
-    expect(await screen.findByRole('button', { name: /^Timeline$/ })).toBeTruthy()
-    expect(screen.queryByRole('button', { name: /^Posts$/ })).toBeNull()
-    const likesChip = screen.getByRole('button', { name: /^Likes$/ })
+    expect(await screen.findByRole('button', { name: /^Timeline /i })).toBeTruthy()
+    expect(screen.queryByRole('button', { name: /^Posts /i })).toBeNull()
+    const likesChip = screen.getByRole('button', { name: /^Likes /i })
 
     // "All" shows the four posts; filtering to Likes keeps only the two likes.
     expect(screen.getAllByRole('button', { name: /open preview/i }).length).toBe(4)
@@ -528,7 +539,7 @@ describe('ProfileViewPage', () => {
     bridgeMocks.loadSourceMediaGallery.mockResolvedValue(tiktokMixedFixture())
     render(<ProfileViewPage initialSourceId="tk-1" />)
 
-    fireEvent.click(await screen.findByRole('button', { name: /^Likes$/ }))
+    fireEvent.click(await screen.findByRole('button', { name: /^Likes /i }))
     // The magnifier only exists on the Likes tab; expand it and search.
     fireEvent.click(screen.getByRole('button', { name: /search likes by author/i }))
     fireEvent.change(screen.getByRole('searchbox', { name: /search likes by author/i }), {
@@ -538,7 +549,7 @@ describe('ProfileViewPage', () => {
     expect(screen.getAllByRole('button', { name: /open preview/i }).length).toBe(1)
 
     // The search field is absent outside the Likes tab.
-    fireEvent.click(screen.getByRole('button', { name: /^Timeline$/ }))
+    fireEvent.click(screen.getByRole('button', { name: /^Timeline /i }))
     expect(screen.queryByRole('button', { name: /search likes by author/i })).toBeNull()
   })
 
@@ -561,7 +572,7 @@ describe('ProfileViewPage', () => {
     bridgeMocks.loadSourceMediaGallery.mockResolvedValue(fixture)
     render(<ProfileViewPage initialSourceId="tk-1" />)
 
-    fireEvent.click(await screen.findByRole('button', { name: /^Likes$/ }))
+    fireEvent.click(await screen.findByRole('button', { name: /^Likes /i }))
     fireEvent.click(screen.getByRole('button', { name: /search likes by author/i }))
     const input = screen.getByRole('searchbox', { name: /search likes by author/i })
 
@@ -596,15 +607,15 @@ describe('ProfileViewPage', () => {
     render(<ProfileViewPage initialSourceId="tk-1" />)
 
     // The Likes tab defaults to grouping by user.
-    fireEvent.click(await screen.findByRole('button', { name: /^Likes$/ }))
+    fireEvent.click(await screen.findByRole('button', { name: /^Likes /i }))
     expect(screen.getByRole('button', { name: /by user/i })).toHaveProperty('ariaPressed', 'true')
     const alice = screen.getByText('@alice')
     const bob = screen.getByText('@bob')
     // Alice (2 likes) ranks above bob (1) in the DOM.
     expect(alice.compareDocumentPosition(bob) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
 
-    // Switching to All media drops the author headers.
-    fireEvent.click(screen.getByRole('button', { name: /all media/i }))
+    // Switching to Flat grid drops the author headers.
+    fireEvent.click(screen.getByRole('button', { name: /flat grid/i }))
     expect(screen.queryByText('@alice')).toBeNull()
   })
 
@@ -635,7 +646,7 @@ describe('ProfileViewPage', () => {
     bridgeMocks.loadSourceMediaGallery.mockResolvedValue(tiktokMixedFixture())
     render(<ProfileViewPage initialSourceId="tk-1" />)
 
-    fireEvent.click(await screen.findByRole('button', { name: /^Likes$/ }))
+    fireEvent.click(await screen.findByRole('button', { name: /^Likes /i }))
     fireEvent.click(screen.getAllByRole('button', { name: /open preview/i })[0])
     const dialog = await screen.findByRole('dialog')
     // Newest like first → bob's; his @handle heads the lightbox.
@@ -645,10 +656,10 @@ describe('ProfileViewPage', () => {
   it('sorts by creation and download date in both directions', async () => {
     bridgeMocks.loadSourceMediaGallery.mockResolvedValue(tiktokMixedFixture())
     const { container } = render(<ProfileViewPage initialSourceId="tk-1" />)
-    await screen.findByRole('button', { name: /^Timeline$/ })
+    await screen.findByRole('button', { name: /^Timeline /i })
 
     // Grid mode drops the day headers, so the thumbnail order is the sort order.
-    fireEvent.click(screen.getByRole('button', { name: /all media/i }))
+    fireEvent.click(screen.getByRole('button', { name: /flat grid/i }))
     // Default: creation date, newest first.
     expect(thumbOrder(container)).toEqual(['t1', 'l2', 'l1', 't2'])
 
