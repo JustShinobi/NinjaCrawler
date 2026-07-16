@@ -4,8 +4,10 @@ import { BrandLockup } from './BrandLockup'
 
 export interface WindowController {
   close: () => Promise<void>
+  isFocused?: () => Promise<boolean>
   isMaximized: () => Promise<boolean>
   minimize: () => Promise<void>
+  onFocusChanged?: (handler: (focused: boolean) => void) => Promise<() => void>
   onResized: (handler: () => void) => Promise<() => void>
   startDragging: () => Promise<void>
   toggleMaximize: () => Promise<void>
@@ -31,12 +33,19 @@ function createWindowController(): WindowController | undefined {
   const appWindow = getCurrentWindow()
   return {
     close: () => appWindow.close(),
+    isFocused: () => appWindow.isFocused(),
     isMaximized: () => appWindow.isMaximized(),
     minimize: () => appWindow.minimize(),
+    onFocusChanged: (handler) => appWindow.onFocusChanged((event) => handler(event.payload)),
     onResized: (handler) => appWindow.onResized(handler),
     startDragging: () => appWindow.startDragging(),
     toggleMaximize: () => appWindow.toggleMaximize(),
   }
+}
+
+function setDocumentWindowFocus(focused: boolean) {
+  if (typeof document === 'undefined') return
+  document.documentElement.dataset.windowFocused = focused ? 'true' : 'false'
 }
 
 export function WindowTitlebar({
@@ -49,6 +58,8 @@ export function WindowTitlebar({
 }: WindowTitlebarProps) {
   const [controller] = useState(() => windowController ?? createWindowController())
   const [maximized, setMaximized] = useState(false)
+  // Defaults to focused so first paint / browser tests keep full contrast chrome.
+  const [windowFocused, setWindowFocused] = useState(true)
   const dragStartRef = useRef<{ x: number; y: number } | undefined>(undefined)
   const dragStartedRef = useRef(false)
 
@@ -75,6 +86,48 @@ export function WindowTitlebar({
     return () => {
       mounted = false
       void unlistenPromise.then((unlisten) => unlisten?.())
+    }
+  }, [controller])
+
+  // Focused vs blurred titlebar: critical when undecorated windows stack
+  // (Profile View over the main shell looks like one continuous charcoal field).
+  useEffect(() => {
+    let mounted = true
+    const applyFocus = (focused: boolean) => {
+      if (!mounted) return
+      setWindowFocused(focused)
+      setDocumentWindowFocus(focused)
+    }
+
+    applyFocus(typeof document !== 'undefined' ? document.hasFocus() : true)
+
+    const onDomFocus = () => applyFocus(true)
+    const onDomBlur = () => applyFocus(false)
+    window.addEventListener('focus', onDomFocus)
+    window.addEventListener('blur', onDomBlur)
+
+    let unlistenFocus: (() => void) | undefined
+    if (controller?.onFocusChanged) {
+      void controller
+        .onFocusChanged((focused) => applyFocus(focused))
+        .then((dispose) => {
+          if (mounted) unlistenFocus = dispose
+          else dispose()
+        })
+        .catch(() => undefined)
+    }
+    if (controller?.isFocused) {
+      void controller
+        .isFocused()
+        .then((focused) => applyFocus(focused))
+        .catch(() => undefined)
+    }
+
+    return () => {
+      mounted = false
+      window.removeEventListener('focus', onDomFocus)
+      window.removeEventListener('blur', onDomBlur)
+      unlistenFocus?.()
     }
   }, [controller])
 
@@ -121,7 +174,15 @@ export function WindowTitlebar({
   const hasMenus = Boolean(children)
 
   return (
-    <header className="window-titlebar main-titlebar" data-menu-root>
+    <header
+      className={[
+        'window-titlebar',
+        'main-titlebar',
+        windowFocused ? 'is-window-focused' : 'is-window-blurred',
+      ].join(' ')}
+      data-menu-root
+      data-window-focused={windowFocused ? 'true' : 'false'}
+    >
       <BrandLockup compact={compactLockup} showWordmark={showWordmark} />
       {hasMenus ? (
         <nav aria-label="Application menu" className="window-titlebar-menu main-titlebar-menu">
