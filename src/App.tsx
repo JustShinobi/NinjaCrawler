@@ -850,7 +850,7 @@ function App() {
     } catch (openError) {
       const message = openError instanceof Error ? openError.message : String(openError)
       if (typeof window !== 'undefined' && typeof window.alert === 'function') {
-        window.alert(`Failed to open Accounts.\n${message}`)
+        window.alert(`Failed to open Accounts editor.\n${message}`)
       }
     }
   }
@@ -1437,6 +1437,13 @@ function App() {
     }
 
     setOpenMenu(null)
+    const linkedSources = workspaceSnapshot.sources.filter((source) => source.accountId === account.id).length
+    const confirmMessage = linkedSources > 0
+      ? `Delete account "${account.displayName}"? ${linkedSources} linked source${linkedSources === 1 ? '' : 's'} will lose this account assignment. This cannot be undone.`
+      : `Delete account "${account.displayName}"? This cannot be undone.`
+    if (typeof window !== 'undefined' && typeof window.confirm === 'function' && !window.confirm(confirmMessage)) {
+      return
+    }
     await deleteProviderAccount(account.id)
   }
 
@@ -1450,7 +1457,7 @@ function App() {
             onClick={() => setOpenMenu(openMenu === 'Accounts' ? null : 'Accounts')}
             type="button"
           >
-            Accounts
+            Accounts editor
           </button>
           {openMenu === 'Accounts' ? (
             <AccountsMenu

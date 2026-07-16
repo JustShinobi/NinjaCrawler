@@ -17,3 +17,4 @@ connectors/bootstrap/**/*.bin
 connectors/bootstrap/**/*.sig
 __pycache__/
 *.pyc
+mcps/

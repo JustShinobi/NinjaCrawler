@@ -11,6 +11,8 @@ import type {
   ProviderKey,
   RuntimeLogEntry,
 } from '../../domain/models'
+import { WindowShell } from '../brand/WindowShell'
+import { WindowTitlebar } from '../brand/WindowTitlebar'
 
 const EMPTY_LOGS: RuntimeLogEntry[] = []
 const EMPTY_PROVIDERS: ProviderDescriptor[] = []
@@ -304,107 +306,114 @@ export function RuntimeLogWindowPage() {
   }, [contextReady, runQuery])
 
   return (
-    <div className="runtime-log-window-shell">
-      <section className="runtime-log-toolbar panel">
-        <div className="runtime-log-window-filters">
-          <label className="accounts-config-field">
-            <span>Type</span>
-            <select onChange={(event) => setLevel(event.target.value)} value={level}>
-              <option value="all">All</option>
-              <option value="info">Info</option>
-              <option value="warning">Warning</option>
-              <option value="error">Error</option>
-              <option value="debug">Debug</option>
-            </select>
-          </label>
+    <WindowShell
+      density="compact"
+      titlebar={
+        <WindowTitlebar
+          title="Runtime Log"
+          trailing={
+            <span className="window-titlebar-status-meta">
+              {logs.length} · {loading ? 'Syncing' : 'Watching'}
+            </span>
+          }
+        />
+      }
+    >
+      <div className="runtime-log-window-body">
+        <section className="runtime-log-toolbar panel">
+          <div className="runtime-log-window-filters">
+            <label className="accounts-config-field">
+              <span>Type</span>
+              <select onChange={(event) => setLevel(event.target.value)} value={level}>
+                <option value="all">All</option>
+                <option value="info">Info</option>
+                <option value="warning">Warning</option>
+                <option value="error">Error</option>
+                <option value="debug">Debug</option>
+              </select>
+            </label>
 
-          <label className="accounts-config-field">
-            <span>Scope</span>
-            <input
-              onChange={(event) => setScope(event.target.value.trim() || 'all')}
-              placeholder="all"
-              value={scope === 'all' ? '' : scope}
-            />
-          </label>
+            <label className="accounts-config-field">
+              <span>Scope</span>
+              <input
+                onChange={(event) => setScope(event.target.value.trim() || 'all')}
+                placeholder="all"
+                value={scope === 'all' ? '' : scope}
+              />
+            </label>
 
-          <label className="accounts-config-field">
-            <span>Provider</span>
-            <select
-              disabled={contextLoading}
-              onChange={(event) => setProvider(event.target.value)}
-              value={provider}
-            >
-              <option value="all">All</option>
-              {providerOptions.map((entry) => (
-                <option key={entry.key} value={entry.key}>
-                  {entry.displayName}
-                </option>
-              ))}
-            </select>
-          </label>
+            <label className="accounts-config-field">
+              <span>Provider</span>
+              <select
+                disabled={contextLoading}
+                onChange={(event) => setProvider(event.target.value)}
+                value={provider}
+              >
+                <option value="all">All</option>
+                {providerOptions.map((entry) => (
+                  <option key={entry.key} value={entry.key}>
+                    {entry.displayName}
+                  </option>
+                ))}
+              </select>
+            </label>
 
-          <label className="accounts-config-field">
-            <span>Account</span>
-            <select
-              disabled={contextLoading}
-              onChange={(event) => setAccountId(event.target.value)}
-              value={accountId}
-            >
-              <option value="all">All</option>
-              {accountOptions.map((entry) => (
-                <option key={entry.id} value={entry.id}>
-                  {entry.label}
-                </option>
-              ))}
-            </select>
-          </label>
-        </div>
-        <div className="runtime-log-window-summary">
-          <span className="runtime-log-window-summary-label">Live</span>
-          <strong>{logs.length}</strong>
-          <span className="runtime-log-window-summary-label">
-            {loading ? 'Syncing' : 'Watching'}
-          </span>
-        </div>
-      </section>
-
-      <section className="runtime-log-window-table panel">
-        {activeError ? <div className="runtime-log-window-error">{activeError}</div> : null}
-        {loading ? <div className="runtime-log-window-empty">Loading runtime log...</div> : null}
-        {!loading && logs.length === 0 ? (
-          <div className="runtime-log-window-empty">No log entries matched the current filters.</div>
-        ) : null}
-        {!loading && logs.length > 0 ? (
-          <div className="runtime-log-feed" role="list">
-            {logs.map((entry) => (
-              <article className="runtime-log-entry" data-level={entry.level} key={entry.id} role="listitem">
-                <div className="runtime-log-entry-meta">
-                  <span className={`runtime-log-level runtime-log-level-${entry.level}`}>
-                    {entry.level}
-                  </span>
-                  <span className="runtime-log-entry-time">{formatTimestamp(entry.timestamp)}</span>
-                  <span className="runtime-log-entry-scope">{renderScope(entry.scope)}</span>
-                </div>
-                <p className="runtime-log-entry-message">{renderHighlightedText(entry.message)}</p>
-                <div className="runtime-log-entry-facts">
-                  {entry.provider ? <span className="runtime-log-fact">{entry.provider}</span> : null}
-                  {entry.accountId ? (
-                    <span className="runtime-log-fact">
-                      {resolveAccountLabel(entry.accountId, accounts)}
-                    </span>
-                  ) : null}
-                  {entry.sourceHandle ? (
-                    <span className="runtime-log-fact runtime-log-fact-handle">{entry.sourceHandle}</span>
-                  ) : null}
-                </div>
-                {entry.detail ? (
-                  <pre className="runtime-log-entry-detail">{renderHighlightedText(entry.detail)}</pre>
-                ) : null}
-              </article>
-            ))}
+            <label className="accounts-config-field">
+              <span>Account</span>
+              <select
+                disabled={contextLoading}
+                onChange={(event) => setAccountId(event.target.value)}
+                value={accountId}
+              >
+                <option value="all">All</option>
+                {accountOptions.map((entry) => (
+                  <option key={entry.id} value={entry.id}>
+                    {entry.label}
+                  </option>
+                ))}
+              </select>
+            </label>
           </div>
-        ) : null}
-      </section>
-    </div>
+        </section>
+
+        <section className="runtime-log-window-table panel">
+          {activeError ? <div className="runtime-log-window-error">{activeError}</div> : null}
+          {loading ? <div className="runtime-log-window-empty">Loading runtime log...</div> : null}
+          {!loading && logs.length === 0 ? (
+            <div className="runtime-log-window-empty">No log entries matched the current filters.</div>
+          ) : null}
+          {!loading && logs.length > 0 ? (
+            <div className="runtime-log-feed" role="list">
+              {logs.map((entry) => (
+                <article className="runtime-log-entry" data-level={entry.level} key={entry.id} role="listitem">
+                  <div className="runtime-log-entry-meta">
+                    <span className={`runtime-log-level runtime-log-level-${entry.level}`}>
+                      {entry.level}
+                    </span>
+                    <span className="runtime-log-entry-time">{formatTimestamp(entry.timestamp)}</span>
+                    <span className="runtime-log-entry-scope">{renderScope(entry.scope)}</span>
+                  </div>
+                  <p className="runtime-log-entry-message">{renderHighlightedText(entry.message)}</p>
+                  <div className="runtime-log-entry-facts">
+                    {entry.provider ? <span className="runtime-log-fact">{entry.provider}</span> : null}
+                    {entry.accountId ? (
+                      <span className="runtime-log-fact">
+                        {resolveAccountLabel(entry.accountId, accounts)}
+                      </span>
+                    ) : null}
+                    {entry.sourceHandle ? (
+                      <span className="runtime-log-fact runtime-log-fact-handle">{entry.sourceHandle}</span>
+                    ) : null}
+                  </div>
+                  {entry.detail ? (
+                    <pre className="runtime-log-entry-detail">{renderHighlightedText(entry.detail)}</pre>
+                  ) : null}
+                </article>
+              ))}
+            </div>
+          ) : null}
+        </section>
+      </div>
+    </WindowShell>
   )
 }

@@ -143,7 +143,7 @@ describe('AccountsPage', () => {
 
     expect(await screen.findByDisplayValue('Instagram Main')).toBeTruthy()
     expect(screen.queryByRole('heading', { name: /account configuration/i })).toBeNull()
-    expect(screen.getByText(/^1 cookies$/i)).toBeTruthy()
+    expect(screen.getByText(/1 cookies/i)).toBeTruthy()
     expect(screen.getByRole('button', { name: /^edit cookies$/i })).toBeTruthy()
     expect(await screen.findByDisplayValue('D:/Media/Instagram/Main')).toBeTruthy()
     expect(screen.queryByRole('button', { name: /^run saved posts$/i })).toBeNull()
@@ -151,7 +151,8 @@ describe('AccountsPage', () => {
     expect(screen.getAllByText(/^authorization$/i).length).toBeGreaterThan(0)
     expect(screen.getByRole('textbox', { name: /^x-csrftoken/i })).toBeTruthy()
     expect(screen.getByRole('textbox', { name: /^x-ig-app-id/i })).toBeTruthy()
-    expect(screen.getByRole('textbox', { name: /^useragent/i })).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: /show advanced fields/i }))
+    expect(screen.getByRole('textbox', { name: /^user agent/i })).toBeTruthy()
     expect(screen.queryByRole('button', { name: /^import session$/i })).toBeNull()
     expect(screen.queryByRole('button', { name: /^login$/i })).toBeNull()
     expect(screen.queryByLabelText(/session payload/i)).toBeNull()
@@ -240,7 +241,7 @@ describe('AccountsPage', () => {
     expect(screen.getByText(/add cookies now or save the account first/i)).toBeTruthy()
     expect(screen.getByRole('button', { name: /^edit cookies$/i })).toBeTruthy()
     fireEvent.click(screen.getByRole('tab', { name: /^provider$/i }))
-    expect(screen.getByText('Use UserAgent')).toBeTruthy()
+    expect(screen.getByText('Use user agent')).toBeTruthy()
     expect(store.loadProviderAccountEditor).not.toHaveBeenCalled()
   })
 
@@ -333,7 +334,7 @@ describe('AccountsPage', () => {
     fireEvent.click(screen.getByRole('button', { name: /^ok$/i }))
     fireEvent.click(screen.getByRole('button', { name: /^save cookies$/i }))
 
-    expect(await screen.findByText(/1 draft cookie(?:s)? ready to save with the new account/i)).toBeTruthy()
+    expect(await screen.findByText(/1 draft cookies ready to save with the new account/i)).toBeTruthy()
 
     fireEvent.change(screen.getByLabelText(/display name/i), {
       target: { value: 'Instagram Draft' },
@@ -469,11 +470,13 @@ describe('AccountsPage', () => {
       },
     )
 
+    const confirm = vi.spyOn(globalThis, 'confirm').mockReturnValue(true)
     fireEvent.click(await screen.findByRole('button', { name: /^clear cookies$/i }))
 
     await waitFor(() => {
       expect(clearProviderAccountCookies).toHaveBeenCalledWith('account-1')
     })
+    confirm.mockRestore()
   })
 
   it('keeps account actions in the footer without saved-post or history controls', async () => {

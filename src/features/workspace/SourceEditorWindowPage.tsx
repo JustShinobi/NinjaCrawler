@@ -10,6 +10,8 @@ import type {
   ProviderKey,
 } from '../../domain/models'
 import { useAppStore } from '../../state/appStore'
+import { WindowShell } from '../brand/WindowShell'
+import { WindowTitlebar } from '../brand/WindowTitlebar'
 import { SourceEditorDialog } from './SourceEditorDialog'
 
 const PROVIDERS: ProviderKey[] = ['instagram', 'tiktok', 'twitter']
@@ -113,12 +115,34 @@ export function SourceEditorWindowPage({
     }
   }, [isDirty, signature])
 
+  const titlebarTrailing = isDirty ? (
+    <span className="window-titlebar-status-meta source-editor-titlebar-dirty">Unsaved changes</span>
+  ) : null
+
   if (loading) {
-    return <div className="app-shell loading-shell">Loading profile editor...</div>
+    return (
+      <WindowShell
+        className="profile-editor-window-shell"
+        contentClassName="profile-editor-window-content"
+        titlebar={<WindowTitlebar title="Profile editor" />}
+      >
+        <div className="loading-shell source-editor-loading">Loading profile editor…</div>
+      </WindowShell>
+    )
   }
 
   if (!snapshot) {
-    return <div className="app-shell loading-shell">Failed to load workspace: {error ?? 'missing snapshot'}</div>
+    return (
+      <WindowShell
+        className="profile-editor-window-shell"
+        contentClassName="profile-editor-window-content"
+        titlebar={<WindowTitlebar title="Profile editor" />}
+      >
+        <div className="loading-shell source-editor-loading" role="alert">
+          Failed to load workspace: {error ?? 'missing snapshot'}
+        </div>
+      </WindowShell>
+    )
   }
 
   const source = activeIntent.sourceId
@@ -126,7 +150,11 @@ export function SourceEditorWindowPage({
     : undefined
 
   return (
-    <div className="profile-editor-window-shell">
+    <WindowShell
+      className="profile-editor-window-shell"
+      contentClassName="profile-editor-window-content"
+      titlebar={<WindowTitlebar title="Profile editor" trailing={titlebarTrailing} />}
+    >
       <SourceEditorDialog
         key={`${intentRevision}:${signature}`}
         preferredProvider={activeIntent.preferredProvider}
@@ -145,6 +173,6 @@ export function SourceEditorWindowPage({
         snapshot={snapshot}
         source={source}
       />
-    </div>
+    </WindowShell>
   )
 }

@@ -457,6 +457,9 @@ pub fn open_accounts_window(
     intent: Option<AccountsWindowIntent>,
 ) -> Result<(), String> {
     if let Some(window) = app.get_webview_window(ACCOUNTS_WINDOW_LABEL) {
+        if !window.is_maximized().map_err(|error| error.to_string())? {
+            let _ = apply_accounts_window_constraints(&window);
+        }
         window.show().map_err(|error| error.to_string())?;
         window.unminimize().map_err(|error| error.to_string())?;
         window.set_focus().map_err(|error| error.to_string())?;
@@ -615,6 +618,7 @@ fn create_runtime_log_window(app: &tauri::AppHandle) -> Result<(), String> {
     .title("Runtime Log")
     .inner_size(1100.0, 760.0)
     .min_inner_size(860.0, 540.0)
+    .decorations(false)
     .closable(true)
     .visible(false)
     .build()
@@ -640,6 +644,7 @@ fn create_connector_debug_window(app: &tauri::AppHandle) -> Result<(), String> {
     .title("Realtime Connector Debugger")
     .inner_size(1280.0, 820.0)
     .min_inner_size(780.0, 520.0)
+    .decorations(false)
     .closable(true)
     .visible(false)
     .build()
@@ -684,6 +689,7 @@ fn create_source_sync_queue_window(app: &tauri::AppHandle) -> Result<(), String>
     .title("Queue Status")
     .inner_size(1180.0, 780.0)
     .min_inner_size(920.0, 560.0)
+    .decorations(false)
     .closable(true)
     .visible(false)
     .build()
@@ -796,6 +802,7 @@ fn create_connector_runtimes_window(app: &tauri::AppHandle) -> Result<(), String
     .title("Connector Runtimes")
     .inner_size(1120.0, 760.0)
     .min_inner_size(900.0, 560.0)
+    .decorations(false)
     .closable(true)
     .visible(false)
     .build()
@@ -821,10 +828,14 @@ fn create_accounts_window(
         ACCOUNTS_WINDOW_LABEL,
         tauri::WebviewUrl::App(accounts_entrypoint(intent.as_ref()).into()),
     )
-    .title("Accounts")
-    .inner_size(920.0, 820.0)
-    .min_inner_size(920.0, 620.0)
-    .max_inner_size(920.0, 4096.0)
+    .title("Accounts editor")
+    .inner_size(1040.0, 820.0)
+    // Desktop floor: sidebar + workbench master-detail. No mobile collapse below this width.
+    .min_inner_size(1040.0, 640.0)
+    .max_inner_size(1600.0, 4096.0)
+    .resizable(true)
+    .maximizable(true)
+    .decorations(false)
     .closable(true)
     .visible(false)
     .build()
@@ -834,7 +845,7 @@ fn create_accounts_window(
         app,
         &window,
         WindowSizeSpec {
-            width: 920,
+            width: 1040,
             height: 820,
         },
         apply_accounts_window_constraints,
@@ -851,11 +862,12 @@ fn create_profile_editor_window(
         tauri::WebviewUrl::App(profile_editor_entrypoint(intent.as_ref()).into()),
     )
     .title("Profile editor")
-    .inner_size(960.0, 900.0)
-    .min_inner_size(960.0, 900.0)
+    .inner_size(960.0, 820.0)
+    .min_inner_size(960.0, 680.0)
     .max_inner_size(960.0, 4096.0)
     .resizable(true)
-    .maximizable(false)
+    .maximizable(true)
+    .decorations(false)
     .closable(true)
     .visible(false)
     .build()
@@ -866,28 +878,25 @@ fn create_profile_editor_window(
         &window,
         WindowSizeSpec {
             width: 960,
-            height: 900,
+            height: 820,
         },
         apply_profile_editor_window_constraints,
     )
 }
 
 fn apply_profile_editor_window_constraints(window: &tauri::WebviewWindow) -> Result<(), String> {
-    if window.is_maximized().map_err(|error| error.to_string())? {
-        window.unmaximize().map_err(|error| error.to_string())?;
-    }
     let scale_factor = window.scale_factor().map_err(|error| error.to_string())?;
-    let current_height = window
+    let current = window
         .inner_size()
         .map_err(|error| error.to_string())?
-        .to_logical::<f64>(scale_factor)
-        .height
-        .max(900.0);
+        .to_logical::<f64>(scale_factor);
+    let current_height = current.height.max(680.0);
+    let current_width = current.width.max(960.0).min(960.0);
     window
-        .set_size(tauri::LogicalSize::new(960.0, current_height))
+        .set_size(tauri::LogicalSize::new(current_width, current_height))
         .map_err(|error| error.to_string())?;
     window
-        .set_min_size(Some(tauri::LogicalSize::new(960.0, 900.0)))
+        .set_min_size(Some(tauri::LogicalSize::new(960.0, 680.0)))
         .map_err(|error| error.to_string())?;
     window
         .set_max_size(Some(tauri::LogicalSize::new(960.0, 4096.0)))
@@ -896,33 +905,47 @@ fn apply_profile_editor_window_constraints(window: &tauri::WebviewWindow) -> Res
         .set_resizable(true)
         .map_err(|error| error.to_string())?;
     window
-        .set_maximizable(false)
+        .set_maximizable(true)
         .map_err(|error| error.to_string())?;
     Ok(())
 }
 
 fn apply_accounts_window_constraints(window: &tauri::WebviewWindow) -> Result<(), String> {
+    // Keep min width in lockstep with the designed master-detail layout (no responsive stack).
+    const MIN_W: f64 = 1040.0;
+    const MIN_H: f64 = 640.0;
+    const MAX_W: f64 = 1600.0;
+
+    window
+        .set_min_size(Some(tauri::LogicalSize::new(MIN_W, MIN_H)))
+        .map_err(|error| error.to_string())?;
+    window
+        .set_max_size(Some(tauri::LogicalSize::new(MAX_W, 4096.0)))
+        .map_err(|error| error.to_string())?;
+    window
+        .set_resizable(true)
+        .map_err(|error| error.to_string())?;
+    window
+        .set_maximizable(true)
+        .map_err(|error| error.to_string())?;
+
     if window.is_maximized().map_err(|error| error.to_string())? {
-        window.unmaximize().map_err(|error| error.to_string())?;
+        return Ok(());
     }
 
     let scale_factor = window.scale_factor().map_err(|error| error.to_string())?;
-    let current_height = window
+    let current = window
         .inner_size()
         .map_err(|error| error.to_string())?
-        .to_logical::<f64>(scale_factor)
-        .height
-        .max(620.0);
+        .to_logical::<f64>(scale_factor);
+    let width = current.width.max(MIN_W).min(MAX_W);
+    let height = current.height.max(MIN_H);
 
-    window
-        .set_size(tauri::LogicalSize::new(920.0, current_height))
-        .map_err(|error| error.to_string())?;
-    window
-        .set_min_size(Some(tauri::LogicalSize::new(920.0, 620.0)))
-        .map_err(|error| error.to_string())?;
-    window
-        .set_max_size(Some(tauri::LogicalSize::new(920.0, 4096.0)))
-        .map_err(|error| error.to_string())?;
+    if (current.width - width).abs() > 0.5 || (current.height - height).abs() > 0.5 {
+        window
+            .set_size(tauri::LogicalSize::new(width, height))
+            .map_err(|error| error.to_string())?;
+    }
 
     Ok(())
 }

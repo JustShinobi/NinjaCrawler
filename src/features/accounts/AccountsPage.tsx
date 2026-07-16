@@ -19,6 +19,7 @@ import type {
 } from '../../domain/models'
 import { useAppStore } from '../../state/appStore'
 import { CookieEditorDialog } from './CookieEditorDialog'
+import { formatAuthState } from './formatAuthState'
 import { ProviderAccountSettingsPanel } from './ProviderAccountSettingsPanel'
 import {
   buildProviderAccountSettingsDraft,
@@ -31,6 +32,10 @@ const EMPTY_ACCOUNT_SESSIONS: ProviderAccountSession[] = []
 
 type AccountsTabKey = 'account' | 'defaults' | 'provider'
 
+type PendingNavigation =
+  | { kind: 'edit'; account: ProviderAccount }
+  | { kind: 'create'; provider?: ProviderKey }
+
 const ACCOUNTS_TABS: Array<{
   key: AccountsTabKey
   label: string
@@ -39,6 +44,14 @@ const ACCOUNTS_TABS: Array<{
   { key: 'account', label: 'Account' },
   { key: 'defaults', label: 'Defaults', categories: ['defaults', 'extractVideo'] },
   { key: 'provider', label: 'Provider', categories: ['authorization', 'download', 'timers', 'errors'] },
+]
+
+const PRESET_SCOPE_OPTIONS: Array<{ key: keyof InstagramSourceSyncPreset['sections']; label: string }> = [
+  { key: 'timeline', label: 'Timeline' },
+  { key: 'reels', label: 'Reels' },
+  { key: 'stories', label: 'Stories' },
+  { key: 'storiesUser', label: 'Stories (user)' },
+  { key: 'tagged', label: 'Tagged' },
 ]
 
 function createDraft(providerCatalog: ProviderDescriptor[], provider?: ProviderKey): ProviderAccountUpsert {
@@ -74,20 +87,22 @@ function formatProviderLabel(provider: ProviderKey, providerCatalog: ProviderDes
   return providerCatalog.find((descriptor) => descriptor.key === provider)?.displayName ?? provider
 }
 
-function describeSession(session?: ProviderAccountSession): string {
-  if (!session || !session.hasSecret) {
-    return 'No stored cookies.'
+function formatShortDateTime(value: string | undefined): string {
+  if (!value) {
+    return ''
   }
-
-  const parts = [`${session.cookieCount} cookies`]
-  if (session.importedAt) {
-    parts.push(`imported ${session.importedAt}`)
+  const ms = Date.parse(value)
+  if (Number.isNaN(ms)) {
+    return value
   }
-  if (session.fingerprint) {
-    parts.push(session.fingerprint)
+  try {
+    return new Intl.DateTimeFormat(undefined, {
+      dateStyle: 'medium',
+      timeStyle: 'short',
+    }).format(new Date(ms))
+  } catch {
+    return value
   }
-
-  return parts.join(' · ')
 }
 
 function resolveSavedAccount(
@@ -122,6 +137,21 @@ function serializeSettingsSignature(settingsDraft: Record<string, string>): stri
   )
 }
 
+function serializeCookiesSignature(cookies: ProviderAccountCookie[]): string {
+  return JSON.stringify(cookies)
+}
+
+function serializePresetsSignature(presets: Record<InstagramPresetSlot, InstagramSourceSyncPreset>): string {
+  return JSON.stringify(presets)
+}
+
+function buildPresetsFromSettings(appSettings: Parameters<typeof resolveInstagramGlobalSyncPreset>[0]): Record<InstagramPresetSlot, InstagramSourceSyncPreset> {
+  return {
+    preset1: resolveInstagramGlobalSyncPreset(appSettings, 'preset1'),
+    preset2: resolveInstagramGlobalSyncPreset(appSettings, 'preset2'),
+  }
+}
+
 export interface AccountsPageProps {
   initialAccountId?: string
   initialProvider?: ProviderKey
@@ -150,6 +180,7 @@ export function AccountsPage({
   const accounts = snapshot?.accounts ?? EMPTY_ACCOUNTS
   const accountSessions = snapshot?.accountSessions ?? EMPTY_ACCOUNT_SESSIONS
   const providerCatalog = snapshot?.providerCatalog ?? DEFAULT_PROVIDER_CATALOG
+  const initialPresets = buildPresetsFromSettings(snapshot?.appSettings)
 
   const [launchStateApplied, setLaunchStateApplied] = useState(false)
   const [mode, setMode] = useState<'create' | 'edit'>('create')
@@ -162,14 +193,16 @@ export function AccountsPage({
   const [savedDraftSignature, setSavedDraftSignature] = useState(() => serializeDraftSignature(createDraft(providerCatalog, initialProvider)))
   const [savedSettingsSignature, setSavedSettingsSignature] = useState(() => serializeSettingsSignature(buildProviderAccountSettingsDraft(initialProvider ?? 'instagram', [])))
   const [draftCookies, setDraftCookies] = useState<ProviderAccountCookie[]>([])
-  const [globalPresetsDraft, setGlobalPresetsDraft] = useState<Record<InstagramPresetSlot, InstagramSourceSyncPreset>>(() => ({
-    preset1: resolveInstagramGlobalSyncPreset(snapshot?.appSettings, 'preset1'),
-    preset2: resolveInstagramGlobalSyncPreset(snapshot?.appSettings, 'preset2'),
-  }))
+  const [savedCookiesSignature, setSavedCookiesSignature] = useState(() => serializeCookiesSignature([]))
+  const [globalPresetsDraft, setGlobalPresetsDraft] = useState(initialPresets)
+  const [savedPresetsSignature, setSavedPresetsSignature] = useState(() => serializePresetsSignature(initialPresets))
   const [savingGlobalPreset, setSavingGlobalPreset] = useState<InstagramPresetSlot>()
   const [justSaved, setJustSaved] = useState(false)
   const [importState, setImportState] = useState<ProviderAccountImportState | null>(null)
+  const [pendingNavigation, setPendingNavigation] = useState<PendingNavigation | null>(null)
+  const [fingerprintCopied, setFingerprintCopied] = useState(false)
   const settingsRequestRef = useRef(0)
+  const isDirtyRef = useRef(false)
 
   const selectedAccount = useMemo(
     () => accounts.find((account) => account.id === selectedAccountId),
@@ -179,9 +212,15 @@ export function AccountsPage({
     () => accountSessions.find((session) => session.accountId === selectedAccountId),
     [accountSessions, selectedAccountId],
   )
-  const applySavedSignatures = useCallback((nextDraft: ProviderAccountUpsert, nextSettingsDraft: Record<string, string>) => {
+
+  const applySavedSignatures = useCallback((
+    nextDraft: ProviderAccountUpsert,
+    nextSettingsDraft: Record<string, string>,
+    nextCookies: ProviderAccountCookie[] = [],
+  ) => {
     setSavedDraftSignature(serializeDraftSignature(nextDraft))
     setSavedSettingsSignature(serializeSettingsSignature(nextSettingsDraft))
+    setSavedCookiesSignature(serializeCookiesSignature(nextCookies))
   }, [])
 
   const resetSettingsDraft = useCallback((provider: ProviderKey) => {
@@ -206,7 +245,7 @@ export function AccountsPage({
       const nextSettingsDraft = buildProviderAccountSettingsDraft(provider, editor.settings)
       setSettingsDraft(nextSettingsDraft)
       setImportState(editor.importState ?? null)
-      applySavedSignatures(baselineDraft, nextSettingsDraft)
+      applySavedSignatures(baselineDraft, nextSettingsDraft, [])
     } finally {
       if (settingsRequestRef.current === requestId) {
         setSettingsLoading(false)
@@ -214,30 +253,38 @@ export function AccountsPage({
     }
   }, [applySavedSignatures, loadProviderAccountEditor])
 
-  const openCreate = useCallback((provider?: ProviderKey) => {
+  const openCreate = useCallback((provider?: ProviderKey, options?: { resetTab?: boolean }) => {
     const nextDraft = createDraft(providerCatalog, provider)
     setMode('create')
-    setActiveTab('account')
+    if (options?.resetTab !== false) {
+      setActiveTab('account')
+    }
     setSelectedAccountId(undefined)
     setDraft(nextDraft)
     setDraftCookies([])
     setCookieDialogOpen(false)
     setImportState(null)
+    setJustSaved(false)
+    setPendingNavigation(null)
     const nextSettingsDraft = resetSettingsDraft(nextDraft.provider)
-    applySavedSignatures(nextDraft, nextSettingsDraft)
+    applySavedSignatures(nextDraft, nextSettingsDraft, [])
   }, [applySavedSignatures, providerCatalog, resetSettingsDraft])
 
-  const openEdit = useCallback((account: ProviderAccount) => {
+  const openEdit = useCallback((account: ProviderAccount, options?: { resetTab?: boolean }) => {
     const nextDraft = mapAccountToDraft(account, providerCatalog)
     setMode('edit')
-    setActiveTab('account')
+    if (options?.resetTab) {
+      setActiveTab('account')
+    }
     setSelectedAccountId(account.id)
     setDraft(nextDraft)
     setDraftCookies([])
     setCookieDialogOpen(false)
     setImportState(null)
+    setJustSaved(false)
+    setPendingNavigation(null)
     const defaultSettings = resetSettingsDraft(account.provider)
-    applySavedSignatures(nextDraft, defaultSettings)
+    applySavedSignatures(nextDraft, defaultSettings, [])
     void loadSettings(account.id, account.provider, nextDraft)
   }, [applySavedSignatures, loadSettings, providerCatalog, resetSettingsDraft])
 
@@ -252,21 +299,21 @@ export function AccountsPage({
         return
       }
 
-      openEdit(launchAccount)
+      openEdit(launchAccount, { resetTab: true })
       setLaunchStateApplied(true)
       return
     }
 
     if (initialMode === 'create' || initialProvider) {
-      openCreate(initialProvider)
+      openCreate(initialProvider, { resetTab: true })
       setLaunchStateApplied(true)
       return
     }
 
     if (accounts.length > 0) {
-      openEdit(accounts[0])
+      openEdit(accounts[0], { resetTab: true })
     } else {
-      openCreate(initialProvider)
+      openCreate(initialProvider, { resetTab: true })
     }
 
     setLaunchStateApplied(true)
@@ -279,15 +326,14 @@ export function AccountsPage({
 
     const account = accounts.find((entry) => entry.id === selectedAccountId)
     if (!account) {
-      openCreate(initialProvider)
+      openCreate(initialProvider, { resetTab: true })
     }
   }, [accounts, initialProvider, mode, openCreate, selectedAccountId])
 
   useEffect(() => {
-    setGlobalPresetsDraft({
-      preset1: resolveInstagramGlobalSyncPreset(snapshot?.appSettings, 'preset1'),
-      preset2: resolveInstagramGlobalSyncPreset(snapshot?.appSettings, 'preset2'),
-    })
+    const next = buildPresetsFromSettings(snapshot?.appSettings)
+    setGlobalPresetsDraft(next)
+    setSavedPresetsSignature(serializePresetsSignature(next))
   }, [snapshot?.appSettings])
 
   const handleProviderChange = useCallback((provider: ProviderKey) => {
@@ -302,12 +348,64 @@ export function AccountsPage({
     }
     setDraft(nextDraft)
     setDraftCookies([])
+    setImportState(null)
     const nextSettingsDraft = resetSettingsDraft(provider)
-    applySavedSignatures(nextDraft, nextSettingsDraft)
+    applySavedSignatures(nextDraft, nextSettingsDraft, [])
   }, [applySavedSignatures, draft, providerCatalog, resetSettingsDraft])
 
-  async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
-    event.preventDefault()
+  const isCreateMode = mode === 'create'
+  const providerLocked = !isCreateMode || Boolean(initialProvider)
+  const canSaveName = draft.displayName.trim().length > 0
+  const providerLabel = formatProviderLabel(draft.provider, providerCatalog)
+
+  const accountDirty = useMemo(
+    () =>
+      serializeDraftSignature(draft) !== savedDraftSignature
+      || serializeSettingsSignature(settingsDraft) !== savedSettingsSignature
+      || serializeCookiesSignature(draftCookies) !== savedCookiesSignature,
+    [draft, draftCookies, savedCookiesSignature, savedDraftSignature, savedSettingsSignature, settingsDraft],
+  )
+
+  const presetsDirty = useMemo(
+    () => draft.provider === 'instagram' && serializePresetsSignature(globalPresetsDraft) !== savedPresetsSignature,
+    [draft.provider, globalPresetsDraft, savedPresetsSignature],
+  )
+
+  const isDirty = accountDirty || presetsDirty
+
+  useEffect(() => {
+    isDirtyRef.current = isDirty
+    onDirtyChange?.(isDirty)
+  }, [isDirty, onDirtyChange])
+
+  useEffect(() => {
+    if (isDirty && justSaved) {
+      setJustSaved(false)
+    }
+  }, [isDirty, justSaved])
+
+  useEffect(() => () => {
+    onDirtyChange?.(false)
+  }, [onDirtyChange])
+
+  async function saveDirtyPresets(): Promise<void> {
+    if (draft.provider !== 'instagram' || !presetsDirty) {
+      return
+    }
+
+    for (const slot of Object.keys(globalPresetsDraft) as InstagramPresetSlot[]) {
+      const preset = globalPresetsDraft[slot]
+      await upsertAppSetting({
+        key: INSTAGRAM_GLOBAL_PRESET_SETTING_KEYS[slot],
+        value: serializeInstagramGlobalSyncPreset(slot, preset),
+        category: 'policy',
+        description: slot === 'preset1' ? 'Instagram global sync preset 1' : 'Instagram global sync preset 2',
+      })
+    }
+    setSavedPresetsSignature(serializePresetsSignature(globalPresetsDraft))
+  }
+
+  async function persistAccount(): Promise<boolean> {
     setJustSaved(false)
 
     const knownIds = new Set(accounts.map((account) => account.id))
@@ -321,7 +419,7 @@ export function AccountsPage({
       const savedSnapshot = await upsertProviderAccount(payload)
       const savedAccount = resolveSavedAccount(savedSnapshot.accounts, payload, knownIds)
       if (!savedAccount) {
-        return
+        return false
       }
 
       const serializedSettings = serializeProviderAccountSettingsDraft(savedAccount.provider, settingsDraft)
@@ -339,15 +437,30 @@ export function AccountsPage({
         await saveProviderAccountCookies(savedAccount.id, draftCookies)
         setDraftCookies([])
       }
+
+      await saveDirtyPresets()
+
       const nextDraft = mapAccountToDraft(savedAccount, providerCatalog)
       setMode('edit')
       setSelectedAccountId(savedAccount.id)
       setDraft(nextDraft)
-      applySavedSignatures(nextDraft, nextSettingsDraft)
+      applySavedSignatures(nextDraft, nextSettingsDraft, [])
       setJustSaved(true)
+      return true
     } catch {
-      // O store já registrou a mensagem em `storeError`, exibida no rodapé.
+      return false
     }
+  }
+
+  async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    if (!canSaveName) {
+      return
+    }
+    if (!isCreateMode && !isDirty) {
+      return
+    }
+    await persistAccount()
   }
 
   async function handleValidateAccount() {
@@ -371,7 +484,14 @@ export function AccountsPage({
   async function handleClearCookies() {
     if (!selectedAccount) {
       setDraftCookies([])
+      applySavedSignatures(draft, settingsDraft, [])
       return
+    }
+
+    if (typeof window !== 'undefined' && typeof window.confirm === 'function') {
+      if (!window.confirm('Clear all stored cookies for this account?')) {
+        return
+      }
     }
 
     const savedSnapshot = await clearProviderAccountCookies(selectedAccount.id)
@@ -398,11 +518,17 @@ export function AccountsPage({
     if (savedAccount) {
       const nextDraft = mapAccountToDraft(savedAccount, providerCatalog)
       setDraft(nextDraft)
+      setSelectedAccountId(savedAccount.id)
+      setMode('edit')
       void loadSettings(savedAccount.id, savedAccount.provider, nextDraft)
     }
   }
 
   function handleResetChanges() {
+    if (presetsDirty) {
+      setGlobalPresetsDraft(buildPresetsFromSettings(snapshot?.appSettings))
+      setSavedPresetsSignature(serializePresetsSignature(buildPresetsFromSettings(snapshot?.appSettings)))
+    }
     if (selectedAccount) {
       openEdit(selectedAccount)
       return
@@ -435,79 +561,248 @@ export function AccountsPage({
         category: 'policy',
         description: slot === 'preset1' ? 'Instagram global sync preset 1' : 'Instagram global sync preset 2',
       })
+      setSavedPresetsSignature((currentSig) => {
+        try {
+          const previous = JSON.parse(currentSig) as Record<InstagramPresetSlot, InstagramSourceSyncPreset>
+          return serializePresetsSignature({ ...previous, [slot]: preset })
+        } catch {
+          return serializePresetsSignature({ ...globalPresetsDraft, [slot]: preset })
+        }
+      })
     } finally {
       setSavingGlobalPreset(undefined)
     }
   }
 
-  const isCreateMode = mode === 'create'
-  const providerLocked = !isCreateMode || Boolean(initialProvider)
-  const canSave = draft.displayName.trim().length > 0
-  const providerLabel = formatProviderLabel(draft.provider, providerCatalog)
-  const activeTabConfig = ACCOUNTS_TABS.find((tab) => tab.key === activeTab) ?? ACCOUNTS_TABS[0]
-  const isDirty = useMemo(
-    () =>
-      serializeDraftSignature(draft) !== savedDraftSignature
-      || serializeSettingsSignature(settingsDraft) !== savedSettingsSignature,
-    [draft, savedDraftSignature, savedSettingsSignature, settingsDraft],
-  )
-
-  useEffect(() => {
-    onDirtyChange?.(isDirty)
-  }, [isDirty, onDirtyChange])
-
-  // Some a confirmação "Saved" assim que o usuário volta a editar.
-  useEffect(() => {
-    if (isDirty && justSaved) {
-      setJustSaved(false)
-    }
-  }, [isDirty, justSaved])
-
-  useEffect(() => () => {
-    onDirtyChange?.(false)
-  }, [onDirtyChange])
   const displayedCookieCount = selectedAccount
     ? (selectedSession?.hasSecret ? selectedSession.cookieCount : 0)
     : draftCookies.length
   const sessionStatusText = selectedAccount
-    ? describeSession(selectedSession)
+    ? selectedSession?.hasSecret
+      ? `${selectedSession.cookieCount} cookies${selectedSession.importedAt ? ` · imported ${formatShortDateTime(selectedSession.importedAt)}` : ''}`
+      : 'No stored cookies.'
     : draftCookies.length > 0
-      ? `${draftCookies.length} draft cookie${draftCookies.length === 1 ? '' : 's'} ready to save with the new account.`
+      ? `${draftCookies.length} draft cookies ready to save with the new account.`
       : 'Add cookies now or save the account first.'
   const sessionPillLabel = selectedAccount
     ? (selectedSession?.hasSecret ? 'Stored session' : 'No session')
     : (draftCookies.length > 0 ? 'Draft cookies' : 'No session')
+  const identityTitle = isCreateMode
+    ? (draft.displayName.trim() || 'New account draft')
+    : (draft.displayName.trim() || providerLabel)
+  const stateLabel = formatAuthState(selectedAccount?.authState ?? (isCreateMode ? 'draft' : draft.authState))
+  const validatedMeta = selectedAccount?.lastValidatedAt
+    ? `Validated ${formatShortDateTime(selectedAccount.lastValidatedAt)}`
+    : 'Not validated yet'
+
+  const accountsByProvider = useMemo(() => {
+    return providerCatalog.map((descriptor) => ({
+      descriptor,
+      accounts: accounts.filter((account) => account.provider === descriptor.key),
+    }))
+  }, [accounts, providerCatalog])
+
+  const showEmptyOnboarding = accounts.length === 0 && isCreateMode
+
+  function requestNavigation(next: PendingNavigation) {
+    if (!isDirtyRef.current) {
+      if (next.kind === 'edit') {
+        openEdit(next.account)
+      } else {
+        openCreate(next.provider, { resetTab: true })
+      }
+      return
+    }
+    setPendingNavigation(next)
+  }
+
+  function handleSelectAccount(account: ProviderAccount) {
+    if (account.id === selectedAccountId && mode === 'edit') {
+      return
+    }
+    requestNavigation({ kind: 'edit', account })
+  }
+
+  function handleNewAccount(provider?: ProviderKey) {
+    requestNavigation({ kind: 'create', provider: provider ?? draft.provider })
+  }
+
+  async function handleDirtyDialogAction(action: 'cancel' | 'discard' | 'save') {
+    if (!pendingNavigation) {
+      return
+    }
+    if (action === 'cancel') {
+      setPendingNavigation(null)
+      return
+    }
+    if (action === 'save') {
+      if (!canSaveName) {
+        return
+      }
+      const ok = await persistAccount()
+      if (!ok) {
+        return
+      }
+    }
+    const next = pendingNavigation
+    setPendingNavigation(null)
+    if (next.kind === 'edit') {
+      openEdit(next.account)
+    } else {
+      openCreate(next.provider, { resetTab: true })
+    }
+  }
+
+  async function copyFingerprint(value: string) {
+    try {
+      await navigator.clipboard.writeText(value)
+      setFingerprintCopied(true)
+      window.setTimeout(() => setFingerprintCopied(false), 1500)
+    } catch {
+      // Clipboard may be unavailable in some test / restricted contexts.
+    }
+  }
+
+  const saveDisabled = Boolean(pendingCommand) || !canSaveName || (!isCreateMode && !isDirty)
+  const saveTitle = !canSaveName
+    ? 'Display name is required'
+    : (!isCreateMode && !isDirty ? 'No changes to save' : undefined)
 
   return (
     <div className="accounts-shell">
-      <section className="panel panel-accent accounts-panel accounts-summary-strip">
-        <div className="accounts-hero-metrics" role="list" aria-label="Account summary">
-          <article className="accounts-hero-metric" role="listitem">
-            <span>Account</span>
-            <strong>{draft.displayName || providerLabel}</strong>
-            <p>{isCreateMode ? 'New account draft' : 'Existing account configuration'}</p>
-          </article>
-          <article className="accounts-hero-metric" role="listitem">
-            <span>Provider</span>
-            <strong>{providerLabel}</strong>
-            <p>{providerLocked ? 'Provider locked by current context.' : 'Provider can still be changed before save.'}</p>
-          </article>
-          <article className="accounts-hero-metric" role="listitem">
-            <span>Session</span>
-            <strong>{displayedCookieCount > 0 ? `${displayedCookieCount} cookies` : 'No cookies'}</strong>
-            <p>{sessionStatusText}</p>
-          </article>
-          <article className="accounts-hero-metric" role="listitem">
-            <span>State</span>
-            <strong>{selectedAccount?.authState ?? 'Draft'}</strong>
-            <p>{selectedAccount?.lastValidatedAt ?? 'Not validated yet'}</p>
-          </article>
+      <aside className="accounts-sidebar" aria-label="Accounts list">
+        <div className="accounts-sidebar-toolbar">
+          <button
+            className={isCreateMode ? 'accounts-sidebar-new accounts-sidebar-new-active' : 'accounts-sidebar-new'}
+            disabled={Boolean(pendingCommand)}
+            onClick={() => handleNewAccount()}
+            type="button"
+          >
+            <span aria-hidden className="accounts-sidebar-new-icon">+</span>
+            <span>New account</span>
+          </button>
         </div>
-      </section>
 
-      <form className="accounts-workbench" id="accounts-config-form" onSubmit={handleSubmit}>
-        <div className="source-editor-tab-bar" role="tablist" aria-label="Account editor tabs">
-          {ACCOUNTS_TABS.map((tab) => (
+        <div className="accounts-provider-groups">
+          {accountsByProvider.map(({ descriptor, accounts: groupAccounts }) => {
+            const providerActive = draft.provider === descriptor.key
+            return (
+              <section
+                className={providerActive ? 'accounts-provider-group accounts-provider-group-active' : 'accounts-provider-group'}
+                key={descriptor.key}
+              >
+                <div className="accounts-provider-header">
+                  <span className="accounts-provider-heading">
+                    {descriptor.displayName}
+                    <span className="accounts-provider-count" aria-label={`${groupAccounts.length} accounts`}>
+                      {groupAccounts.length}
+                    </span>
+                  </span>
+                  <button
+                    aria-label={`Add ${descriptor.displayName} account`}
+                    className="accounts-provider-add"
+                    disabled={Boolean(pendingCommand)}
+                    onClick={() => handleNewAccount(descriptor.key)}
+                    title={`Add ${descriptor.displayName} account`}
+                    type="button"
+                  >
+                    <span aria-hidden>+</span>
+                  </button>
+                </div>
+                {groupAccounts.length === 0 ? (
+                  <p className="accounts-provider-empty">No accounts yet</p>
+                ) : (
+                  <ul className="accounts-entity-list">
+                    {groupAccounts.map((account) => {
+                      const active = mode === 'edit' && account.id === selectedAccountId
+                      const showState = account.authState !== 'ready'
+                      return (
+                        <li key={account.id}>
+                          <button
+                            aria-current={active ? 'true' : undefined}
+                            className={active ? 'accounts-entity-row accounts-entity-row-active' : 'accounts-entity-row'}
+                            onClick={() => handleSelectAccount(account)}
+                            type="button"
+                          >
+                            <span className="accounts-entity-name">{account.displayName}</span>
+                            {showState ? (
+                              <span className="accounts-entity-state">{formatAuthState(account.authState)}</span>
+                            ) : (
+                              <span className="accounts-entity-dot accounts-entity-dot-ready" title="Ready" aria-label="Ready" />
+                            )}
+                          </button>
+                        </li>
+                      )
+                    })}
+                  </ul>
+                )}
+              </section>
+            )
+          })}
+        </div>
+      </aside>
+
+      <div className="accounts-workbench">
+        {showEmptyOnboarding ? (
+          <section className="accounts-empty-onboarding" aria-label="Get started">
+            <h2>Add your first account</h2>
+            <p>
+              Choose a provider, set a display name and media path, then import cookies from the browser Companion
+              or paste them manually. Validate when you are ready.
+            </p>
+            <div className="accounts-empty-provider-actions">
+              {providerCatalog.map((descriptor) => (
+                <button
+                  className="ghost-button"
+                  key={descriptor.key}
+                  onClick={() => handleNewAccount(descriptor.key)}
+                  type="button"
+                >
+                  {descriptor.displayName}
+                </button>
+              ))}
+            </div>
+          </section>
+        ) : null}
+
+        <section className="accounts-identity-strip" aria-label="Account summary">
+          <div className="accounts-identity-main">
+            <h2 className="accounts-identity-title">{identityTitle}</h2>
+            <p className="accounts-identity-meta">
+              {isCreateMode && !providerLocked ? (
+                <label className="accounts-identity-provider-field">
+                  <span className="visually-hidden">Provider</span>
+                  <select
+                    aria-label="Provider"
+                    onChange={(event) => handleProviderChange(event.target.value as ProviderKey)}
+                    value={draft.provider}
+                  >
+                    {providerCatalog.map((descriptor) => (
+                      <option key={descriptor.key} value={descriptor.key}>
+                        {descriptor.displayName}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              ) : (
+                <span className="accounts-identity-badge">{providerLabel}</span>
+              )}
+              <span className="accounts-identity-sep" aria-hidden>·</span>
+              <span>{sessionStatusText}</span>
+              <span className="accounts-identity-sep" aria-hidden>·</span>
+              <span>{validatedMeta}</span>
+            </p>
+          </div>
+          <div className="accounts-identity-status">
+            <span className={stateLabel.toLowerCase() === 'ready' ? 'pill pill-ready' : 'pill'}>{stateLabel}</span>
+            {sessionPillLabel !== 'Stored session' || !selectedAccount ? (
+              <span className="pill accounts-session-pill">{sessionPillLabel}</span>
+            ) : null}
+          </div>
+        </section>
+
+        <div className="source-editor-tab-bar" role="tablist" aria-label="Accounts editor tabs">
+          {ACCOUNTS_TABS.map((tab, index) => (
             <button
               aria-controls={`accounts-tab-${tab.key}`}
               aria-selected={activeTab === tab.key}
@@ -515,7 +810,33 @@ export function AccountsPage({
               id={`accounts-tab-button-${tab.key}`}
               key={tab.key}
               onClick={() => setActiveTab(tab.key)}
+              onKeyDown={(event) => {
+                if (event.key !== 'ArrowRight' && event.key !== 'ArrowLeft' && event.key !== 'Home' && event.key !== 'End') {
+                  return
+                }
+                event.preventDefault()
+                const last = ACCOUNTS_TABS.length - 1
+                let nextIndex = index
+                if (event.key === 'ArrowRight') {
+                  nextIndex = index === last ? 0 : index + 1
+                } else if (event.key === 'ArrowLeft') {
+                  nextIndex = index === 0 ? last : index - 1
+                } else if (event.key === 'Home') {
+                  nextIndex = 0
+                } else {
+                  nextIndex = last
+                }
+                const nextTab = ACCOUNTS_TABS[nextIndex]
+                if (!nextTab) {
+                  return
+                }
+                setActiveTab(nextTab.key)
+                requestAnimationFrame(() => {
+                  document.getElementById(`accounts-tab-button-${nextTab.key}`)?.focus()
+                })
+              }}
               role="tab"
+              tabIndex={activeTab === tab.key ? 0 : -1}
               type="button"
             >
               <span>{tab.label}</span>
@@ -523,289 +844,295 @@ export function AccountsPage({
           ))}
         </div>
 
-        {activeTab === 'account' ? (
-          <section
-            aria-labelledby="accounts-tab-button-account"
-            className="panel panel-accent source-editor-tab-panel source-editor-tab-panel-profile accounts-panel"
-            id="accounts-tab-account"
-            role="tabpanel"
-          >
-            <div className="panel-header compact-header">
-              <div>
-                <p className="eyebrow">{activeTabConfig.label}</p>
-                <h2>Identity</h2>
-              </div>
-            </div>
-
-            <div className="form-grid">
-              <label className="field">
-                <span>Provider</span>
-                {providerLocked ? (
-                  <div className="accounts-static-field">{providerLabel}</div>
-                ) : (
-                  <select onChange={(event) => handleProviderChange(event.target.value as ProviderKey)} value={draft.provider}>
-                    {providerCatalog.map((descriptor) => (
-                      <option key={descriptor.key} value={descriptor.key}>
-                        {descriptor.displayName}
-                      </option>
-                    ))}
-                  </select>
-                )}
-              </label>
-
-              <label className="field">
-                <span>Display name</span>
-                <input
-                  onChange={(event) => setDraft((current) => ({ ...current, displayName: event.target.value }))}
-                  placeholder="Instagram Main"
-                  required
-                  value={draft.displayName}
-                />
-              </label>
-            </div>
-
-            <ProviderAccountSettingsPanel
-              draft={settingsDraft}
-              loading={settingsLoading}
-              onFieldChange={(key, value) =>
-                setSettingsDraft((current) => ({
-                  ...current,
-                  [key]: value,
-                }))
-              }
-              provider={draft.provider}
-              visibleCategories={['account']}
-            />
-
-            <section className="panel accounts-panel">
-              <div className="panel-header compact-header">
-                <div>
-                  <p className="eyebrow">Session</p>
-                  <h2>Cookies</h2>
+        <form className="accounts-tab-scroll" id="accounts-config-form" onSubmit={handleSubmit}>
+          {activeTab === 'account' ? (
+            <section
+              aria-labelledby="accounts-tab-button-account"
+              className="accounts-tab-panel"
+              id="accounts-tab-account"
+              role="tabpanel"
+            >
+              <section className="accounts-section accounts-section-compact">
+                <header className="accounts-section-header">
+                  <h3>Identity</h3>
+                </header>
+                <div className="form-grid accounts-settings-grid accounts-settings-grid-single">
+                  <label className="field field-full">
+                    <span>Display name</span>
+                    <input
+                      onChange={(event) => setDraft((current) => ({ ...current, displayName: event.target.value }))}
+                      placeholder="Instagram Main"
+                      required
+                      value={draft.displayName}
+                    />
+                  </label>
                 </div>
-                <span className="pill">{sessionPillLabel}</span>
-              </div>
+              </section>
 
-              <div className="stat-grid compact-grid">
-                <article className="stat-card">
-                  <span>Stored cookies</span>
-                  <strong>{displayedCookieCount}</strong>
-                  <small>
-                    {selectedAccount
-                      ? (selectedSession?.fingerprint ?? 'No stored cookie fingerprint yet.')
-                      : (draftCookies.length > 0 ? 'Draft cookies will be persisted after account creation.' : 'No draft cookie fingerprint yet.')}
-                  </small>
-                </article>
-                <article className="stat-card muted-card">
-                  <span>Validation</span>
-                  <strong>{selectedSession?.lastValidationError ? 'Review' : 'Ready'}</strong>
-                  <small>{selectedSession?.lastValidationError ?? 'Cookies and manual auth fields validate together.'}</small>
-                </article>
-              </div>
+              <ProviderAccountSettingsPanel
+                draft={settingsDraft}
+                loading={settingsLoading}
+                onFieldChange={(key, value) =>
+                  setSettingsDraft((current) => ({
+                    ...current,
+                    [key]: value,
+                  }))
+                }
+                provider={draft.provider}
+                visibleCategories={['account']}
+              />
 
-              <div className="action-row">
-                <button className="ghost-button" disabled={Boolean(pendingCommand)} onClick={() => setCookieDialogOpen(true)} type="button">
-                  Edit cookies
-                </button>
-                <button
-                  className="danger-button"
-                  disabled={
-                    Boolean(pendingCommand)
-                    || (selectedAccount ? !selectedSession?.hasSecret : draftCookies.length === 0)
-                  }
-                  onClick={() => void handleClearCookies()}
-                  type="button"
-                >
-                  Clear cookies
-                </button>
-              </div>
-            </section>
+              <section className="accounts-section">
+                <header className="accounts-section-header">
+                  <h3>Cookies</h3>
+                </header>
 
-            {selectedAccount && importState ? (
-              <section className="panel accounts-panel">
-                <div className="panel-header compact-header">
+                <div className="accounts-session-summary accounts-session-summary-single">
                   <div>
-                    <p className="eyebrow">Companion</p>
-                    <h2>Browser import</h2>
+                    <span className="accounts-session-label">Stored cookies</span>
+                    <strong className="accounts-session-count">{displayedCookieCount}</strong>
+                    <p className="accounts-section-copy">
+                      {selectedAccount
+                        ? (selectedSession?.fingerprint
+                          ? (
+                              <span className="accounts-fingerprint-row">
+                                <span className="accounts-field-mono" title={selectedSession.fingerprint}>
+                                  {selectedSession.fingerprint}
+                                </span>
+                                <button
+                                  className="ghost-button accounts-copy-button"
+                                  onClick={() => void copyFingerprint(selectedSession.fingerprint ?? '')}
+                                  type="button"
+                                >
+                                  {fingerprintCopied ? 'Copied' : 'Copy'}
+                                </button>
+                              </span>
+                            )
+                          : 'No stored cookie fingerprint yet.')
+                        : (draftCookies.length > 0
+                          ? 'Draft cookies will be persisted when you create the account.'
+                          : 'No draft cookie fingerprint yet.')}
+                    </p>
+                    {selectedAccount ? (
+                      <p className="accounts-section-copy accounts-inline-note">
+                        Cookie edits save immediately for existing accounts.
+                      </p>
+                    ) : null}
                   </div>
-                  <span className="pill">{importState.providerUsername ? `@${importState.providerUsername}` : 'Imported'}</span>
                 </div>
-                <p className="source-editor-note">
-                  Last import {importState.lastImportedAt}.
-                  {importState.backupImportedAt ? ` Previous session from ${importState.backupImportedAt} is available.` : ' No previous session is available.'}
-                </p>
-                <div className="action-row">
+
+                <div className="action-row accounts-local-actions">
+                  <button className="ghost-button" disabled={Boolean(pendingCommand)} onClick={() => setCookieDialogOpen(true)} type="button">
+                    Edit cookies
+                  </button>
                   <button
-                    className="ghost-button"
-                    disabled={Boolean(pendingCommand) || !importState.canRevert}
-                    onClick={() => void handleRevertLastImport()}
+                    className="danger-button"
+                    disabled={
+                      Boolean(pendingCommand)
+                      || (selectedAccount ? !selectedSession?.hasSecret : draftCookies.length === 0)
+                    }
+                    onClick={() => void handleClearCookies()}
                     type="button"
                   >
-                    Revert last import
+                    Clear cookies
                   </button>
                 </div>
               </section>
-            ) : null}
-          </section>
-        ) : null}
 
-        {activeTab === 'defaults' ? (
-          <section
-            aria-labelledby="accounts-tab-button-defaults"
-            className="panel panel-accent source-editor-tab-panel source-editor-tab-panel-sync accounts-panel"
-            id="accounts-tab-defaults"
-            role="tabpanel"
-          >
-            <div className="panel-header compact-header">
-              <div>
-                <p className="eyebrow">{activeTabConfig.label}</p>
-                <h2>New profile defaults</h2>
+              <section className="accounts-section">
+                <header className="accounts-section-header accounts-section-header-row">
+                  <h3>Browser import</h3>
+                  {importState?.providerUsername ? (
+                    <span className="accounts-handle-chip">@{importState.providerUsername}</span>
+                  ) : null}
+                </header>
+                {selectedAccount && importState ? (
+                  <>
+                    <p className="accounts-section-copy">
+                      Last import {formatShortDateTime(importState.lastImportedAt)}.
+                      {importState.backupImportedAt
+                        ? ` Previous session from ${formatShortDateTime(importState.backupImportedAt)} is available.`
+                        : ' No previous session backup is available.'}
+                    </p>
+                    {importState.canRevert ? (
+                      <div className="action-row accounts-local-actions">
+                        <button
+                          className="ghost-button"
+                          disabled={Boolean(pendingCommand)}
+                          onClick={() => void handleRevertLastImport()}
+                          type="button"
+                        >
+                          Revert last import
+                        </button>
+                      </div>
+                    ) : null}
+                  </>
+                ) : (
+                  <p className="accounts-section-copy">
+                    Import a live browser session with the NinjaCrawler Companion while logged into the provider account,
+                    or paste cookies via Edit cookies. After import, use Validate account to confirm the session.
+                  </p>
+                )}
+              </section>
+            </section>
+          ) : null}
+
+          {activeTab === 'defaults' ? (
+            <section
+              aria-labelledby="accounts-tab-button-defaults"
+              className="accounts-tab-panel"
+              id="accounts-tab-defaults"
+              role="tabpanel"
+            >
+              <div className="accounts-banner" role="note">
+                Applies to <strong>new profiles only</strong>. Existing sources keep their own sync options.
               </div>
-            </div>
+              <ProviderAccountSettingsPanel
+                draft={settingsDraft}
+                loading={settingsLoading}
+                onFieldChange={(key, value) =>
+                  setSettingsDraft((current) => ({
+                    ...current,
+                    [key]: value,
+                  }))
+                }
+                provider={draft.provider}
+                visibleCategories={['defaults', 'extractVideo']}
+              />
+            </section>
+          ) : null}
 
-            <ProviderAccountSettingsPanel
-              draft={settingsDraft}
-              loading={settingsLoading}
-              onFieldChange={(key, value) =>
-                setSettingsDraft((current) => ({
-                  ...current,
-                  [key]: value,
-                }))
-              }
-              provider={draft.provider}
-              visibleCategories={activeTabConfig.categories}
-            />
-          </section>
-        ) : null}
+          {activeTab === 'provider' ? (
+            <section
+              aria-labelledby="accounts-tab-button-provider"
+              className="accounts-tab-panel"
+              id="accounts-tab-provider"
+              role="tabpanel"
+            >
+              <ProviderAccountSettingsPanel
+                draft={settingsDraft}
+                loading={settingsLoading}
+                onFieldChange={(key, value) =>
+                  setSettingsDraft((current) => ({
+                    ...current,
+                    [key]: value,
+                  }))
+                }
+                provider={draft.provider}
+                visibleCategories={['authorization', 'download', 'timers', 'errors']}
+              />
 
-        {activeTab === 'provider' ? (
-          <section
-            aria-labelledby="accounts-tab-button-provider"
-            className="panel panel-accent source-editor-tab-panel source-editor-tab-panel-sync accounts-panel"
-            id="accounts-tab-provider"
-            role="tabpanel"
-          >
-            <div className="panel-header compact-header">
-              <div>
-                <p className="eyebrow">{activeTabConfig.label}</p>
-                <h2>Provider runtime</h2>
-              </div>
-            </div>
-
-            <ProviderAccountSettingsPanel
-              draft={settingsDraft}
-              loading={settingsLoading}
-              onFieldChange={(key, value) =>
-                setSettingsDraft((current) => ({
-                  ...current,
-                  [key]: value,
-                }))
-              }
-              provider={draft.provider}
-              visibleCategories={activeTabConfig.categories}
-            />
-            <div className="panel section-stack">
-              <div className="panel-header compact-header">
-                <div>
-                  <p className="eyebrow">Provider presets</p>
-                  <h2>Global sync presets</h2>
-                </div>
-              </div>
-              {draft.provider !== 'instagram' ? (
-                <p className="source-editor-note">Global presets are currently available for Instagram only.</p>
-              ) : (
-                <div className="section-stack">
-                  {(Object.keys(globalPresetsDraft) as InstagramPresetSlot[]).map((slot) => {
-                    const preset = globalPresetsDraft[slot]
-                    const disabled = savingGlobalPreset === slot
-                    const presetLabel = DEFAULT_INSTAGRAM_PRESET_LABELS[slot]
-                    return (
-                      <article className="panel" key={slot}>
-                        <div className="panel-header compact-header">
-                          <div>
-                            <p className="eyebrow">{presetLabel}</p>
-                            <h2>{preset.label.trim() || presetLabel}</h2>
-                          </div>
-                          <button
-                            className="ghost-button"
-                            disabled={disabled}
-                            onClick={() => void handleSaveGlobalPreset(slot)}
-                            type="button"
-                          >
-                            {disabled ? 'Saving...' : 'Save preset'}
-                          </button>
-                        </div>
-                        <div className="source-editor-setting-list">
-                          <div className="source-editor-setting-row">
-                            <div className="source-editor-setting-copy">
-                              <label htmlFor={`${slot}-enabled`}>Enabled</label>
+              {draft.provider === 'instagram' ? (
+                <section className="accounts-section">
+                  <header className="accounts-section-header">
+                    <h3>Global sync presets</h3>
+                    <p className="accounts-section-copy">
+                      Workspace-wide Instagram presets (not per-account). Save with Save changes or Save preset on each card.
+                      {presetsDirty ? ' Unsaved preset edits.' : ''}
+                    </p>
+                  </header>
+                  <div className="accounts-preset-stack">
+                    {(Object.keys(globalPresetsDraft) as InstagramPresetSlot[]).map((slot) => {
+                      const preset = globalPresetsDraft[slot]
+                      const disabled = savingGlobalPreset === slot
+                      const presetLabel = DEFAULT_INSTAGRAM_PRESET_LABELS[slot]
+                      return (
+                        <article className="accounts-preset-card" key={slot}>
+                          <header className="accounts-preset-header">
+                            <div>
+                              <p className="accounts-preset-eyebrow">{presetLabel} · workspace</p>
+                              <h4 className="accounts-preset-title">{preset.label.trim() || presetLabel}</h4>
                             </div>
-                            <input
-                              checked={preset.enabled}
-                              id={`${slot}-enabled`}
-                              onChange={(event) => updateGlobalPreset(slot, (current) => ({
-                                ...current,
-                                enabled: event.target.checked,
-                              }))}
-                              type="checkbox"
-                            />
-                          </div>
-                          <label className="field">
-                            <span>Label</span>
-                            <input
-                              onChange={(event) => updateGlobalPreset(slot, (current) => ({
-                                ...current,
-                                label: event.target.value,
-                              }))}
-                              type="text"
-                              value={preset.label}
-                            />
-                          </label>
-                          <div className="accounts-toggle-grid">
-                            {([
-                              ['timeline', 'Timeline'],
-                              ['reels', 'Reels'],
-                              ['stories', 'Stories'],
-                              ['storiesUser', 'Stories (user)'],
-                              ['tagged', 'Tagged'],
-                            ] as Array<[keyof InstagramSourceSyncPreset['sections'], string]>).map(([sectionKey, sectionLabel]) => (
-                              <label className="checkbox-inline" key={`${slot}-${sectionKey}`}>
-                                <input
-                                  checked={preset.sections[sectionKey]}
-                                  onChange={(event) => updateGlobalPreset(slot, (current) => ({
-                                    ...current,
-                                    sections: {
-                                      ...current.sections,
-                                      [sectionKey]: event.target.checked,
-                                    },
-                                  }))}
-                                  type="checkbox"
-                                />
-                                <span>{sectionLabel}</span>
-                              </label>
-                            ))}
-                          </div>
-                        </div>
-                      </article>
-                    )
-                  })}
-                </div>
-              )}
-            </div>
-          </section>
-        ) : null}
+                            <button
+                              className="ghost-button accounts-preset-save"
+                              disabled={disabled}
+                              onClick={() => void handleSaveGlobalPreset(slot)}
+                              type="button"
+                            >
+                              {disabled ? 'Saving…' : 'Save preset'}
+                            </button>
+                          </header>
 
-        <footer className="source-editor-footer">
+                          <div className="accounts-preset-body">
+                            <div className="accounts-toggle-row">
+                              <input
+                                checked={preset.enabled}
+                                id={`${slot}-enabled`}
+                                onChange={(event) => updateGlobalPreset(slot, (current) => ({
+                                  ...current,
+                                  enabled: event.target.checked,
+                                }))}
+                                type="checkbox"
+                              />
+                              <label className="accounts-setting-label" htmlFor={`${slot}-enabled`}>Enabled</label>
+                            </div>
+
+                            <label className="field" htmlFor={`${slot}-label`}>
+                              <span>Label</span>
+                              <input
+                                id={`${slot}-label`}
+                                onChange={(event) => updateGlobalPreset(slot, (current) => ({
+                                  ...current,
+                                  label: event.target.value,
+                                }))}
+                                onKeyDown={(event) => {
+                                  if (event.key === 'Enter') {
+                                    event.preventDefault()
+                                  }
+                                }}
+                                value={preset.label}
+                              />
+                            </label>
+
+                            <div className="accounts-scope-chips" role="group" aria-label={`${presetLabel} scopes`}>
+                              {PRESET_SCOPE_OPTIONS.map((option) => {
+                                const checked = Boolean(preset.sections[option.key])
+                                return (
+                                  <label
+                                    className={checked ? 'accounts-scope-chip accounts-scope-chip-active' : 'accounts-scope-chip'}
+                                    key={option.key}
+                                  >
+                                    <input
+                                      checked={checked}
+                                      onChange={(event) => updateGlobalPreset(slot, (current) => ({
+                                        ...current,
+                                        sections: {
+                                          ...current.sections,
+                                          [option.key]: event.target.checked,
+                                        },
+                                      }))}
+                                      type="checkbox"
+                                    />
+                                    <span>{option.label}</span>
+                                  </label>
+                                )
+                              })}
+                            </div>
+                          </div>
+                        </article>
+                      )
+                    })}
+                  </div>
+                </section>
+              ) : null}
+            </section>
+          ) : null}
+        </form>
+
+        <footer className="source-editor-footer accounts-footer">
           {storeError ? (
             <p className="source-editor-submit-error" role="alert">
               {storeError}
             </p>
           ) : null}
-          <div className="action-row">
+          <div className="action-row accounts-footer-actions">
             {isDirty ? (
               <div className="source-editor-dirty-indicator">
                 <span aria-hidden className="source-editor-dirty-indicator-dot" />
-                <span>Unsaved changes</span>
+                <span>
+                  Unsaved changes
+                  {presetsDirty && accountDirty ? ' (account + presets)' : presetsDirty ? ' (presets)' : ''}
+                </span>
               </div>
             ) : justSaved ? (
               <div className="accounts-saved-indicator" role="status">
@@ -813,30 +1140,73 @@ export function AccountsPage({
                 <span>All changes saved</span>
               </div>
             ) : null}
-            <button className="ghost-button" disabled={Boolean(pendingCommand) || !isDirty} onClick={handleResetChanges} type="button">
+            <button
+              className="ghost-button accounts-footer-secondary"
+              disabled={Boolean(pendingCommand) || !isDirty}
+              onClick={handleResetChanges}
+              type="button"
+            >
               Reset changes
             </button>
             {selectedAccount ? (
-              <button className="ghost-button" disabled={Boolean(pendingCommand)} onClick={() => void handleValidateAccount()} type="button">
+              <button
+                className="ghost-button accounts-footer-secondary"
+                disabled={Boolean(pendingCommand)}
+                onClick={() => void handleValidateAccount()}
+                type="button"
+              >
                 Validate account
               </button>
             ) : null}
-            <button className="primary-button" disabled={Boolean(pendingCommand) || !canSave} type="submit">
+            <button
+              className="primary-button source-editor-save-button accounts-footer-primary"
+              disabled={saveDisabled}
+              form="accounts-config-form"
+              title={saveTitle}
+              type="submit"
+            >
               {isCreateMode ? 'Create account' : 'Save changes'}
             </button>
           </div>
         </footer>
-      </form>
+      </div>
 
       {cookieDialogOpen ? (
         <CookieEditorDialog
           accountId={selectedAccount?.id}
           initialCookies={selectedAccount ? undefined : draftCookies}
           onClose={() => setCookieDialogOpen(false)}
-          onSaveDraftCookies={(cookies) => setDraftCookies(cookies)}
+          onSaveDraftCookies={(cookies) => {
+            setDraftCookies(cookies)
+          }}
           provider={selectedAccount?.provider ?? draft.provider}
           providerLabel={formatProviderLabel(selectedAccount?.provider ?? draft.provider, providerCatalog)}
         />
+      ) : null}
+
+      {pendingNavigation ? (
+        <div className="accounts-dirty-dialog-backdrop" role="presentation">
+          <section aria-labelledby="accounts-dirty-dialog-title" className="accounts-dirty-dialog" role="dialog">
+            <h3 id="accounts-dirty-dialog-title">Unsaved changes</h3>
+            <p>You have unsaved account changes. Save before switching, discard them, or keep editing.</p>
+            <div className="action-row accounts-dirty-dialog-actions">
+              <button className="ghost-button" onClick={() => void handleDirtyDialogAction('cancel')} type="button">
+                Keep editing
+              </button>
+              <button className="ghost-button" onClick={() => void handleDirtyDialogAction('discard')} type="button">
+                Discard
+              </button>
+              <button
+                className="primary-button"
+                disabled={!canSaveName || Boolean(pendingCommand)}
+                onClick={() => void handleDirtyDialogAction('save')}
+                type="button"
+              >
+                Save &amp; continue
+              </button>
+            </div>
+          </section>
+        </div>
       ) : null}
     </div>
   )

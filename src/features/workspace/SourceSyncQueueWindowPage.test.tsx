@@ -334,7 +334,7 @@ describe('SourceSyncQueueWindowPage', () => {
     })
   })
 
-  it('reorders the queue with the move buttons', async () => {
+  it('reorders the queue with Alt+ArrowDown on the drag handle', async () => {
     bridgeMocks.loadSourceSyncQueueStatus.mockResolvedValue(
       statusFixture({
         queuedCount: 2,
@@ -352,8 +352,8 @@ describe('SourceSyncQueueWindowPage', () => {
     const firstRow = (await screen.findByText(/^@q1$/i)).closest('.queue-task-row') as HTMLElement
     expect(firstRow).toBeTruthy()
 
-    // move @q1 (topo) para baixo: troca com @q2
-    fireEvent.click(within(firstRow).getByRole('button', { name: /move down in queue/i }))
+    const handle = within(firstRow).getByRole('button', { name: /drag to reorder/i })
+    fireEvent.keyDown(handle, { key: 'ArrowDown', altKey: true })
 
     await waitFor(() => {
       expect(bridgeMocks.reorderSourceSyncProviderQueue).toHaveBeenCalledWith('instagram', [
@@ -361,6 +361,75 @@ describe('SourceSyncQueueWindowPage', () => {
         'source-1:instagram-story:111',
       ])
     })
+  })
+
+  it('reorders the queue with pointer drag on the handle', async () => {
+    bridgeMocks.loadSourceSyncQueueStatus.mockResolvedValue(
+      statusFixture({
+        queuedCount: 2,
+        runningCount: 0,
+        queuedItems: [
+          { jobKey: 'source-1:instagram-story:111', sourceId: 'source-1', provider: 'instagram', handle: '@q1', state: 'queued', queuedAt: '2026-03-11T12:00:00Z' },
+          { jobKey: 'source-1:instagram-story:222', sourceId: 'source-1', provider: 'instagram', handle: '@q2', state: 'queued', queuedAt: '2026-03-11T12:01:00Z' },
+        ],
+        runningItems: [],
+      }),
+    )
+
+    render(<SourceSyncQueueWindowPage />)
+
+    const firstRow = (await screen.findByText(/^@q1$/i)).closest('.queue-task-row') as HTMLElement
+    const secondRow = (await screen.findByText(/^@q2$/i)).closest('.queue-task-row') as HTMLElement
+    expect(firstRow).toBeTruthy()
+    expect(secondRow).toBeTruthy()
+
+    const handle = within(firstRow).getByRole('button', { name: /drag to reorder/i })
+    const elementFromPointMock = vi.fn(() => secondRow)
+    Object.defineProperty(document, 'elementFromPoint', {
+      configurable: true,
+      writable: true,
+      value: elementFromPointMock,
+    })
+
+    fireEvent.pointerDown(handle, { button: 0, pointerId: 1, clientX: 20, clientY: 40 })
+    fireEvent.pointerMove(window, { pointerId: 1, clientX: 50, clientY: 130 })
+    fireEvent.pointerUp(window, { pointerId: 1, clientX: 50, clientY: 130 })
+
+    await waitFor(() => {
+      expect(bridgeMocks.reorderSourceSyncProviderQueue).toHaveBeenCalledWith('instagram', [
+        'source-1:instagram-story:222',
+        'source-1:instagram-story:111',
+      ])
+    })
+  })
+
+  it('shows retry only for failed sync results', async () => {
+    bridgeMocks.loadSourceSyncQueueStatus.mockResolvedValue(
+      statusFixture({
+        recentResults: [
+          {
+            sourceId: 'source-ok',
+            provider: 'instagram',
+            handle: '@ok',
+            status: 'succeeded',
+            summary: 'Instagram sync succeeded.',
+            finishedAt: '2026-03-11T12:04:00Z',
+          },
+          {
+            sourceId: 'source-finished',
+            provider: 'instagram',
+            handle: '@finished',
+            status: 'failed',
+            summary: 'Instagram sync failed.',
+            finishedAt: '2026-03-11T12:05:00Z',
+          },
+        ],
+      }),
+    )
+    render(<SourceSyncQueueWindowPage />)
+    await screen.findByText(/^@finished$/i)
+    expect(screen.getByText(/^@ok$/i)).toBeTruthy()
+    expect(screen.getAllByRole('button', { name: /retry/i })).toHaveLength(1)
   })
 
   it('renders sync and delete work together in the same lane', async () => {

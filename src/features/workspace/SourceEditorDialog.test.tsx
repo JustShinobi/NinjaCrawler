@@ -155,8 +155,10 @@ describe('SourceEditorDialog', () => {
       },
     )
 
-    expect(screen.getByText('Locked while editing an existing profile.')).toBeTruthy()
+    // Edit mode: provider is identity badge only (no locked Provider field).
     expect(screen.queryByRole('combobox', { name: /provider/i })).toBeNull()
+    expect(screen.queryByText('Locked while editing an existing profile.')).toBeNull()
+    expect(screen.getByRole('heading', { name: '@alpha' })).toBeTruthy()
 
     const accountSelect = screen.getByRole('combobox', { name: /account/i }) as HTMLSelectElement
     expect(accountSelect.value).toBe('account-1')
@@ -167,7 +169,7 @@ describe('SourceEditorDialog', () => {
     expect(screen.getByRole('button', { name: /edit account/i })).toBeTruthy()
   })
 
-  it('locks the user url and hides accent color in edit mode', () => {
+  it('locks the handle and hides accent color in edit mode', () => {
     renderDialog(
       {},
       {
@@ -175,14 +177,14 @@ describe('SourceEditorDialog', () => {
       },
     )
 
-    expect(screen.queryByRole('textbox', { name: /user url/i })).toBeNull()
-    expect(screen.getByText('@alpha')).toBeTruthy()
-    expect(screen.getByText(/User URL is locked for existing profiles/)).toBeTruthy()
+    expect(screen.queryByRole('textbox', { name: /handle/i })).toBeNull()
+    expect(screen.getAllByText('@alpha').length).toBeGreaterThan(0)
+    expect(screen.getByText(/Locked for existing profiles/)).toBeTruthy()
     expect(screen.queryByLabelText(/accent color/i)).toBeNull()
   })
 
   it.each(['instagram', 'tiktok', 'twitter'] as const)(
-    'unlocks the %s user url for manual editing via the Edit button',
+    'unlocks the %s handle for manual editing via the Edit button',
     (provider) => {
       renderDialog(
         {
@@ -199,12 +201,12 @@ describe('SourceEditorDialog', () => {
       )
 
       // Locked by default: value shown, no input.
-      expect(screen.queryByRole('textbox', { name: /user url/i })).toBeNull()
+      expect(screen.queryByRole('textbox', { name: /handle/i })).toBeNull()
 
       fireEvent.click(screen.getByRole('button', { name: 'Edit handle' }))
 
       // Now editable: an input with the current handle that accepts a new value.
-      const input = screen.getByRole('textbox', { name: /user url/i })
+      const input = screen.getByRole('textbox', { name: /handle/i })
       expect((input as HTMLInputElement).value).toBe('@alpha')
       fireEvent.change(input, { target: { value: '@renamed' } })
       expect((input as HTMLInputElement).value).toBe('@renamed')
@@ -313,7 +315,7 @@ describe('SourceEditorDialog', () => {
 
     expect(await screen.findByRole('button', { name: /remove label priority/i })).toBeTruthy()
     expect(screen.getByRole('button', { name: /remove label reference/i })).toBeTruthy()
-    expect((screen.getByRole('checkbox', { name: /ready for download/i }) as HTMLInputElement).checked).toBe(false)
+    expect(screen.getByRole('switch', { name: /ready for download/i }).getAttribute('aria-checked')).toBe('false')
 
     fireEvent.click(screen.getByRole('tab', { name: /sync/i }))
 
@@ -512,7 +514,7 @@ describe('SourceEditorDialog', () => {
       }),
     )
 
-    fireEvent.change(screen.getByRole('textbox', { name: /user url/i }), {
+    fireEvent.change(screen.getByRole('textbox', { name: /handle/i }), {
       target: { value: '@new-profile' },
     })
     fireEvent.click(screen.getByRole('button', { name: /save and sync/i }))

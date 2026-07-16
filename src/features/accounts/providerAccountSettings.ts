@@ -32,6 +32,10 @@ export interface ProviderAccountSettingsField {
   kind: ProviderAccountSettingsFieldKind
   placeholder?: string
   defaultValue: string
+  /** Technical / rarely-edited fields collapsed under Advanced. */
+  advanced?: boolean
+  /** Render value with mono font (paths, tokens, headers). */
+  mono?: boolean
 }
 
 export interface ProviderAccountSettingsLayout {
@@ -41,28 +45,28 @@ export interface ProviderAccountSettingsLayout {
 
 const INSTAGRAM_SETTINGS_LAYOUT: ProviderAccountSettingsLayout = {
   categories: [
-    { key: 'account', label: 'Account', description: '' },
-    { key: 'defaults', label: 'New Profile Defaults', description: '' },
-    { key: 'extractVideo', label: 'Extract Image From Video', description: '' },
+    { key: 'account', label: 'Paths', description: '' },
+    { key: 'defaults', label: 'New profile defaults', description: '' },
+    { key: 'extractVideo', label: 'Extract image from video', description: '' },
     { key: 'authorization', label: 'Authorization', description: '' },
     { key: 'download', label: 'Download', description: '' },
     { key: 'timers', label: 'Timers', description: '' },
-    { key: 'errors', label: 'Errors & Limits', description: '' },
+    { key: 'errors', label: 'Errors & limits', description: '' },
   ],
   fields: [
-    { key: 'instagram.account.mediaPath', category: 'account', label: 'Media path', kind: 'text', placeholder: 'D:/Media/Instagram/Main', defaultValue: '' },
-    { key: 'instagram.account.savedPostsPath', category: 'account', label: 'Saved posts path', kind: 'text', placeholder: 'D:/Media/Instagram/Saved', defaultValue: '' },
+    { key: 'instagram.account.mediaPath', category: 'account', label: 'Media path', kind: 'text', placeholder: 'D:/Media/Instagram/Main', defaultValue: '', mono: true },
+    { key: 'instagram.account.savedPostsPath', category: 'account', label: 'Saved posts path', kind: 'text', placeholder: 'D:/Media/Instagram/Saved', defaultValue: '', mono: true },
     { key: 'instagram.account.downloadSavedPosts', category: 'account', label: 'Download saved posts', tooltip: 'Includes saved posts in this account workflow.', kind: 'toggle', defaultValue: 'false' },
 
-    { key: 'instagram.auth.csrfToken', category: 'authorization', label: 'x-csrftoken', tooltip: 'Usually comes from the current cookies.', kind: 'text', defaultValue: '' },
-    { key: 'instagram.auth.appId', category: 'authorization', label: 'x-ig-app-id', kind: 'text', defaultValue: '' },
-    { key: 'instagram.auth.asbdId', category: 'authorization', label: 'x-asbd-id', kind: 'text', defaultValue: '' },
-    { key: 'instagram.auth.igWwwClaim', category: 'authorization', label: 'x-ig-www-claim', kind: 'text', defaultValue: '' },
-    { key: 'instagram.auth.secChUa', category: 'authorization', label: 'sec-ch-ua', kind: 'textarea', defaultValue: '' },
-    { key: 'instagram.auth.secChUaFullVersionList', category: 'authorization', label: 'sec-ch-ua-full-version-list', tooltip: 'Optional browser client hint header.', kind: 'textarea', defaultValue: '' },
-    { key: 'instagram.auth.secChUaPlatformVersion', category: 'authorization', label: 'sec-ch-ua-platform-version', tooltip: 'Optional platform version client hint header.', kind: 'text', defaultValue: '' },
-    { key: 'instagram.auth.userAgent', category: 'authorization', label: 'UserAgent', kind: 'textarea', defaultValue: '' },
-    { key: 'instagram.download.graphQlPrimary', category: 'authorization', label: 'Use GraphQL to download', kind: 'toggle', defaultValue: 'true' },
+    { key: 'instagram.auth.csrfToken', category: 'authorization', label: 'x-csrftoken', tooltip: 'Usually comes from the current cookies.', kind: 'text', defaultValue: '', mono: true },
+    { key: 'instagram.auth.appId', category: 'authorization', label: 'x-ig-app-id', kind: 'text', defaultValue: '', mono: true },
+    { key: 'instagram.auth.asbdId', category: 'authorization', label: 'x-asbd-id', kind: 'text', defaultValue: '', mono: true },
+    { key: 'instagram.auth.igWwwClaim', category: 'authorization', label: 'x-ig-www-claim', kind: 'text', placeholder: 'Optional', defaultValue: '', mono: true },
+    { key: 'instagram.auth.secChUa', category: 'authorization', label: 'sec-ch-ua', kind: 'textarea', defaultValue: '', advanced: true, mono: true },
+    { key: 'instagram.auth.secChUaFullVersionList', category: 'authorization', label: 'sec-ch-ua-full-version-list', tooltip: 'Optional browser client hint header.', kind: 'textarea', defaultValue: '', advanced: true, mono: true },
+    { key: 'instagram.auth.secChUaPlatformVersion', category: 'authorization', label: 'sec-ch-ua-platform-version', tooltip: 'Optional platform version client hint header.', kind: 'text', defaultValue: '', advanced: true, mono: true },
+    { key: 'instagram.auth.userAgent', category: 'authorization', label: 'User agent', kind: 'textarea', defaultValue: '', advanced: true, mono: true },
+    { key: 'instagram.download.graphQlPrimary', category: 'download', label: 'Use GraphQL to download', kind: 'toggle', defaultValue: 'true' },
 
     { key: 'instagram.download.timeline', category: 'download', label: 'Download timeline', kind: 'toggle', defaultValue: 'true' },
     { key: 'instagram.download.reels', category: 'download', label: 'Download reels', kind: 'toggle', defaultValue: 'false' },
@@ -107,16 +111,16 @@ const INSTAGRAM_SETTINGS_LAYOUT: ProviderAccountSettingsLayout = {
 
 const TWITTER_SETTINGS_LAYOUT: ProviderAccountSettingsLayout = {
   categories: [
-    { key: 'account', label: 'Account', description: '' },
-    { key: 'defaults', label: 'New Profile Defaults', description: '' },
+    { key: 'account', label: 'Paths', description: '' },
+    { key: 'defaults', label: 'New profile defaults', description: '' },
     { key: 'authorization', label: 'Authorization', description: '' },
-    { key: 'download', label: 'Downloading', description: '' },
+    { key: 'download', label: 'Download', description: '' },
   ],
   fields: [
-    { key: 'twitter.account.mediaPath', category: 'account', label: 'Path', kind: 'text', placeholder: 'F:/SCrawler/Data/Twitter', defaultValue: '' },
+    { key: 'twitter.account.mediaPath', category: 'account', label: 'Path', kind: 'text', placeholder: 'F:/SCrawler/Data/Twitter', defaultValue: '', mono: true },
 
-    { key: 'twitter.auth.useUserAgent', category: 'authorization', label: 'Use UserAgent', kind: 'toggle', defaultValue: 'true' },
-    { key: 'twitter.auth.userAgent', category: 'authorization', label: 'UserAgent', kind: 'textarea', defaultValue: '' },
+    { key: 'twitter.auth.useUserAgent', category: 'authorization', label: 'Use user agent', kind: 'toggle', defaultValue: 'true' },
+    { key: 'twitter.auth.userAgent', category: 'authorization', label: 'User agent', kind: 'textarea', defaultValue: '', advanced: true, mono: true },
 
     { key: 'twitter.defaults.labels', category: 'defaults', label: 'Default labels', kind: 'text', placeholder: 'reference, priority', defaultValue: '' },
     { key: 'twitter.defaults.readyForDownload', category: 'defaults', label: 'Ready for download by default', kind: 'toggle', defaultValue: 'true' },
@@ -140,16 +144,16 @@ const TWITTER_SETTINGS_LAYOUT: ProviderAccountSettingsLayout = {
 
 const TIKTOK_SETTINGS_LAYOUT: ProviderAccountSettingsLayout = {
   categories: [
-    { key: 'account', label: 'Account', description: '' },
-    { key: 'defaults', label: 'New Profile Defaults', description: '' },
+    { key: 'account', label: 'Paths', description: '' },
+    { key: 'defaults', label: 'New profile defaults', description: '' },
     { key: 'authorization', label: 'Authorization', description: '' },
-    { key: 'download', label: 'Downloading', description: '' },
+    { key: 'download', label: 'Download', description: '' },
     { key: 'timers', label: 'Timers', description: '' },
   ],
   fields: [
-    { key: 'tiktok.account.mediaPath', category: 'account', label: 'Path', kind: 'text', placeholder: 'F:/SCrawler/Data/TikTok', defaultValue: '' },
-    { key: 'tiktok.auth.useUserAgent', category: 'authorization', label: 'Use UserAgent', kind: 'toggle', defaultValue: 'true' },
-    { key: 'tiktok.auth.userAgent', category: 'authorization', label: 'UserAgent', kind: 'textarea', defaultValue: '' },
+    { key: 'tiktok.account.mediaPath', category: 'account', label: 'Path', kind: 'text', placeholder: 'F:/SCrawler/Data/TikTok', defaultValue: '', mono: true },
+    { key: 'tiktok.auth.useUserAgent', category: 'authorization', label: 'Use user agent', kind: 'toggle', defaultValue: 'true' },
+    { key: 'tiktok.auth.userAgent', category: 'authorization', label: 'User agent', kind: 'textarea', defaultValue: '', advanced: true, mono: true },
 
     { key: 'tiktok.defaults.labels', category: 'defaults', label: 'Default labels', kind: 'text', placeholder: 'reference, priority', defaultValue: '' },
     { key: 'tiktok.defaults.readyForDownload', category: 'defaults', label: 'Ready for download by default', kind: 'toggle', defaultValue: 'true' },

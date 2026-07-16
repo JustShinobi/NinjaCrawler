@@ -6,6 +6,7 @@
     "main",
     "runtime-log",
     "source-sync-queue",
+    "connector-debug",
     "connector-runtimes",
     "import",
     "profile-editor",

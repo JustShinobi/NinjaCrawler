@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react'
 import { convertFileSrc } from '@tauri-apps/api/core'
 import {
   cancelSourceSyncProfile,
@@ -36,6 +36,8 @@ import type {
   SingleVideoQueueStatus,
   SourceProfile,
 } from '../../domain/models'
+import { WindowShell } from '../brand/WindowShell'
+import { WindowTitlebar } from '../brand/WindowTitlebar'
 
 type QueueOperation = 'Sync' | 'Delete' | 'Single' | 'Migration' | 'Thumbnail'
 
@@ -93,9 +95,9 @@ function resultStatusClassName(status: 'succeeded' | 'failed' | 'skipped'): stri
     case 'failed':
       return 'status status-failed'
     case 'skipped':
-      return 'status status-skipped'
+      return 'status status-skipped queue-recent-status-quiet'
     default:
-      return 'status status-succeeded'
+      return 'status status-succeeded queue-recent-status-quiet'
   }
 }
 
@@ -323,6 +325,8 @@ export function SourceSyncQueueWindowPage() {
   const [busyProviders, setBusyProviders] = useState<Set<ProviderKey>>(() => new Set())
   // Override otimista da ordem por provider (aplicado até o backend confirmar).
   const [queueOrderOverride, setQueueOrderOverride] = useState<Record<string, string[]>>({})
+  const [dragState, setDragState] = useState<{ provider: ProviderKey; jobKey: string } | null>(null)
+  const [dropTargetKey, setDropTargetKey] = useState<string | null>(null)
   const [now, setNow] = useState(() => Date.now())
   const [error, setError] = useState<string>()
   const [singleVideoStatus, setSingleVideoStatus] = useState<SingleVideoQueueStatus | undefined>()
@@ -768,54 +772,226 @@ export function SourceSyncQueueWindowPage() {
   const queuedProviderCount = lanes.filter((lane) => lane.queued.length > 0).length
 
   // Lista de job keys (apenas Sync em fila) de uma raia, na ordem exibida.
-  const laneQueuedSyncIds = (provider: ProviderKey): string[] => {
-    return syncStatus.queuedItems
-      .filter((item) => item.provider === provider)
-      .map((item) => item.jobKey ?? item.sourceId)
-  }
+  const laneQueuedSyncIds = useCallback(
+    (provider: ProviderKey): string[] => {
+      return syncStatus.queuedItems
+        .filter((item) => item.provider === provider)
+        .map((item) => item.jobKey ?? item.sourceId)
+    },
+    [syncStatus.queuedItems],
+  )
 
-  // Move um job em fila uma posição para cima (-1) ou para baixo (+1), trocando
-  // com o vizinho. Atualiza otimista e persiste a nova ordem no backend.
-  const moveQueued = (provider: ProviderKey, jobKey: string, direction: -1 | 1) => {
-    const ids = laneQueuedSyncIds(provider)
-    const index = ids.indexOf(jobKey)
-    const target = index + direction
-    if (index < 0 || target < 0 || target >= ids.length) {
-      return
-    }
-    const reordered = [...ids]
-    ;[reordered[index], reordered[target]] = [reordered[target], reordered[index]]
+  const applyQueueOrder = useCallback((provider: ProviderKey, reordered: string[]) => {
     setQueueOrderOverride((prev) => ({ ...prev, [provider]: reordered }))
     void reorderSourceSyncProviderQueue(provider, reordered).catch((reorderError) => {
       setError(
         reorderError instanceof Error ? reorderError.message : `Failed to reorder '${provider}' queue.`,
       )
     })
-  }
+  }, [])
+
+  // Move um job em fila uma posição para cima (-1) ou para baixo (+1).
+  const moveQueued = useCallback(
+    (provider: ProviderKey, jobKey: string, direction: -1 | 1) => {
+      const ids = laneQueuedSyncIds(provider)
+      const index = ids.indexOf(jobKey)
+      const target = index + direction
+      if (index < 0 || target < 0 || target >= ids.length) {
+        return
+      }
+      const reordered = [...ids]
+      ;[reordered[index], reordered[target]] = [reordered[target], reordered[index]]
+      applyQueueOrder(provider, reordered)
+    },
+    [applyQueueOrder, laneQueuedSyncIds],
+  )
+
+  const reorderQueuedToIndex = useCallback(
+    (provider: ProviderKey, jobKey: string, toIndex: number) => {
+      const ids = laneQueuedSyncIds(provider)
+      const from = ids.indexOf(jobKey)
+      if (from < 0 || toIndex < 0 || toIndex >= ids.length || from === toIndex) {
+        return
+      }
+      const next = [...ids]
+      const [item] = next.splice(from, 1)
+      next.splice(toIndex, 0, item)
+      applyQueueOrder(provider, next)
+    },
+    [applyQueueOrder, laneQueuedSyncIds],
+  )
+
+  // Pointer-based reorder (HTML5 DnD is unreliable in Tauri/WebView2 on Windows).
+  const dragSessionRef = useRef<{
+    provider: ProviderKey
+    jobKey: string
+    pointerId: number
+  } | null>(null)
+  const dropTargetKeyRef = useRef<string | null>(null)
+
+  const clearDragState = useCallback(() => {
+    dragSessionRef.current = null
+    dropTargetKeyRef.current = null
+    setDragState(null)
+    setDropTargetKey(null)
+    document.body.classList.remove('queue-is-reordering')
+  }, [])
+
+  const resolveDropTarget = useCallback((clientX: number, clientY: number, provider: ProviderKey, sourceJobKey: string) => {
+    const node = document.elementFromPoint(clientX, clientY)
+    if (!(node instanceof Element)) {
+      return null
+    }
+    const row = node.closest('[data-queue-job-key][data-queue-provider]') as HTMLElement | null
+    if (!row) {
+      return null
+    }
+    const targetProvider = row.dataset.queueProvider as ProviderKey | undefined
+    const targetJobKey = row.dataset.queueJobKey
+    if (!targetProvider || !targetJobKey || targetProvider !== provider || targetJobKey === sourceJobKey) {
+      return null
+    }
+    return targetJobKey
+  }, [])
+
+  const endPointerReorder = useCallback(
+    (clientX: number, clientY: number) => {
+      const session = dragSessionRef.current
+      if (!session) {
+        clearDragState()
+        return
+      }
+      const targetKey =
+        dropTargetKeyRef.current ?? resolveDropTarget(clientX, clientY, session.provider, session.jobKey)
+      if (targetKey) {
+        const ids = laneQueuedSyncIds(session.provider)
+        const toIndex = ids.indexOf(targetKey)
+        if (toIndex >= 0) {
+          reorderQueuedToIndex(session.provider, session.jobKey, toIndex)
+        }
+      }
+      clearDragState()
+    },
+    [clearDragState, laneQueuedSyncIds, reorderQueuedToIndex, resolveDropTarget],
+  )
+
+  const beginPointerReorder = useCallback(
+    (event: ReactPointerEvent<HTMLButtonElement>, provider: ProviderKey, jobKey: string) => {
+      if (event.button !== 0) {
+        return
+      }
+      event.preventDefault()
+      event.stopPropagation()
+      const pointerId = event.pointerId
+      dragSessionRef.current = { provider, jobKey, pointerId }
+      dropTargetKeyRef.current = null
+      setDragState({ provider, jobKey })
+      setDropTargetKey(null)
+      document.body.classList.add('queue-is-reordering')
+
+      try {
+        event.currentTarget.setPointerCapture(pointerId)
+      } catch {
+        // Capture is best-effort; document listeners still drive the session.
+      }
+
+      const onPointerMove = (moveEvent: PointerEvent) => {
+        if (moveEvent.pointerId !== pointerId || !dragSessionRef.current) {
+          return
+        }
+        const nextTarget = resolveDropTarget(
+          moveEvent.clientX,
+          moveEvent.clientY,
+          dragSessionRef.current.provider,
+          dragSessionRef.current.jobKey,
+        )
+        if (dropTargetKeyRef.current !== nextTarget) {
+          dropTargetKeyRef.current = nextTarget
+          setDropTargetKey(nextTarget)
+        }
+      }
+
+      const onPointerUp = (upEvent: PointerEvent) => {
+        if (upEvent.pointerId !== pointerId) {
+          return
+        }
+        window.removeEventListener('pointermove', onPointerMove)
+        window.removeEventListener('pointerup', onPointerUp)
+        window.removeEventListener('pointercancel', onPointerUp)
+        endPointerReorder(upEvent.clientX, upEvent.clientY)
+      }
+
+      window.addEventListener('pointermove', onPointerMove)
+      window.addEventListener('pointerup', onPointerUp)
+      window.addEventListener('pointercancel', onPointerUp)
+    },
+    [endPointerReorder, resolveDropTarget],
+  )
 
   const renderLiveTask = (task: QueueLiveTask, position?: number) => {
     const isRunning = task.state === 'running'
     const isHeld = task.state === 'held'
+    const jobKey = task.queueKey ?? task.sourceId
     const detailBits: string[] = []
     if (task.progressDetail) detailBits.push(task.progressDetail)
     if (task.filesProcessed !== undefined && task.filesTotal !== undefined) {
       detailBits.push(`files ${task.filesProcessed}/${task.filesTotal}`)
     }
-    // Só os jobs de Sync em fila são reordenáveis (botões ▲/▼).
-    const reorderable = !isRunning && task.operation === 'Sync'
-    let canMoveUp = false
-    let canMoveDown = false
-    if (reorderable) {
-      const ids = laneQueuedSyncIds(task.provider)
-      const index = ids.indexOf(task.queueKey ?? task.sourceId)
-      canMoveUp = index > 0
-      canMoveDown = index >= 0 && index < ids.length - 1
-    }
-    const rowClassName = ['queue-task-row', isRunning ? 'queue-task-row-running' : '']
+    // Só jobs Sync em fila são reordenáveis (pointer drag + Alt+↑/↓).
+    const reorderable = !isRunning && !isHeld && task.operation === 'Sync' && task.state === 'queued'
+    const isDragging = dragState?.jobKey === jobKey && dragState.provider === task.provider
+    const isDropTarget = dropTargetKey === jobKey && dragState !== null && dragState.jobKey !== jobKey
+    const progressMeta = [
+      task.progressLabel ?? (task.operation === 'Delete' ? 'Processing' : 'Downloading'),
+      ...detailBits,
+      task.progressPercent !== undefined && !task.progressIndeterminate ? `${task.progressPercent}%` : null,
+      `running ${elapsed(task.startedAt ?? task.queuedAt, now)}`,
+    ]
+      .filter(Boolean)
+      .join(' · ')
+
+    const rowClassName = [
+      'queue-task-row',
+      isRunning ? 'queue-task-row-running' : 'queue-task-row-queued',
+      isDragging ? 'is-dragging' : '',
+      isDropTarget ? 'is-drop-target' : '',
+    ]
       .filter(Boolean)
       .join(' ')
+
     return (
-      <article className={rowClassName} key={task.key} role="listitem">
+      <article
+        className={rowClassName}
+        key={task.key}
+        role="listitem"
+        data-queue-provider={reorderable ? task.provider : undefined}
+        data-queue-job-key={reorderable ? jobKey : undefined}
+      >
+        {reorderable ? (
+          <button
+            type="button"
+            className="queue-drag-handle"
+            title="Drag to reorder · Alt+↑/↓"
+            aria-label="Drag to reorder. Use Alt+ArrowUp or Alt+ArrowDown to move."
+            onPointerDown={(event) => beginPointerReorder(event, task.provider, jobKey)}
+            onKeyDown={(event) => {
+              if (!event.altKey) {
+                return
+              }
+              if (event.key === 'ArrowUp') {
+                event.preventDefault()
+                moveQueued(task.provider, jobKey, -1)
+              } else if (event.key === 'ArrowDown') {
+                event.preventDefault()
+                moveQueued(task.provider, jobKey, 1)
+              }
+            }}
+          >
+            <span aria-hidden="true">⠿</span>
+          </button>
+        ) : (
+          <span className="queue-drag-handle-spacer" aria-hidden="true" />
+        )}
         <TaskAvatar handle={task.handle} provider={task.provider} imagePath={avatarsBySource[task.sourceId]} />
         <div className="queue-task-main">
           <div className="queue-task-headline">
@@ -823,14 +999,21 @@ export function SourceSyncQueueWindowPage() {
             {task.operation === 'Delete' ? (
               <span className="queue-tag queue-tag-delete">Delete{task.modeDetail ? ` · ${task.modeDetail}` : ''}</span>
             ) : null}
-            {isHeld ? <span className="queue-tag queue-tag-held">{task.progressLabel === 'Waiting for media move' ? 'Migration hold' : 'Account hold'}</span> : null}
+            {isHeld ? (
+              <span className="queue-tag queue-tag-held">
+                {task.progressLabel === 'Waiting for media move' ? 'Migration hold' : 'Account hold'}
+              </span>
+            ) : null}
             {!isRunning && position !== undefined ? (
               <span className="queue-tag queue-tag-position">{position === 1 ? 'Next' : `#${position}`}</span>
             ) : null}
           </div>
           {isRunning ? (
             <>
-              <div className={`queue-status-progress-track ${task.progressIndeterminate ? 'indeterminate' : ''}`}>
+              <div
+                className={`queue-status-progress-track ${task.progressIndeterminate ? 'indeterminate' : ''}`}
+                aria-hidden={task.progressIndeterminate ? true : undefined}
+              >
                 <div
                   className="queue-status-progress-fill"
                   style={
@@ -840,11 +1023,8 @@ export function SourceSyncQueueWindowPage() {
                   }
                 />
               </div>
-              <small className="queue-task-meta">
-                {task.progressLabel ?? (task.operation === 'Delete' ? 'Processing' : 'Downloading')}
-                {detailBits.length ? ` · ${detailBits.join(' · ')}` : ''}
-                {task.progressPercent !== undefined && !task.progressIndeterminate ? ` · ${task.progressPercent}%` : ''}
-                {` · running ${elapsed(task.startedAt ?? task.queuedAt, now)}`}
+              <small className="queue-task-meta queue-task-meta-running" title={progressMeta}>
+                {progressMeta}
               </small>
             </>
           ) : (
@@ -857,30 +1037,6 @@ export function SourceSyncQueueWindowPage() {
           )}
         </div>
         <div className="queue-task-actions">
-          {reorderable ? (
-            <span className="queue-reorder-buttons">
-              <button
-                className="ghost-button queue-reorder-button"
-                disabled={!canMoveUp}
-                onClick={() => moveQueued(task.provider, task.queueKey ?? task.sourceId, -1)}
-                type="button"
-                title="Move up"
-                aria-label="Move up in queue"
-              >
-                ▲
-              </button>
-              <button
-                className="ghost-button queue-reorder-button"
-                disabled={!canMoveDown}
-                onClick={() => moveQueued(task.provider, task.queueKey ?? task.sourceId, 1)}
-                type="button"
-                title="Move down"
-                aria-label="Move down in queue"
-              >
-                ▼
-              </button>
-            </span>
-          ) : null}
           {task.cancelSourceId ? (
             <button
               className="ghost-button queue-icon-button"
@@ -897,34 +1053,38 @@ export function SourceSyncQueueWindowPage() {
   }
 
   return (
-    <div className="queue-status-window-shell">
-      <header className="queue-status-toolbar">
-        <div className="queue-status-title">
-          <h1>Queue activity</h1>
-          <span className={`queue-global-state ${totals.failed > 0 ? 'has-failures' : ''}`}>{globalState}</span>
-        </div>
-        <div className="queue-status-toolbar-actions">
-          <button
-            ref={maintenanceButtonRef}
-            aria-controls="queue-maintenance-panel"
-            aria-expanded={maintenanceOpen}
-            className="ghost-button"
-            onClick={() => setMaintenanceOpen((open) => !open)}
-            type="button"
-          >
-            Maintenance{maintenanceActive ? ` · ${maintenanceRunning} active · ${maintenanceQueued} queued` : ''}
-          </button>
-          <button
-            aria-label="Open realtime debugger"
-            className="ghost-button"
-            disabled={openingDebugger}
-            onClick={() => void handleOpenDebugger()}
-            type="button"
-          >
-            {openingDebugger ? 'Opening…' : 'Realtime debugger'}
-          </button>
-        </div>
-      </header>
+    <WindowShell
+      titlebar={
+        <WindowTitlebar
+          title="Queue Status"
+          trailing={
+            <span className={`queue-global-state ${totals.failed > 0 ? 'has-failures' : ''}`}>{globalState}</span>
+          }
+        />
+      }
+    >
+      <div className="queue-status-window-body">
+      <div className="queue-status-action-strip">
+        <button
+          ref={maintenanceButtonRef}
+          aria-controls="queue-maintenance-panel"
+          aria-expanded={maintenanceOpen}
+          className="ghost-button"
+          onClick={() => setMaintenanceOpen((open) => !open)}
+          type="button"
+        >
+          Maintenance{maintenanceActive ? ` · ${maintenanceRunning} active · ${maintenanceQueued} queued` : ''}
+        </button>
+        <button
+          aria-label="Open realtime debugger"
+          className="ghost-button"
+          disabled={openingDebugger}
+          onClick={() => void handleOpenDebugger()}
+          type="button"
+        >
+          {openingDebugger ? 'Opening…' : 'Realtime debugger'}
+        </button>
+      </div>
 
       {maintenanceActive ? <section className="maintenance-activity" aria-label="Maintenance activity">
         <header className="maintenance-activity-header">
@@ -1023,25 +1183,46 @@ export function SourceSyncQueueWindowPage() {
       </section> : null}
 
       <section className="queue-status-summary-strip" role="list" aria-label="Queue totals">
-        <article className="queue-status-summary-card" role="listitem">
+        <article
+          className={`queue-status-summary-card${totals.running === 0 ? ' is-quiet' : ''}`}
+          role="listitem"
+        >
           <span>Running</span>
           <strong>{totals.running}</strong>
-          <small>{totals.running > 0 ? `${activeProviderCount} provider lane${activeProviderCount === 1 ? '' : 's'} · ${maintenanceRunning} maintenance` : 'No active work'}</small>
+          {totals.running > 0 ? (
+            <small>
+              {activeProviderCount} provider lane{activeProviderCount === 1 ? '' : 's'}
+              {maintenanceRunning > 0 ? ` · ${maintenanceRunning} maintenance` : ''}
+            </small>
+          ) : null}
         </article>
-        <article className="queue-status-summary-card" role="listitem">
+        <article
+          className={`queue-status-summary-card${totals.queued === 0 ? ' is-quiet' : ''}`}
+          role="listitem"
+        >
           <span>Queued</span>
           <strong>{totals.queued}</strong>
-          <small>{totals.queued > 0 ? `${queuedProviderCount} provider lane${queuedProviderCount === 1 ? '' : 's'} · ${maintenanceQueued} maintenance` : 'Queue is clear'}</small>
+          {totals.queued > 0 ? (
+            <small>
+              {queuedProviderCount} provider lane{queuedProviderCount === 1 ? '' : 's'}
+              {maintenanceQueued > 0 ? ` · ${maintenanceQueued} maintenance` : ''}
+            </small>
+          ) : null}
         </article>
-        <article className="queue-status-summary-card" role="listitem">
+        <article
+          className={`queue-status-summary-card${totals.completed === 0 ? ' is-quiet' : ''}`}
+          role="listitem"
+        >
           <span>Done</span>
           <strong>{totals.completed}</strong>
-          <small>Completed this session</small>
         </article>
-        <article className="queue-status-summary-card" role="listitem">
+        <article
+          className={`queue-status-summary-card${totals.failed === 0 ? ' is-quiet' : ' is-attention'}`}
+          role="listitem"
+        >
           <span>Failed</span>
           <strong>{totals.failed}</strong>
-          <small>{totals.failed > 0 ? 'Needs attention' : 'No failures'}</small>
+          {totals.failed > 0 ? <small>Needs attention</small> : null}
         </article>
       </section>
 
@@ -1050,7 +1231,19 @@ export function SourceSyncQueueWindowPage() {
       <section className="queue-status-main">
         <div className="queue-lanes" role="list" aria-label="Provider lanes">
           {lanes.length === 0 ? (
-            <div className="runtime-log-window-empty">No active downloads. Queue a profile to get started.</div>
+            <div className="queue-lanes-empty">
+              <p className="queue-lanes-empty-message">No active downloads. Queue a profile to get started.</p>
+              {idleProviders.length > 0 ? (
+                <div className="queue-idle-providers">
+                  <span className="eyebrow">Idle</span>
+                  {idleProviders.map((descriptor) => (
+                    <span className={`queue-provider-pill provider-${descriptor.key} is-idle`} key={descriptor.key}>
+                      {descriptor.displayName}
+                    </span>
+                  ))}
+                </div>
+              ) : null}
+            </div>
           ) : (
             lanes.map((lane) => {
               const busy = busyProviders.has(lane.provider)
@@ -1144,6 +1337,8 @@ export function SourceSyncQueueWindowPage() {
                   <div className="queue-task-list" role="list" aria-label="Single video downloads">
                     {singleVideoStatus.active ? (
                       <article className="queue-task-row queue-task-row-running" role="listitem">
+                        <span className="queue-drag-handle-spacer" aria-hidden="true" />
+                        <span className="queue-task-avatar" aria-hidden="true" />
                         <div className="queue-task-main">
                           <div className="queue-task-headline">
                             <strong title={singleVideoStatus.active.url}>
@@ -1153,14 +1348,16 @@ export function SourceSyncQueueWindowPage() {
                           <div className="queue-status-progress-track indeterminate">
                             <div className="queue-status-progress-fill" />
                           </div>
-                          <small className="queue-task-meta queue-task-url" title={singleVideoStatus.active.url}>
+                          <small className="queue-task-meta queue-task-meta-running queue-task-url" title={singleVideoStatus.active.url}>
                             Downloading · {singleVideoStatus.active.url}
                           </small>
                         </div>
                       </article>
                     ) : null}
                     {singleVideoStatus.queuedItems.map((item, index) => (
-                      <article className="queue-task-row" key={item.id} role="listitem">
+                      <article className="queue-task-row queue-task-row-queued" key={item.id} role="listitem">
+                        <span className="queue-drag-handle-spacer" aria-hidden="true" />
+                        <span className="queue-task-avatar" aria-hidden="true" />
                         <div className="queue-task-main">
                           <div className="queue-task-headline">
                             <strong title={item.url}>{item.provider ?? 'Single video'}</strong>
@@ -1178,7 +1375,7 @@ export function SourceSyncQueueWindowPage() {
             </article>
           ) : null}
 
-          {idleProviders.length > 0 ? (
+          {lanes.length > 0 && idleProviders.length > 0 ? (
             <div className="queue-idle-providers">
               <span className="eyebrow">Idle</span>
               {idleProviders.map((descriptor) => (
@@ -1218,7 +1415,7 @@ export function SourceSyncQueueWindowPage() {
                     <p className="queue-recent-summary">{task.summary}</p>
                     {task.error ? <p className="queue-recent-error">{task.error}</p> : null}
                   </div>
-                  {task.operation === 'Sync' ? (
+                  {task.operation === 'Sync' && task.status === 'failed' ? (
                     <button
                       className="ghost-button queue-icon-button"
                       onClick={() => void handleRetry(task.sourceId)}
@@ -1234,7 +1431,8 @@ export function SourceSyncQueueWindowPage() {
           )}
         </aside>
       </section>
-    </div>
+      </div>
+    </WindowShell>
   )
 }
 

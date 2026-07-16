@@ -9,6 +9,8 @@ import type {
   ConnectorDebugEventType,
   ProviderKey,
 } from '../../domain/models'
+import { WindowShell } from '../brand/WindowShell'
+import { WindowTitlebar } from '../brand/WindowTitlebar'
 
 const EVENT_TYPES: Array<ConnectorDebugEventType | 'all'> = [
   'all',
@@ -125,57 +127,94 @@ export function ConnectorDebugWindowPage() {
   }
 
   return (
-    <main className="connector-debug-shell">
-      <header className="connector-debug-toolbar">
-        <div className="connector-debug-title">
-          <span className={`connector-debug-live-dot${paused ? ' is-paused' : ''}`} />
-          <div>
-            <strong>Realtime Connector Debugger</strong>
+    <WindowShell
+      density="inspector"
+      titlebar={
+        <WindowTitlebar
+          title="Connector Debugger"
+          trailing={
+            <span className="window-titlebar-status-meta">
+              <span className={`connector-debug-live-dot${paused ? ' is-paused' : ''}`} aria-hidden="true" />
+              {paused ? 'Paused' : 'Live'}
+            </span>
+          }
+        />
+      }
+    >
+      <div className="connector-debug-body">
+        <header className="connector-debug-toolbar">
+          <div className="connector-debug-meta">
             <small>Raw connector I/O · credentials are redacted</small>
           </div>
-        </div>
-        <div className="connector-debug-filters">
-          <select aria-label="Provider" value={provider} onChange={(event) => setProvider(event.target.value as ProviderKey | 'all')}>
-            <option value="all">All providers</option>
-            <option value="instagram">Instagram</option>
-            <option value="tiktok">TikTok</option>
-            <option value="twitter">Twitter</option>
-          </select>
-          <select aria-label="Event type" value={eventType} onChange={(event) => setEventType(event.target.value as ConnectorDebugEventType | 'all')}>
-            {EVENT_TYPES.map((type) => <option key={type} value={type}>{type === 'all' ? 'All events' : type.toUpperCase()}</option>)}
-          </select>
-          <input aria-label="Search raw output" onChange={(event) => setSearch(event.target.value)} placeholder="Search raw output…" value={search} />
-        </div>
-        <div className="connector-debug-actions">
-          <span>{visibleEntries.length} events</span>
-          <button className="ghost-button" onClick={() => setPaused((value) => !value)} type="button">
-            {paused ? 'Resume' : 'Pause'}
-          </button>
-          <button className="ghost-button" disabled={visibleEntries.length === 0} onClick={() => void copyVisible()} type="button">
-            {copied ? 'Copied' : 'Copy raw'}
-          </button>
-          <button className="ghost-button" onClick={() => void clear()} type="button">Clear</button>
-        </div>
-      </header>
+          <div className="connector-debug-filters">
+            <select
+              aria-label="Provider"
+              value={provider}
+              onChange={(event) => setProvider(event.target.value as ProviderKey | 'all')}
+            >
+              <option value="all">All providers</option>
+              <option value="instagram">Instagram</option>
+              <option value="tiktok">TikTok</option>
+              <option value="twitter">Twitter</option>
+            </select>
+            <select
+              aria-label="Event type"
+              value={eventType}
+              onChange={(event) => setEventType(event.target.value as ConnectorDebugEventType | 'all')}
+            >
+              {EVENT_TYPES.map((type) => (
+                <option key={type} value={type}>
+                  {type === 'all' ? 'All events' : type.toUpperCase()}
+                </option>
+              ))}
+            </select>
+            <input
+              aria-label="Search raw output"
+              onChange={(event) => setSearch(event.target.value)}
+              placeholder="Search raw output…"
+              value={search}
+            />
+          </div>
+          <div className="connector-debug-actions">
+            <span>{visibleEntries.length} events</span>
+            <button className="ghost-button" onClick={() => setPaused((value) => !value)} type="button">
+              {paused ? 'Resume' : 'Pause'}
+            </button>
+            <button
+              className="ghost-button"
+              disabled={visibleEntries.length === 0}
+              onClick={() => void copyVisible()}
+              type="button"
+            >
+              {copied ? 'Copied' : 'Copy raw'}
+            </button>
+            <button className="ghost-button" onClick={() => void clear()} type="button">
+              Clear
+            </button>
+          </div>
+        </header>
 
-      {error ? <div className="runtime-log-window-error">{error}</div> : null}
-      <div className="connector-debug-feed" ref={feedRef} role="log" aria-live={paused ? 'off' : 'polite'}>
-        {visibleEntries.length === 0 ? (
-          <div className="connector-debug-empty">Waiting for connector activity…</div>
-        ) : visibleEntries.map((entry) => (
-          <article className="connector-debug-line" data-event={entry.eventType} key={entry.id}>
-            <div className="connector-debug-line-meta">
-              <time>{timestamp(entry.timestamp)}</time>
-              <b>{entry.eventType.toUpperCase()}</b>
-              <span>{entry.connector}</span>
-              {entry.provider ? <span>{entry.provider}</span> : null}
-              {entry.sourceHandle ? <span>{entry.sourceHandle}</span> : null}
-              <strong>{entry.operation}</strong>
-            </div>
-            <pre>{entry.raw}</pre>
-          </article>
-        ))}
+        {error ? <div className="runtime-log-window-error">{error}</div> : null}
+        <div className="connector-debug-feed" ref={feedRef} role="log" aria-live={paused ? 'off' : 'polite'}>
+          {visibleEntries.length === 0 ? (
+            <div className="connector-debug-empty">Waiting for connector activity…</div>
+          ) : (
+            visibleEntries.map((entry) => (
+              <article className="connector-debug-line" data-event={entry.eventType} key={entry.id}>
+                <div className="connector-debug-line-meta">
+                  <time>{timestamp(entry.timestamp)}</time>
+                  <b>{entry.eventType.toUpperCase()}</b>
+                  <span>{entry.connector}</span>
+                  {entry.provider ? <span>{entry.provider}</span> : null}
+                  {entry.sourceHandle ? <span>{entry.sourceHandle}</span> : null}
+                  <strong>{entry.operation}</strong>
+                </div>
+                <pre>{entry.raw}</pre>
+              </article>
+            ))
+          )}
+        </div>
       </div>
-    </main>
+    </WindowShell>
   )
 }

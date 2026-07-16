@@ -394,8 +394,12 @@ export function CookieEditorDialog({
       <section className="accounts-cookie-dialog" role="dialog" aria-modal="true" aria-label={`${providerLabel} cookies`}>
         <header className="accounts-cookie-dialog-header">
           <div>
-            <p className="eyebrow">Cookies</p>
             <h3>{providerLabel} cookies</h3>
+            <p className="accounts-cookie-dialog-note">
+              {draftMode
+                ? 'Draft cookies are saved when you create the account.'
+                : 'Changes save immediately for this account when you click Save cookies.'}
+            </p>
           </div>
           <div className="accounts-cookie-dialog-summary">
             <span>{provider}</span>
@@ -417,7 +421,7 @@ export function CookieEditorDialog({
               </div>
             ) : null}
           </div>
-          <button className="ghost-button danger-button" disabled={busy} onClick={() => void handleClearStoredCookies()} type="button">Clear</button>
+          <button className="danger-button" disabled={busy} onClick={() => void handleClearStoredCookies()} type="button">Clear</button>
         </div>
 
         <div className="accounts-cookie-body">
@@ -432,9 +436,11 @@ export function CookieEditorDialog({
               <div className="accounts-cookie-list" role="listbox" aria-label="Stored cookies">
                 {cookies.map((cookie, index) => (
                   <button
+                    aria-selected={index === selectedIndex}
                     className={`accounts-cookie-list-item${index === selectedIndex ? ' accounts-cookie-list-item-active' : ''}`}
                     key={`${cookie.domain}-${cookie.name}-${index}`}
                     onClick={() => setSelectedIndex(index)}
+                    role="option"
                     type="button"
                   >
                     <strong>{describeCookie(cookie)}</strong>
@@ -505,7 +511,6 @@ export function CookieEditorDialog({
             >
               <header className="accounts-cookie-import-dialog-header">
                 <div>
-                  <p className="eyebrow">Cookies</p>
                   <h4>Paste cookie text</h4>
                 </div>
                 <span className="accounts-cookie-import-dialog-format">
