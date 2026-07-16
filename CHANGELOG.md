@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.23.0](https://github.com/JustShinobi/NinjaCrawler/compare/v0.22.0...v0.23.0) (2026-07-16)
+
+
+### Features
+
+* **twitter:** warn when account cannot view sensitive media ([#43](https://github.com/JustShinobi/NinjaCrawler/issues/43)) ([a3731e3](https://github.com/JustShinobi/NinjaCrawler/commit/a3731e3338559d51b71d0c446376ba857ac7d6eb))
+
 ## [0.22.0](https://github.com/JustShinobi/NinjaCrawler/compare/v0.21.0...v0.22.0) (2026-07-16)
 
 
