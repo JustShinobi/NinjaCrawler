@@ -4,7 +4,8 @@ use crate::domain::models::{
     SourceProfileUpsert, SourceSyncOptions, TikTokSourceSyncOptions, WorkspaceSnapshot,
 };
 use crate::infrastructure::{
-    desktop_runtime, single_video_runtime, source_sync_runtime, workspace_repository,
+    companion_install, desktop_runtime, single_video_runtime, source_sync_runtime,
+    workspace_repository,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -61,6 +62,12 @@ struct CompanionCompatibility {
     status: &'static str,
     release_page_url: String,
     download_url: String,
+    /// Managed unpacked install path under LocalAppData (when available).
+    install_path: Option<String>,
+    /// Version present in the managed install folder, if any.
+    staged_version: Option<String>,
+    /// True when AppData already holds the available Companion version.
+    update_ready: bool,
 }
 
 #[derive(Deserialize)]
@@ -341,8 +348,38 @@ fn route_request(app: AppHandle, request: HttpRequest) -> Vec<u8> {
                 Err(error) => error_response(400, &error),
             }
         }
+        ("GET", path) if path == format!("{API_PREFIX}/update/status") => {
+            match companion_update_status() {
+                Ok(payload) => json_response(200, &payload),
+                Err(error) => error_response(500, &error),
+            }
+        }
+        ("POST", path) if path == format!("{API_PREFIX}/update/stage") => {
+            match stage_companion_update() {
+                Ok(payload) => json_response(200, &payload),
+                Err(error) => error_response(400, &error),
+            }
+        }
         _ => error_response(404, "Unknown NinjaCrawler Companion API endpoint."),
     }
+}
+
+fn companion_update_status() -> Result<companion_install::CompanionInstallStatus, String> {
+    let available_version = bundled_companion_version();
+    let download_url = companion_download_url(&available_version);
+    companion_install::install_status(&available_version, &download_url)
+}
+
+fn stage_companion_update() -> Result<companion_install::CompanionInstallStatus, String> {
+    let available_version = bundled_companion_version();
+    let download_url = companion_download_url(&available_version);
+    companion_install::stage_update(&available_version, &download_url)
+}
+
+fn companion_download_url(available_version: &str) -> String {
+    format!(
+        "{GITHUB_RELEASES_URL}/download/companion-v{available_version}/NinjaCrawler-Companion-{available_version}.zip"
+    )
 }
 
 fn ensure_sensitive_companion_request(request: &HttpRequest) -> Result<(), String> {
@@ -436,9 +473,8 @@ fn companion_compatibility(installed_version: Option<&str>) -> CompanionCompatib
     // independent of the desktop app tag, so its download links are anchored to
     // the Companion release rather than the app's CARGO_PKG_VERSION.
     let release_page_url = format!("{GITHUB_RELEASES_URL}/tag/companion-v{available_version}");
-    let download_url = format!(
-        "{GITHUB_RELEASES_URL}/download/companion-v{available_version}/NinjaCrawler-Companion-{available_version}.zip"
-    );
+    let download_url = companion_download_url(&available_version);
+    let install = companion_install::install_status(&available_version, &download_url).ok();
 
     CompanionCompatibility {
         installed_version: installed_version.map(str::to_string),
@@ -447,6 +483,9 @@ fn companion_compatibility(installed_version: Option<&str>) -> CompanionCompatib
         status,
         release_page_url,
         download_url,
+        install_path: install.as_ref().map(|value| value.install_path.clone()),
+        staged_version: install.as_ref().and_then(|value| value.staged_version.clone()),
+        update_ready: install.as_ref().is_some_and(|value| value.update_ready),
     }
 }
 
@@ -753,7 +792,8 @@ fn detect_profile_from_url(url: &str) -> Option<DetectedProfile> {
         .collect();
 
     let (provider, handle) = if host == "instagram.com" || host.ends_with(".instagram.com") {
-        if segments.first().copied() == Some("stories") && segments.len() >= 3 {
+        // `/stories/{handle}` and `/stories/{handle}/{mediaId}` both identify a profile.
+        if segments.first().copied() == Some("stories") && segments.len() >= 2 {
             ("instagram", segments[1])
         } else {
             let first = segments.first().copied()?;
@@ -1038,6 +1078,14 @@ mod tests {
         assert_eq!(detected.provider, "instagram");
         assert_eq!(detected.handle, "@example.profile");
         assert_eq!(detected.story_id, "1234567890123456789");
+    }
+
+    #[test]
+    fn detects_profile_from_bare_instagram_stories_path() {
+        let detected = detect_profile_from_url("https://www.instagram.com/stories/example.profile/")
+            .expect("story profile");
+        assert_eq!(detected.provider, "instagram");
+        assert_eq!(detected.handle, "@example.profile");
     }
 
     #[test]

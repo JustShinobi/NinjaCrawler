@@ -2,11 +2,17 @@ import {
   detectProfileFromUrl,
   detectTargetFromUrl,
   downloadTarget,
+  installInstagramStoryNetworkHook,
   loadContext,
   resolveLiveTabUrl,
   syncSource,
 } from './core.js'
 import { captureAccountFromTab } from './accountCapture.js'
+
+/** @type {Map<number, { url: string, target: object|null, updatedAt: number }>} */
+const storyTargetsByTab = new Map()
+/** @type {Set<number>} */
+const storyHookedTabs = new Set()
 
 chrome.runtime.onInstalled.addListener(() => {
   void initializeBadgeFeedback()
@@ -22,12 +28,28 @@ chrome.tabs.onActivated.addListener(({ tabId }) => {
       return
     }
 
+    void ensureStoryNetworkHook(tab)
     void refreshBadge(tab).catch(() => undefined)
   })
 })
 
-chrome.tabs.onUpdated.addListener((_tabId, changeInfo, tab) => {
+chrome.tabs.onRemoved.addListener((tabId) => {
+  storyTargetsByTab.delete(tabId)
+  storyHookedTabs.delete(tabId)
+})
+
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  if (changeInfo.url) {
+    // Full navigation resets MAIN-world hooks.
+    storyHookedTabs.delete(tabId)
+    const stillStory = /\/stories\//i.test(changeInfo.url)
+    if (!stillStory) {
+      storyTargetsByTab.delete(tabId)
+    }
+  }
+
   if (changeInfo.status === 'complete' || changeInfo.url) {
+    void ensureStoryNetworkHook(tab)
     void refreshBadge(tab).catch(() => undefined)
   }
 })
@@ -36,12 +58,67 @@ chrome.commands.onCommand.addListener((command, tab) => {
   void runActiveTabCommand(command, tab)
 })
 
-chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message?.type === 'storyTargetChanged') {
+    const tabId = sender.tab?.id
+    if (tabId != null) {
+      if (message.target?.storyId) {
+        storyTargetsByTab.set(tabId, {
+          url: message.target.url || message.url,
+          target: message.target,
+          updatedAt: Date.now(),
+        })
+      } else if (message.url) {
+        // Keep bare stories URL for profile context; clear resolved target.
+        const existing = storyTargetsByTab.get(tabId)
+        if (existing?.target && detectTargetFromUrl(message.url)) {
+          // Page now has a full story URL.
+          storyTargetsByTab.set(tabId, {
+            url: message.url,
+            target: detectTargetFromUrl(message.url),
+            updatedAt: Date.now(),
+          })
+        } else if (!message.target) {
+          // No media id yet — do not wipe a fresher cached target for the same handle.
+          const cached = storyTargetsByTab.get(tabId)
+          const cachedHandle = cached?.target?.handle?.toLocaleLowerCase?.()
+          const messageHandle = message.handle?.toLocaleLowerCase?.()
+          if (!cached || (messageHandle && cachedHandle && messageHandle !== cachedHandle)) {
+            storyTargetsByTab.delete(tabId)
+          }
+        }
+      }
+
+      chrome.tabs.get(tabId, (tab) => {
+        if (!chrome.runtime.lastError && tab) {
+          void refreshBadge(tab).catch(() => undefined)
+        }
+      })
+    }
+    sendResponse({ ok: true })
+    return true
+  }
+
+  if (message?.type === 'getStoryTarget') {
+    sendResponse(storyTargetsByTab.get(message.tabId) ?? null)
+    return true
+  }
+
   if (message?.type === 'refreshBadges') {
     chrome.tabs.query({ active: true })
       .then((tabs) => Promise.all(tabs.map((tab) => refreshBadge(tab))))
       .then(() => sendResponse({ ok: true }))
       .catch((error) => sendResponse({ ok: false, error: error?.message || 'Badge refresh failed.' }))
+    return true
+  }
+
+  if (message?.type === 'reloadExtension') {
+    try {
+      chrome.runtime.reload()
+      sendResponse({ ok: true })
+    } catch (error) {
+      sendResponse({ ok: false, error: error?.message || 'Reload failed.' })
+    }
     return true
   }
 
@@ -61,16 +138,59 @@ void initializeBadgeFeedback()
 async function initializeBadgeFeedback() {
   await safeAction(() => chrome.action.setBadgeBackgroundColor({ color: '#2f855a' }))
   const tabs = await chrome.tabs.query({ active: true })
-  await Promise.all(tabs.map((tab) => refreshBadge(tab)))
+  await Promise.all(tabs.map(async (tab) => {
+    await ensureStoryNetworkHook(tab)
+    await refreshBadge(tab)
+  }))
+}
+
+async function ensureStoryNetworkHook(tab) {
+  if (!tab?.id || !isInstagramTab(tab.url)) return
+  if (storyHookedTabs.has(tab.id)) return
+
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      world: 'MAIN',
+      func: installInstagramStoryNetworkHook,
+    })
+    storyHookedTabs.add(tab.id)
+  } catch {
+    // Restricted pages or missing host access.
+  }
+}
+
+function isInstagramTab(url) {
+  if (!url) return false
+  try {
+    const host = new URL(url).hostname.replace(/^www\./, '').toLowerCase()
+    return host === 'instagram.com' || host.endsWith('.instagram.com')
+  } catch {
+    return false
+  }
 }
 
 async function refreshBadge(tab) {
   if (!tab?.id) return
 
-  const liveUrl = await resolveLiveTabUrl(tab)
+  const cached = storyTargetsByTab.get(tab.id)
+  const liveUrl = await resolveLiveTabUrl(tab, {
+    preferredUrl: cached?.url,
+    skipCacheLookup: true,
+  })
+
+  // Persist a resolved target discovered via page inspection.
+  const inspectedTarget = detectTargetFromUrl(liveUrl)
+  if (inspectedTarget) {
+    storyTargetsByTab.set(tab.id, {
+      url: liveUrl,
+      target: inspectedTarget,
+      updatedAt: Date.now(),
+    })
+  }
 
   const detected = detectProfileFromUrl(liveUrl)
-  const target = detectTargetFromUrl(liveUrl)
+  const target = inspectedTarget ?? cached?.target ?? detectTargetFromUrl(liveUrl)
   if (!detected) {
     await clearBadge(tab.id)
     return
@@ -133,7 +253,12 @@ async function runActiveTabCommand(command, commandTab) {
   if (!tab?.id) return
 
   try {
-    const liveUrl = await resolveLiveTabUrl(tab)
+    await ensureStoryNetworkHook(tab)
+    const cached = storyTargetsByTab.get(tab.id)
+    const liveUrl = await resolveLiveTabUrl(tab, {
+      preferredUrl: cached?.url,
+      skipCacheLookup: true,
+    })
     const detected = detectProfileFromUrl(liveUrl)
     if (!detected) {
       throw new Error('Open a supported profile or story first.')
@@ -153,7 +278,9 @@ async function runActiveTabCommand(command, commandTab) {
     }
 
     if (command === 'download-story') {
-      const target = context.detectedTarget ?? detectTargetFromUrl(liveUrl)
+      const target = context.detectedTarget
+        ?? cached?.target
+        ?? detectTargetFromUrl(liveUrl)
       if (!target) {
         throw new Error('The active tab is not a supported story URL.')
       }

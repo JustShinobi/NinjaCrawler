@@ -15,26 +15,37 @@ on the extension badge, so the popup does not need to remain open.
 
 NinjaCrawler reports the Companion version bundled with its current release and
 the minimum compatible version. When the installed extension is older, the
-popup shows the installed and available versions with guided actions to download
-the exact release ZIP and open `chrome://extensions`. The extension badge uses
-`↑` for an available update and `!` when an update is required for compatibility.
-After downloading, extract the ZIP over the existing Companion folder and click
-**Reload** on the Chrome Extensions page.
+popup shows the installed and available versions. With NinjaCrawler running you
+can:
+
+1. **Download to AppData** — the desktop app stages the Companion ZIP under
+   `%LocalAppData%\NinjaCrawler\Companion`.
+2. **Reload extension** — the popup calls `chrome.runtime.reload()` so Chrome
+   picks up the staged files without opening `chrome://extensions`.
+
+`chrome.runtime.reload()` only applies files from the folder Chrome already
+loaded. For one-click updates, load unpacked from the AppData path above (or
+point Load unpacked there once). If you keep a different folder loaded, use
+**Open extensions** and reload that install after copying files, or switch Load
+unpacked to the AppData path.
+
+The extension badge uses `↑` for an available update and `!` when an update is
+required for compatibility.
 
 ## Local Development
 
 1. Build and run NinjaCrawler.
 2. Open `chrome://extensions`.
 3. Enable Developer mode.
-4. Select **Load unpacked** and choose this `NinjaCrawler.Companion` folder.
+4. Select **Load unpacked** and choose this `NinjaCrawler.Companion` folder
+   (or `%LocalAppData%\NinjaCrawler\Companion` after staging an update).
 
 ## Updating an unpacked installation
 
-Version 0.3.0 introduces a stable extension ID. Remove any older Companion
-installation once, extract this release, and load its `NinjaCrawler-Companion`
-folder. For later releases, extract the new ZIP over that same folder and click
-**Reload** on `chrome://extensions`; Chrome will update the existing Companion
-instead of creating another one.
+Version 0.3.0 introduces a stable extension ID. Prefer the in-popup
+**Download to AppData** + **Reload extension** flow when NinjaCrawler is
+running. Manual fallback: extract the release ZIP over the loaded Companion
+folder and click **Reload** on `chrome://extensions`.
 
 The extension calls the desktop API at:
 

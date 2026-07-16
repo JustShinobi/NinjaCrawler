@@ -13,8 +13,10 @@ import {
   loadContext,
   loadContexts,
   loadHealth,
+  loadCompanionUpdateStatus,
   previewAccount,
   resolveLiveTabUrl,
+  stageCompanionUpdate,
   syncSource,
 } from './core.js'
 
@@ -26,8 +28,12 @@ const elements = {
   updateTitle: document.querySelector('#updateTitle'),
   updateMeta: document.querySelector('#updateMeta'),
   downloadUpdateButton: document.querySelector('#downloadUpdateButton'),
+  reloadExtensionButton: document.querySelector('#reloadExtensionButton'),
   openExtensionsButton: document.querySelector('#openExtensionsButton'),
   viewReleaseButton: document.querySelector('#viewReleaseButton'),
+  updateInstructions: document.querySelector('#updateInstructions'),
+  updateInstallPath: document.querySelector('#updateInstallPath'),
+  updateMessage: document.querySelector('#updateMessage'),
   unsupportedPanel: document.querySelector('#unsupportedPanel'),
   offlinePanel: document.querySelector('#offlinePanel'),
   profilesPanel: document.querySelector('#profilesPanel'),
@@ -78,6 +84,7 @@ const state = {
   video: null,
   context: null,
   compatibility: null,
+  updateStatus: null,
   accountCapture: null,
   accountPreview: null,
   profiles: [],
@@ -114,6 +121,12 @@ async function loadCompatibility() {
   try {
     const health = await loadHealth()
     rememberCompatibility(health?.companionCompatibility)
+    try {
+      state.updateStatus = await loadCompanionUpdateStatus()
+    } catch {
+      state.updateStatus = null
+    }
+    renderCompatibility()
   } catch {
     // The active context still owns desktop-offline feedback for supported tabs.
   }
@@ -219,7 +232,8 @@ function bindEvents() {
   elements.addSelectedButton?.addEventListener('click', () => submitSelectedProfiles())
   elements.themeSelect?.addEventListener('change', () => saveTheme(elements.themeSelect.value))
   elements.configureShortcutsButton?.addEventListener('click', () => openShortcutSettings())
-  elements.downloadUpdateButton?.addEventListener('click', () => openCompatibilityUrl('downloadUrl'))
+  elements.downloadUpdateButton?.addEventListener('click', () => stageUpdateToAppData())
+  elements.reloadExtensionButton?.addEventListener('click', () => reloadExtension())
   elements.viewReleaseButton?.addEventListener('click', () => openCompatibilityUrl('releasePageUrl'))
   elements.openExtensionsButton?.addEventListener('click', () => openChromeExtensions())
 }
@@ -694,10 +708,82 @@ function renderCompatibility() {
   if (!needsUpdate) return
 
   const installed = compatibility.installedVersion || chrome.runtime.getManifest().version
+  const updateStatus = state.updateStatus
+  const ready = Boolean(updateStatus?.updateReady)
+  const installPath = updateStatus?.installPath || compatibility.installPath || ''
+
   elements.updateTitle.textContent = compatibility.status === 'incompatible'
     ? 'Companion update required'
-    : 'Companion update available'
-  elements.updateMeta.textContent = `Installed ${installed} · available ${compatibility.availableVersion}`
+    : ready
+      ? 'Companion update ready'
+      : 'Companion update available'
+  elements.updateMeta.textContent = ready
+    ? `Installed ${installed} · staged ${updateStatus.stagedVersion || compatibility.availableVersion}`
+    : `Installed ${installed} · available ${compatibility.availableVersion}`
+
+  if (elements.updateInstructions) {
+    elements.updateInstructions.textContent = ready
+      ? 'Files are in AppData. Reload the extension to apply them (Load unpacked from the path below if this install is not that folder).'
+      : 'NinjaCrawler can download the new Companion into AppData. Then reload the extension when you are ready.'
+  }
+
+  if (elements.updateInstallPath) {
+    elements.updateInstallPath.textContent = installPath ? `Install path: ${installPath}` : ''
+    elements.updateInstallPath.classList.toggle('hidden', !installPath)
+  }
+
+  elements.downloadUpdateButton?.classList.toggle('hidden', ready)
+  if (elements.downloadUpdateButton) {
+    elements.downloadUpdateButton.disabled = state.isBusy
+    elements.downloadUpdateButton.textContent = 'Download to AppData'
+  }
+  elements.reloadExtensionButton?.classList.toggle('hidden', !ready)
+  if (elements.reloadExtensionButton) {
+    elements.reloadExtensionButton.disabled = state.isBusy
+  }
+}
+
+async function stageUpdateToAppData() {
+  setBusy(true)
+  setUpdateMessage('Downloading Companion into AppData…')
+  try {
+    state.updateStatus = await stageCompanionUpdate()
+    setUpdateMessage(
+      state.updateStatus?.updateReady
+        ? 'Update staged. Reload the extension to apply it.'
+        : 'Download finished.',
+      'ok',
+    )
+    renderCompatibility()
+  } catch (error) {
+    setUpdateMessage(error?.message || 'Could not download the Companion update.', 'error')
+  } finally {
+    setBusy(false)
+    renderCompatibility()
+  }
+}
+
+async function reloadExtension() {
+  setUpdateMessage('Reloading extension…')
+  try {
+    await chrome.runtime.sendMessage({ type: 'reloadExtension' })
+    // Service worker reloads the extension; popup closes as a side effect.
+  } catch (error) {
+    try {
+      chrome.runtime.reload()
+    } catch (reloadError) {
+      setUpdateMessage(
+        reloadError?.message || error?.message || 'Could not reload the extension.',
+        'error',
+      )
+    }
+  }
+}
+
+function setUpdateMessage(text, kind = '') {
+  if (!elements.updateMessage) return
+  elements.updateMessage.textContent = text
+  elements.updateMessage.className = `message ${kind}`.trim()
 }
 
 async function openCompatibilityUrl(field) {

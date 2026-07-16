@@ -37,3 +37,17 @@ describe('Companion update feedback', () => {
     expect(backgroundSource).toContain('update required')
   })
 })
+
+describe('Companion story target cache', () => {
+  it('tracks content-script story targets and injects the MAIN-world network hook', () => {
+    expect(backgroundSource).toContain("message?.type === 'storyTargetChanged'")
+    expect(backgroundSource).toContain("message?.type === 'getStoryTarget'")
+    expect(backgroundSource).toContain('installInstagramStoryNetworkHook')
+    expect(backgroundSource).toContain("world: 'MAIN'")
+  })
+
+  it('supports user-triggered extension reload after AppData staging', () => {
+    expect(backgroundSource).toContain("message?.type === 'reloadExtension'")
+    expect(backgroundSource).toContain('chrome.runtime.reload()')
+  })
+})
