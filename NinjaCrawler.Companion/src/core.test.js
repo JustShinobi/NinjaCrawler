@@ -1,11 +1,15 @@
 import { describe, expect, it, vi } from 'vitest'
 import {
   collectDetectedProfiles,
+  detectProfileFromUrl,
   detectTargetFromUrl,
   detectVideoFromUrl,
+  installInstagramStoryNetworkHook,
+  inspectLiveStoryPage,
   loadContext,
   loadContexts,
   loadHealth,
+  pickBestLiveUrl,
   resolveLiveTabUrl,
 } from './core.js'
 
@@ -62,29 +66,95 @@ describe('detectTargetFromUrl', () => {
   })
 })
 
+describe('detectProfileFromUrl', () => {
+  it('detects a profile from a bare Instagram stories path without media id', () => {
+    expect(detectProfileFromUrl('https://www.instagram.com/stories/someone/')).toMatchObject({
+      provider: 'instagram',
+      handle: '@someone',
+    })
+  })
+})
+
+describe('pickBestLiveUrl', () => {
+  it('reconstructs the first story URL from network media cache when path has no id', () => {
+    expect(pickBestLiveUrl({
+      candidates: ['https://www.instagram.com/stories/someone/'],
+      handle: 'someone',
+      mediaIds: ['1234567890', '999'],
+    })).toBe('https://www.instagram.com/stories/someone/1234567890/')
+  })
+
+  it('prefers a full story candidate over media cache', () => {
+    expect(pickBestLiveUrl({
+      candidates: [
+        'https://www.instagram.com/stories/someone/',
+        'https://www.instagram.com/stories/someone/555/',
+      ],
+      handle: 'someone',
+      mediaIds: ['1234567890'],
+    })).toBe('https://www.instagram.com/stories/someone/555/')
+  })
+})
+
 describe('resolveLiveTabUrl', () => {
   it('prefers the live Instagram story URL exposed by the page over the stale tab URL', async () => {
     const previousChrome = globalThis.chrome
     globalThis.chrome = {
       scripting: {
         executeScript: vi.fn().mockResolvedValue([{
-          result: [
-            'https://www.instagram.com/stories/someone/',
-            'https://www.instagram.com/stories/someone/1234567890/',
-          ],
+          result: {
+            candidates: [
+              'https://www.instagram.com/stories/someone/',
+              'https://www.instagram.com/stories/someone/1234567890/',
+            ],
+            handle: 'someone',
+            mediaIds: [],
+          },
         }]),
       },
     }
 
     try {
-      await expect(resolveLiveTabUrl({
-        id: 7,
-        url: 'https://www.instagram.com/someone/',
-      })).resolves.toBe('https://www.instagram.com/stories/someone/1234567890/')
+      await expect(resolveLiveTabUrl(
+        { id: 7, url: 'https://www.instagram.com/someone/' },
+        { skipCacheLookup: true },
+      )).resolves.toBe('https://www.instagram.com/stories/someone/1234567890/')
     } finally {
       if (previousChrome) globalThis.chrome = previousChrome
       else delete globalThis.chrome
     }
+  })
+
+  it('uses network media cache when the first story URL has no media id', async () => {
+    const previousChrome = globalThis.chrome
+    globalThis.chrome = {
+      scripting: {
+        executeScript: vi.fn().mockResolvedValue([{
+          result: {
+            candidates: ['https://www.instagram.com/stories/someone/'],
+            handle: 'someone',
+            mediaIds: ['4242424242'],
+          },
+        }]),
+      },
+    }
+
+    try {
+      await expect(resolveLiveTabUrl(
+        { id: 7, url: 'https://www.instagram.com/stories/someone/' },
+        { skipCacheLookup: true },
+      )).resolves.toBe('https://www.instagram.com/stories/someone/4242424242/')
+    } finally {
+      if (previousChrome) globalThis.chrome = previousChrome
+      else delete globalThis.chrome
+    }
+  })
+
+  it('prefers an explicit preferredUrl from the background story cache', async () => {
+    await expect(resolveLiveTabUrl(
+      { id: 7, url: 'https://www.instagram.com/stories/someone/' },
+      { preferredUrl: 'https://www.instagram.com/stories/someone/111/', skipCacheLookup: true },
+    )).resolves.toBe('https://www.instagram.com/stories/someone/111/')
   })
 
   it('falls back to the tab URL when page inspection is unavailable', async () => {
@@ -96,12 +166,21 @@ describe('resolveLiveTabUrl', () => {
     }
 
     try {
-      await expect(resolveLiveTabUrl({ id: 7, url: 'https://x.com/someone' }))
-        .resolves.toBe('https://x.com/someone')
+      await expect(resolveLiveTabUrl(
+        { id: 7, url: 'https://x.com/someone' },
+        { skipCacheLookup: true },
+      )).resolves.toBe('https://x.com/someone')
     } finally {
       if (previousChrome) globalThis.chrome = previousChrome
       else delete globalThis.chrome
     }
+  })
+})
+
+describe('story page probes', () => {
+  it('exports self-contained injectables for scripting.executeScript', () => {
+    expect(typeof inspectLiveStoryPage).toBe('function')
+    expect(typeof installInstagramStoryNetworkHook).toBe('function')
   })
 })
 

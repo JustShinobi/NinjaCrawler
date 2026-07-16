@@ -28,13 +28,16 @@
         <div>
           <h2 id="updateTitle">Companion update available</h2>
           <p id="updateMeta" class="update-meta"></p>
-          <p class="update-instructions">Download the ZIP, extract it over the current Companion folder, then click Reload in Chrome Extensions.</p>
+          <p id="updateInstructions" class="update-instructions">NinjaCrawler can download the new Companion into AppData. Then reload the extension here when you are ready.</p>
+          <p id="updateInstallPath" class="update-meta muted hidden"></p>
         </div>
         <div class="actions inline-actions">
-          <button id="downloadUpdateButton" type="button" class="update-primary">Download update</button>
+          <button id="downloadUpdateButton" type="button" class="update-primary">Download to AppData</button>
+          <button id="reloadExtensionButton" type="button" class="secondary hidden">Reload extension</button>
           <button id="openExtensionsButton" type="button">Open extensions</button>
         </div>
         <button id="viewReleaseButton" type="button" class="link-button update-release-link">View release details</button>
+        <p id="updateMessage" class="message" aria-live="polite"></p>
       </section>
 
       <section id="unsupportedPanel" class="panel hidden">

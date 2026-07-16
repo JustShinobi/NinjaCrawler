@@ -79,10 +79,20 @@ describe('Companion popup layout', () => {
   it('offers a guided update when NinjaCrawler reports a newer Companion', () => {
     expect(popupHtml).toContain('id="updatePanel"')
     expect(popupHtml).toContain('id="downloadUpdateButton"')
+    expect(popupHtml).toContain('id="reloadExtensionButton"')
     expect(popupHtml).toContain('id="openExtensionsButton"')
+    expect(popupHtml).toContain('Download to AppData')
     expect(popupSource).toContain("compatibility?.status === 'update_available'")
     expect(popupSource).toContain("compatibility?.status === 'incompatible'")
+    expect(popupSource).toContain('stageCompanionUpdate')
+    expect(popupSource).toContain('reloadExtension')
     expect(popupSource).toContain("chrome.tabs.create({ url: 'chrome://extensions' })")
     expect(popupSource).toContain('const compatibilityTask = loadCompatibility()')
+  })
+
+  it('registers Instagram story content scripts in MAIN and isolated worlds', () => {
+    const scripts = manifest.content_scripts ?? []
+    expect(scripts.some((entry) => entry.world === 'MAIN' && entry.js.includes('src/storyNetworkHook.js'))).toBe(true)
+    expect(scripts.some((entry) => entry.js.includes('src/storyDetection.js'))).toBe(true)
   })
 })

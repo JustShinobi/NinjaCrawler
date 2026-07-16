@@ -22,6 +22,27 @@
     "service_worker": "src/background.js",
     "type": "module"
   },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://instagram.com/*",
+        "https://www.instagram.com/*",
+        "https://*.instagram.com/*"
+      ],
+      "js": ["src/storyNetworkHook.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": [
+        "https://instagram.com/*",
+        "https://www.instagram.com/*",
+        "https://*.instagram.com/*"
+      ],
+      "js": ["src/storyDetection.js"],
+      "run_at": "document_start"
+    }
+  ],
   "permissions": [
     "activeTab",
     "cookies",
