@@ -21,7 +21,7 @@
 <!-- ninjacrawler-release-end -->
 &nbsp;
 <!-- ninjacrawler-companion-release-start -->
-<a href="https://github.com/MetalDevOps/NinjaCrawler/releases/download/companion-v0.16.0/NinjaCrawler-Companion-0.16.0.zip">
+<a href="https://github.com/MetalDevOps/NinjaCrawler/releases/download/companion-v0.17.0/NinjaCrawler-Companion-0.17.0.zip">
   <img src="https://img.shields.io/badge/Download%20Companion-Chrome-1f6feb?style=for-the-badge&logo=googlechrome&logoColor=white" alt="Download Companion" height="46">
 </a>
 <!-- ninjacrawler-companion-release-end -->
@@ -32,7 +32,7 @@
 <!-- ninjacrawler-release-end -->
 <br>
 <!-- ninjacrawler-companion-release-start -->
-<sub>Companion: 0.16.0 · [extension ZIP](https://github.com/MetalDevOps/NinjaCrawler/releases/download/companion-v0.16.0/NinjaCrawler-Companion-0.16.0.zip) · [companion releases](https://github.com/MetalDevOps/NinjaCrawler/releases?q=companion-v&expanded=true)</sub>
+<sub>Companion: 0.17.0 · [extension ZIP](https://github.com/MetalDevOps/NinjaCrawler/releases/download/companion-v0.17.0/NinjaCrawler-Companion-0.17.0.zip) · [companion releases](https://github.com/MetalDevOps/NinjaCrawler/releases?q=companion-v&expanded=true)</sub>
 <!-- ninjacrawler-companion-release-end -->
 
 </div>
@@ -73,7 +73,7 @@ On first launch, an internet connection is required while NinjaCrawler downloads
 ### Chrome Companion (optional)
 
 <!-- ninjacrawler-companion-release-start -->
-1. **[Download the Companion ZIP](https://github.com/MetalDevOps/NinjaCrawler/releases/download/companion-v0.16.0/NinjaCrawler-Companion-0.16.0.zip)** (also attached to each desktop app release).
+1. **[Download the Companion ZIP](https://github.com/MetalDevOps/NinjaCrawler/releases/download/companion-v0.17.0/NinjaCrawler-Companion-0.17.0.zip)** (also attached to each desktop app release).
 2. Extract the archive. It always contains a stable `NinjaCrawler-Companion` folder.
 3. Start NinjaCrawler, then open `chrome://extensions`.
 4. Enable **Developer mode**, choose **Load unpacked**, and select the extracted `NinjaCrawler-Companion` folder.
