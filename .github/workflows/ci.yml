@@ -22,12 +22,13 @@ concurrency:
 
 jobs:
   changes:
-    name: Detect Windows build impact
+    name: Detect CI impact
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
       windows: ${{ steps.plan.outputs.windows }}
       reason: ${{ steps.plan.outputs.reason }}
+      quality: ${{ steps.plan.outputs.quality }}
       quality_reuse: ${{ steps.plan.outputs.quality_reuse }}
       quality_reason: ${{ steps.plan.outputs.quality_reason }}
 
@@ -38,7 +39,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Classify build impact
+      - name: Classify build and quality impact
         id: impact
         shell: pwsh
         env:
@@ -54,10 +55,15 @@ jobs:
             -HeadSha $env:HEAD_SHA |
             ConvertFrom-Json
           $windows = $result.windowsBuild.ToString().ToLowerInvariant()
+          $quality = $result.quality.ToString().ToLowerInvariant()
           "windows=$windows" >> $env:GITHUB_OUTPUT
+          "quality=$quality" >> $env:GITHUB_OUTPUT
           "reason=$($result.reason)" >> $env:GITHUB_OUTPUT
+          "quality_reason=$($result.qualityReason)" >> $env:GITHUB_OUTPUT
           Write-Host "Windows build required: $windows"
-          Write-Host "Reason: $($result.reason)"
+          Write-Host "Windows reason: $($result.reason)"
+          Write-Host "Hosted quality required: $quality"
+          Write-Host "Quality reason: $($result.qualityReason)"
 
       - name: Resolve reusable promotion validation
         id: plan
@@ -71,10 +77,12 @@ jobs:
           REPOSITORY: ${{ github.repository }}
           WINDOWS_REQUIRED: ${{ steps.impact.outputs.windows }}
           WINDOWS_REASON: ${{ steps.impact.outputs.reason }}
+          QUALITY_REQUIRED: ${{ steps.impact.outputs.quality }}
+          QUALITY_REASON: ${{ steps.impact.outputs.quality_reason }}
         run: |
           $qualityReuse = $false
           $windowsReuse = $false
-          $qualityReason = 'No reusable validation was requested.'
+          $qualityReason = $env:QUALITY_REASON
           $windowsReason = $env:WINDOWS_REASON
 
           $isPromotion =
@@ -89,7 +97,11 @@ jobs:
               ConvertFrom-Json
             $qualityReuse = $reuse.qualityReuse
             $windowsReuse = $reuse.windowsReuse
-            $qualityReason = $reuse.reason
+            if ($qualityReuse) {
+              $qualityReason = $reuse.reason
+            } elseif ($env:QUALITY_REQUIRED -eq 'true') {
+              $qualityReason = "$($reuse.reason) Running hosted quality fail-closed."
+            }
             if ($windowsReuse) {
               $windowsReason = $reuse.reason
             } elseif ($env:WINDOWS_REQUIRED -eq 'true') {
@@ -98,19 +110,22 @@ jobs:
           }
 
           $windowsRequired = $env:WINDOWS_REQUIRED -eq 'true' -and -not $windowsReuse
+          $qualityRequired = $env:QUALITY_REQUIRED -eq 'true' -and -not $qualityReuse
+          "quality=$($qualityRequired.ToString().ToLowerInvariant())" >> $env:GITHUB_OUTPUT
           "quality_reuse=$($qualityReuse.ToString().ToLowerInvariant())" >> $env:GITHUB_OUTPUT
           "quality_reason=$qualityReason" >> $env:GITHUB_OUTPUT
           "windows=$($windowsRequired.ToString().ToLowerInvariant())" >> $env:GITHUB_OUTPUT
           "reason=$windowsReason" >> $env:GITHUB_OUTPUT
-          Write-Host "Frontend quality reuse: $qualityReuse"
-          Write-Host "Frontend reason: $qualityReason"
+          Write-Host "Hosted quality required: $qualityRequired"
+          Write-Host "Hosted quality reuse: $qualityReuse"
+          Write-Host "Quality reason: $qualityReason"
           Write-Host "Windows build required: $windowsRequired"
           Write-Host "Windows reason: $windowsReason"
 
   quality_execution:
     name: Frontend quality execution
     needs: changes
-    if: ${{ needs.changes.outputs.quality_reuse != 'true' }}
+    if: ${{ needs.changes.outputs.quality == 'true' && needs.changes.outputs.quality_reuse != 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
@@ -196,16 +211,25 @@ jobs:
       - name: Report frontend validation decision
         shell: bash
         env:
+          QUALITY_REQUIRED: ${{ needs.changes.outputs.quality }}
           QUALITY_REUSED: ${{ needs.changes.outputs.quality_reuse }}
           QUALITY_REASON: ${{ needs.changes.outputs.quality_reason }}
           QUALITY_RESULT: ${{ needs.quality_execution.result }}
         run: |
           set -euo pipefail
+          echo "Hosted quality required: $QUALITY_REQUIRED"
           echo "Frontend quality reused: $QUALITY_REUSED"
           echo "Reason: $QUALITY_REASON"
           echo "Execution result: $QUALITY_RESULT"
-          if [ "$QUALITY_REUSED" != "true" ] && [ "$QUALITY_RESULT" != "success" ]; then
-            echo "Frontend quality was neither reused nor completed successfully." >&2
+          if [ "$QUALITY_REUSED" = "true" ]; then
+            exit 0
+          fi
+          if [ "$QUALITY_REQUIRED" != "true" ]; then
+            echo "Hosted quality skipped: no quality inputs changed."
+            exit 0
+          fi
+          if [ "$QUALITY_RESULT" != "success" ]; then
+            echo "Required hosted quality did not succeed." >&2
             exit 1
           fi
 
