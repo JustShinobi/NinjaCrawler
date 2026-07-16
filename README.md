@@ -87,7 +87,7 @@ NinjaCrawler is a **local-first** Windows app for operators who manage many soci
 
 ### Import & connectors
 
-- Import existing SCrawler media without duplicating files
+- Import an existing on-disk media library without duplicating files
 - Managed connector runtimes (`gallery-dl`, `yt-dlp`, Instaloader) downloaded and verified by the app
 
 ## Getting started
