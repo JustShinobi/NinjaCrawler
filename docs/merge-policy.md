@@ -34,9 +34,14 @@ Source of truth: `Tools/Get-PRMergePolicy.ps1`.
    `merge:squash` / `merge:merge-commit` and a sticky PR comment.
 4. **Rulesets** (via `Tools/Apply-MergePolicyRulesets.ps1`):
    - `develop-protection`: allows **squash** and **merge** (features squash;
-     back-sync merges).
+     back-sync merges). Blocks **branch deletion**. Admin bypass is
+     **For pull requests only** so promote/`delete_branch_on_merge` cannot
+     wipe the permanent `develop` integration branch.
    - `main-protection`: allows **merge only** (no squash into `main`).
-   - Admin repository role may bypass in emergencies.
+   - Admin bypass on `main` remains **Always** for emergency recovery.
+
+After promoting `develop` → `main`, never delete `develop`. If it is missing,
+recreate it from `main` and re-apply rulesets.
 
 ## Applying rulesets
 
