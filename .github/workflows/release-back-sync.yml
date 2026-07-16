@@ -104,3 +104,5 @@ jobs:
           gh pr checks "$PR_NUMBER" --repo "${{ github.repository }}" --watch --fail-fast
           gh pr merge "$PR_NUMBER" --repo "${{ github.repository }}" --merge --delete-branch \
             --subject "chore(release): sync published version back to develop"
+
+# temp-repo workflow registration (no-op)

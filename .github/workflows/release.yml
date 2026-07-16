@@ -599,3 +599,5 @@ jobs:
             --repo ${{ github.repository }} `
             --ref main `
             -f tag=${{ needs.prepare.outputs.tag }}
+
+# temp-repo workflow registration (no-op)

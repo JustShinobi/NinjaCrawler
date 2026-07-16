@@ -46,3 +46,5 @@ jobs:
 
       - name: Sync allowed models and labels
         run: node .github/scripts/sync-gemini-pr-models.mjs
+
+# temp-repo workflow registration (no-op)
