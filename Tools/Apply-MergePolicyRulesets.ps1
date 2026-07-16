@@ -92,9 +92,19 @@ function Write-Ruleset {
 
 $repo = Resolve-Repository -Value $Repository
 
-# RepositoryRole actor_id 5 = admin. Lets maintainers/automation recover without
-# disabling the ruleset. Prefer normal merge paths over bypass.
-$adminBypass = @(
+# RepositoryRole actor_id 5 = admin.
+# develop: bypass_mode pull_request only — admins can still force-merge PRs that
+# would otherwise violate rules, but cannot use Always bypass for direct branch
+# deletion (e.g. auto-delete head after promote develop→main).
+# main: always — emergency recovery on the production branch remains possible.
+$developAdminBypass = @(
+    [ordered]@{
+        actor_id = 5
+        actor_type = 'RepositoryRole'
+        bypass_mode = 'pull_request'
+    }
+)
+$mainAdminBypass = @(
     [ordered]@{
         actor_id = 5
         actor_type = 'RepositoryRole'
@@ -106,7 +116,7 @@ $developPayload = [ordered]@{
     name = 'develop-protection'
     target = 'branch'
     enforcement = 'active'
-    bypass_actors = $adminBypass
+    bypass_actors = $developAdminBypass
     conditions = [ordered]@{
         ref_name = [ordered]@{
             include = @('refs/heads/develop')
@@ -135,7 +145,7 @@ $mainPayload = [ordered]@{
     name = 'main-protection'
     target = 'branch'
     enforcement = 'active'
-    bypass_actors = $adminBypass
+    bypass_actors = $mainAdminBypass
     conditions = [ordered]@{
         ref_name = [ordered]@{
             include = @('refs/heads/main')
