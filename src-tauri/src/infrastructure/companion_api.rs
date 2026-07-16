@@ -793,14 +793,16 @@ fn detect_profile_from_url(url: &str) -> Option<DetectedProfile> {
 
     let (provider, handle) = if host == "instagram.com" || host.ends_with(".instagram.com") {
         // `/stories/{handle}` and `/stories/{handle}/{mediaId}` both identify a profile.
+        // Highlight reels (`/stories/highlights/{id}/`) are not a user profile.
         if segments.first().copied() == Some("stories") && segments.len() >= 2 {
-            ("instagram", segments[1])
+            let story_handle = segments[1];
+            if is_reserved_instagram_segment(story_handle) {
+                return None;
+            }
+            ("instagram", story_handle)
         } else {
             let first = segments.first().copied()?;
-            if matches!(
-                first,
-                "accounts" | "direct" | "explore" | "p" | "reel" | "reels" | "stories" | "tv"
-            ) {
+            if is_reserved_instagram_segment(first) {
                 return None;
             }
             ("instagram", first)
@@ -863,6 +865,11 @@ fn detect_target_from_url(url: &str) -> Option<DetectedTarget> {
         return None;
     }
 
+    // Highlight reels use `/stories/highlights/{id}/` — not a user story tray.
+    if is_reserved_instagram_segment(segments[1]) {
+        return None;
+    }
+
     let story_id = segments[2].trim();
     if story_id.is_empty() || !story_id.chars().all(|value| value.is_ascii_digit()) {
         return None;
@@ -881,6 +888,21 @@ fn detect_target_from_url(url: &str) -> Option<DetectedTarget> {
         story_id: story_id.to_string(),
         url: url.to_string(),
     })
+}
+
+fn is_reserved_instagram_segment(segment: &str) -> bool {
+    matches!(
+        segment.trim().trim_start_matches('@').to_ascii_lowercase().as_str(),
+        "accounts"
+            | "direct"
+            | "explore"
+            | "highlights"
+            | "p"
+            | "reel"
+            | "reels"
+            | "stories"
+            | "tv"
+    )
 }
 
 struct ParsedUrl {
@@ -1058,6 +1080,8 @@ mod tests {
     fn ignores_non_profile_urls() {
         let cases = [
             "https://www.instagram.com/reel/123/",
+            "https://www.instagram.com/stories/highlights/1789554678901234567/",
+            "https://www.instagram.com/highlights/1789554678901234567/",
             "https://x.com/home",
             "https://www.tiktok.com/tag/rust",
         ];
@@ -1093,6 +1117,7 @@ mod tests {
         let cases = [
             "https://www.instagram.com/stories/example.profile/",
             "https://www.instagram.com/stories/example.profile/not-a-number/",
+            "https://www.instagram.com/stories/highlights/1789554678901234567/",
             "https://www.instagram.com/reel/1234567890123456789/",
         ];
 

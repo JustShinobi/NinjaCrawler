@@ -1,6 +1,17 @@
 export const API_BASE = 'http://127.0.0.1:47219/ninjacrawler-companion/v1'
 
-const RESERVED_INSTAGRAM = new Set(['accounts', 'direct', 'explore', 'p', 'reel', 'reels', 'stories', 'tv'])
+const RESERVED_INSTAGRAM = new Set([
+  'accounts',
+  'direct',
+  'explore',
+  // Instagram highlight reels use `/stories/highlights/{id}/` — not a user handle.
+  'highlights',
+  'p',
+  'reel',
+  'reels',
+  'stories',
+  'tv',
+])
 const RESERVED_TWITTER = new Set([
   'compose',
   'explore',
@@ -19,6 +30,11 @@ export const PROVIDER_LABELS = {
   instagram: 'Instagram',
   tiktok: 'TikTok',
   twitter: 'X / Twitter',
+}
+
+function isReservedInstagramSegment(value) {
+  const segment = String(value ?? '').trim().replace(/^@/, '').toLowerCase()
+  return !segment || RESERVED_INSTAGRAM.has(segment)
 }
 
 export function collectDetectedProfiles(tabs) {
@@ -120,7 +136,8 @@ export function inspectLiveStoryPage() {
     const match = String(globalThis.location?.pathname || '').match(
       /^\/stories\/([^/]+)(?:\/(\d+))?\/?/i,
     )
-    if (match?.[1]) {
+    // Ignore highlight trays — `/stories/highlights/{id}/` is not a user story.
+    if (match?.[1] && match[1].toLowerCase() !== 'highlights') {
       handle = match[1]
       if (match[2]) {
         push(`${globalThis.location.origin}/stories/${match[1]}/${match[2]}/`)
@@ -134,6 +151,9 @@ export function inspectLiveStoryPage() {
     try {
       const href = anchor.getAttribute('href')
       if (!href) continue
+      // Profile pages always expose highlight circles as /stories/highlights/{id}/.
+      // Collecting those made every Instagram profile resolve as @highlights.
+      if (/\/stories\/highlights\//i.test(href)) continue
       push(new URL(href, globalThis.location.href).href)
     } catch {
       // Ignore invalid anchor hrefs.
@@ -239,7 +259,8 @@ export function installInstagramStoryNetworkHook() {
     let preferredHandle = null
     try {
       const match = String(globalThis.location?.pathname || '').match(/^\/stories\/([^/]+)/i)
-      if (match?.[1]) preferredHandle = match[1]
+      // Highlight trays are not user story trays.
+      if (match?.[1] && match[1].toLowerCase() !== 'highlights') preferredHandle = match[1]
     } catch {
       preferredHandle = null
     }
@@ -316,15 +337,37 @@ export function pickBestLiveUrl(inspection, fallbackUrl = '') {
   if (fromCandidates) return fromCandidates
 
   const handle = String(inspection?.handle || '').replace(/^@/, '').trim()
-  const mediaId = (inspection?.mediaIds ?? [])
-    .map((value) => String(value).split('_')[0])
-    .find((value) => /^\d+$/.test(value))
+  // Never reconstruct a story URL for reserved segments (e.g. highlights trays).
+  if (!isReservedInstagramSegment(handle)) {
+    const mediaId = (inspection?.mediaIds ?? [])
+      .map((value) => String(value).split('_')[0])
+      .find((value) => /^\d+$/.test(value))
 
-  if (handle && mediaId) {
-    return buildInstagramStoryUrl(handle, mediaId)
+    if (handle && mediaId) {
+      return buildInstagramStoryUrl(handle, mediaId)
+    }
   }
 
+  // Prefer a non-highlight candidate (profile or real story path) over highlight
+  // reel URLs that profile pages always expose in the DOM.
+  const nonHighlight = candidates.find((candidate) => !isInstagramHighlightsUrl(candidate))
+  if (nonHighlight) return nonHighlight
+  if (fallbackUrl && !isInstagramHighlightsUrl(fallbackUrl)) return fallbackUrl
+
   return candidates[0] ?? fallbackUrl ?? ''
+}
+
+function isInstagramHighlightsUrl(rawUrl) {
+  if (!rawUrl) return false
+  try {
+    const url = new URL(rawUrl)
+    const host = url.hostname.replace(/^www\./, '').toLowerCase()
+    if (!(host === 'instagram.com' || host.endsWith('.instagram.com'))) return false
+    const segments = url.pathname.split('/').filter(Boolean)
+    return segments[0] === 'stories' && segments[1]?.toLowerCase() === 'highlights'
+  } catch {
+    return false
+  }
 }
 
 export function buildInstagramStoryUrl(handle, storyId) {
@@ -345,6 +388,8 @@ export function detectInstagramStoryPath(rawUrl) {
   if (!(host === 'instagram.com' || host.endsWith('.instagram.com'))) return null
   const segments = url.pathname.split('/').filter(Boolean)
   if (segments[0] !== 'stories' || !segments[1]) return null
+  // Highlight reels: /stories/highlights/{id}/ — not a user profile/story tray.
+  if (isReservedInstagramSegment(segments[1])) return null
   const handle = normalizeHandle(segments[1])
   if (!handle) return null
   const storyId = segments[2] && /^\d+$/.test(segments[2]) ? segments[2] : null
@@ -368,6 +413,8 @@ export function detectTargetFromUrl(rawUrl) {
     && segments[0] === 'stories'
     && segments[1]
     && segments[2]) {
+    // Skip highlight trays (`/stories/highlights/{id}/`) — not a user story.
+    if (isReservedInstagramSegment(segments[1])) return null
     const handle = normalizeHandle(segments[1])
     const storyId = segments[2].trim()
     if (!handle || !/^\d+$/.test(storyId)) return null

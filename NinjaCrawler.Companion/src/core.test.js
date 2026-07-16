@@ -61,6 +61,12 @@ describe('detectTargetFromUrl', () => {
     expect(target).toMatchObject({ kind: 'instagramStory', provider: 'instagram', storyId: '1234567890' })
   })
 
+  it('does not treat Instagram highlight reels as user stories', () => {
+    expect(detectTargetFromUrl(
+      'https://www.instagram.com/stories/highlights/1789554678901234567/',
+    )).toBeNull()
+  })
+
   it('ignores a plain TikTok profile', () => {
     expect(detectTargetFromUrl('https://www.tiktok.com/@sgaby.tls')).toBeNull()
   })
@@ -72,6 +78,20 @@ describe('detectProfileFromUrl', () => {
       provider: 'instagram',
       handle: '@someone',
     })
+  })
+
+  it('detects a normal Instagram profile URL', () => {
+    expect(detectProfileFromUrl('https://www.instagram.com/someone/')).toMatchObject({
+      provider: 'instagram',
+      handle: '@someone',
+    })
+  })
+
+  it('does not treat highlight trays as @highlights profiles', () => {
+    expect(detectProfileFromUrl(
+      'https://www.instagram.com/stories/highlights/1789554678901234567/',
+    )).toBeNull()
+    expect(detectProfileFromUrl('https://www.instagram.com/highlights/1789554678901234567/')).toBeNull()
   })
 })
 
@@ -93,6 +113,27 @@ describe('pickBestLiveUrl', () => {
       handle: 'someone',
       mediaIds: ['1234567890'],
     })).toBe('https://www.instagram.com/stories/someone/555/')
+  })
+
+  it('keeps the profile URL when only highlight reel candidates are present', () => {
+    const profileUrl = 'https://www.instagram.com/someone/'
+    expect(pickBestLiveUrl({
+      candidates: [
+        profileUrl,
+        'https://www.instagram.com/stories/highlights/1789554678901234567/',
+      ],
+      handle: null,
+      mediaIds: [],
+    }, profileUrl)).toBe(profileUrl)
+  })
+
+  it('does not reconstruct a story URL for the reserved highlights handle', () => {
+    const profileUrl = 'https://www.instagram.com/someone/'
+    expect(pickBestLiveUrl({
+      candidates: [profileUrl],
+      handle: 'highlights',
+      mediaIds: ['1789554678901234567'],
+    }, profileUrl)).toBe(profileUrl)
   })
 })
 
@@ -170,6 +211,35 @@ describe('resolveLiveTabUrl', () => {
         { id: 7, url: 'https://x.com/someone' },
         { skipCacheLookup: true },
       )).resolves.toBe('https://x.com/someone')
+    } finally {
+      if (previousChrome) globalThis.chrome = previousChrome
+      else delete globalThis.chrome
+    }
+  })
+
+  it('does not rewrite Instagram profiles to highlight reel URLs from the page', async () => {
+    const previousChrome = globalThis.chrome
+    const profileUrl = 'https://www.instagram.com/someone/'
+    globalThis.chrome = {
+      scripting: {
+        executeScript: vi.fn().mockResolvedValue([{
+          result: {
+            candidates: [
+              profileUrl,
+              'https://www.instagram.com/stories/highlights/1789554678901234567/',
+            ],
+            handle: null,
+            mediaIds: [],
+          },
+        }]),
+      },
+    }
+
+    try {
+      await expect(resolveLiveTabUrl(
+        { id: 7, url: profileUrl },
+        { skipCacheLookup: true },
+      )).resolves.toBe(profileUrl)
     } finally {
       if (previousChrome) globalThis.chrome = previousChrome
       else delete globalThis.chrome
