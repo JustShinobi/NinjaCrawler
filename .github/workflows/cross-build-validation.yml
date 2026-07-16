@@ -232,3 +232,5 @@ jobs:
             echo "Temporary tag $TEST_TAG still exists after cleanup." >&2
             exit 1
           fi
+
+# temp-repo workflow registration (no-op)

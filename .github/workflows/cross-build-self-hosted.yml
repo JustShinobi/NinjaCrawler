@@ -91,3 +91,5 @@ jobs:
           path: artifacts/
           if-no-files-found: error
           retention-days: 7
+
+# temp-repo workflow registration (no-op)
