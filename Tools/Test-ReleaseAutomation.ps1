@@ -462,6 +462,25 @@ if (-not $companionReleaseWorkflow.Contains('gh workflow run release-back-sync.y
     throw "The Companion release must back-sync its published tag."
 }
 
+if ($appReleaseWorkflow.Contains('gh pr merge $pr --repo ${{ github.repository }} --squash')) {
+    throw "App README automation must merge into main with --merge (main ruleset is merge-only)."
+}
+if (-not $appReleaseWorkflow.Contains('gh pr merge $pr --repo ${{ github.repository }} --merge')) {
+    throw "App README automation must use gh pr merge --merge."
+}
+
+foreach ($requiredFragment in @(
+    'Do not squash',
+    'promote',
+    'merge commit'
+)) {
+    if (-not $promotionWorkflow.Contains($requiredFragment)) {
+        throw "Promotion PR body is missing merge-method guidance: $requiredFragment"
+    }
+}
+
+& (Join-Path $PSScriptRoot 'Test-PRMergePolicy.ps1')
+
 foreach ($requiredFragment in @(
     '^(companion-)?v[0-9]+\.[0-9]+\.[0-9]+$',
     'git merge-base --is-ancestor',

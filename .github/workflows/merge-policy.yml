@@ -1,0 +1,170 @@
+name: Merge policy
+
+# Classifies each PR's required merge method (squash vs merge commit), applies a
+# label, and keeps a sticky comment with instructions. Policy source of truth:
+# Tools/Get-PRMergePolicy.ps1
+
+on:
+  pull_request:
+    types:
+      - opened
+      - reopened
+      - synchronize
+      - edited
+      - ready_for_review
+      - converted_to_draft
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+concurrency:
+  group: merge-policy-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  annotate:
+    name: Label and advise merge method
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Ensure merge-method labels exist
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          ensure_label() {
+            local name="$1" color="$2" description="$3"
+            if gh label list --repo "$REPO" --json name --jq '.[].name' | grep -Fxq "$name"; then
+              return 0
+            fi
+            gh label create "$name" --repo "$REPO" --color "$color" --description "$description" || true
+          }
+          ensure_label "merge:squash" "0E8A16" "Squash and merge this pull request"
+          ensure_label "merge:merge-commit" "1D76DB" "Create a merge commit (do not squash)"
+
+      - name: Resolve merge policy
+        id: policy
+        shell: pwsh
+        env:
+          PR_BASE: ${{ github.event.pull_request.base.ref }}
+          PR_HEAD: ${{ github.event.pull_request.head.ref }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          # Do not trust $LASTEXITCODE after a PowerShell script: a successful
+          # .ps1 that never calls exit leaves the previous native exit code.
+          $policyJson = & Tools/Get-PRMergePolicy.ps1 `
+            -Base $env:PR_BASE `
+            -Head $env:PR_HEAD `
+            -Title $env:PR_TITLE
+          if ($null -eq $policyJson -or [string]::IsNullOrWhiteSpace([string]$policyJson)) {
+            throw "Get-PRMergePolicy.ps1 returned no policy JSON."
+          }
+          try {
+            $policy = $policyJson | ConvertFrom-Json
+          } catch {
+            throw "Get-PRMergePolicy.ps1 returned invalid JSON: $policyJson"
+          }
+          if ([string]::IsNullOrWhiteSpace([string]$policy.method) -or
+              [string]::IsNullOrWhiteSpace([string]$policy.label)) {
+            throw "Get-PRMergePolicy.ps1 returned an incomplete policy: $policyJson"
+          }
+          $critical = ([bool]$policy.critical).ToString().ToLowerInvariant()
+          Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "method=$($policy.method)"
+          Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "label=$($policy.label)"
+          Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "critical=$critical"
+          Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "reason<<EOF"
+          Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value $policy.reason
+          Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "EOF"
+          Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "how<<EOF"
+          Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value $policy.how
+          Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "EOF"
+          Write-Host "Merge policy: $($policy.method) ($($policy.label))"
+
+      - name: Apply merge-method label
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          TARGET_LABEL: ${{ steps.policy.outputs.label }}
+        run: |
+          set -euo pipefail
+          current="$(gh pr view "$PR" --repo "$REPO" --json labels --jq '.labels[].name')"
+          for label in merge:squash merge:merge-commit; do
+            if [ "$label" != "$TARGET_LABEL" ] && printf '%s\n' "$current" | grep -Fxq "$label"; then
+              gh pr edit "$PR" --repo "$REPO" --remove-label "$label" || true
+            fi
+          done
+          if ! printf '%s\n' "$current" | grep -Fxq "$TARGET_LABEL"; then
+            gh pr edit "$PR" --repo "$REPO" --add-label "$TARGET_LABEL"
+          fi
+
+      - name: Upsert sticky merge-policy comment
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          METHOD: ${{ steps.policy.outputs.method }}
+          LABEL: ${{ steps.policy.outputs.label }}
+          CRITICAL: ${{ steps.policy.outputs.critical }}
+          REASON: ${{ steps.policy.outputs.reason }}
+          HOW: ${{ steps.policy.outputs.how }}
+          BASE: ${{ github.event.pull_request.base.ref }}
+          HEAD: ${{ github.event.pull_request.head.ref }}
+        run: |
+          set -euo pipefail
+          marker='<!-- merge-policy-bot -->'
+          if [ "$METHOD" = "merge-commit" ]; then
+            method_title='Create a merge commit'
+            method_badge='merge commit (do **not** squash)'
+          else
+            method_title='Squash and merge'
+            method_badge='**squash** and merge'
+          fi
+
+          critical_line=''
+          if [ "$CRITICAL" = "true" ]; then
+            critical_line=$'> [!WARNING]\n> Using the wrong merge method here can break the release pipeline.\n'
+          fi
+
+          body_file="$(mktemp)"
+          {
+            echo "$marker"
+            echo "## Merge method"
+            echo
+            echo "**Use: $method_title** (\`$LABEL\`)."
+            echo
+            echo "$critical_line"
+            echo "| | |"
+            echo "| --- | --- |"
+            echo "| PR | \`$HEAD\` → \`$BASE\` |"
+            echo "| Required method | $method_badge |"
+            echo
+            echo "### Why"
+            echo "$REASON"
+            echo
+            echo "### How"
+            echo "$HOW"
+            echo
+            echo "<sub>Policy source: <code>Tools/Get-PRMergePolicy.ps1</code>. Rulesets enforce allowed methods per branch.</sub>"
+          } > "$body_file"
+
+          existing="$(gh api "repos/$REPO/issues/$PR/comments" --paginate \
+            --jq ".[] | select(.body | contains(\"$marker\")) | .id" | head -n 1 || true)"
+          if [ -n "$existing" ]; then
+            gh api --method PATCH "repos/$REPO/issues/comments/$existing" \
+              -F body=@"$body_file" >/dev/null
+            echo "Updated sticky merge-policy comment $existing."
+          else
+            gh api --method POST "repos/$REPO/issues/$PR/comments" \
+              -F body=@"$body_file" >/dev/null
+            echo "Created sticky merge-policy comment."
+          fi

@@ -206,6 +206,8 @@ Use `-PortableOnly` with the build wrapper when installers are not required.
 
 GitHub Actions runs frontend quality (lint, tests, production audit, packaging checks) on GitHub-hosted `ubuntu-latest`, and a Windows x64 cross-build for trusted pull requests on self-hosted Proxmox runners. Frontend quality stays on hosted runners: the job is short-lived, and the self-hosted fleet is reserved for the heavier cross-build toolchain rather than competing with it for JIT capacity.
 
+Pull requests receive a **merge method** label and sticky comment (`merge:squash` or `merge:merge-commit`). Feature work into `develop` is squash; promotion and release paths into `main` (and release back-sync into `develop`) must be **merge commits**. See [merge policy](docs/merge-policy.md).
+
 Releases are tag-driven. The desktop app and the Chrome Companion are versioned on **independent** Release Please tracks so a release that only touches one of them never bumps the other:
 
 - The **app** track bumps `package.json`, `src-tauri/tauri.conf.json`, and `src-tauri/Cargo.toml`, and tags `vX.Y.Z`.
@@ -272,3 +274,4 @@ Authentication material is stored locally and is not intended to be committed to
 - [Windows distribution](docs/windows-distribution.md)
 - [Companion release packaging](docs/companion-release-packaging.md)
 - [Companion account import](docs/companion-account-import.md)
+- [Merge policy](docs/merge-policy.md)

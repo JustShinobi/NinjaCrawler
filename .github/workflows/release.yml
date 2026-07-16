@@ -575,7 +575,9 @@ jobs:
             throw "README update PR is missing required checks: $($missingChecks -join ', ')."
           }
 
-          gh pr merge $pr --repo ${{ github.repository }} --squash --delete-branch `
+          # Merge commit (not squash): main ruleset allows merge only so the
+          # default squash button cannot be used on release-maintenance PRs.
+          gh pr merge $pr --repo ${{ github.repository }} --merge --delete-branch `
             --subject "docs(readme): update download links for $env:RELEASE_TAG" `
             --body "[skip ci]"
           if ($LASTEXITCODE -ne 0) {
