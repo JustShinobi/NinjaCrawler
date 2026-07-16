@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.24.1](https://github.com/JustShinobi/NinjaCrawler/compare/v0.24.0...v0.24.1) (2026-07-16)
+
+
+### Bug Fixes
+
+* **companion:** stop treating Instagram highlights as [@highlights](https://github.com/highlights) ([#52](https://github.com/JustShinobi/NinjaCrawler/issues/52)) ([a09e365](https://github.com/JustShinobi/NinjaCrawler/commit/a09e36584287b9962d644361ef48c544a61cbaa0))
+
 ## [0.24.0](https://github.com/JustShinobi/NinjaCrawler/compare/v0.23.0...v0.24.0) (2026-07-16)
 
 
