@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.20.0](https://github.com/MetalDevOps/NinjaCrawler-Temp/compare/v0.19.2...v0.20.0) (2026-07-16)
+
+
+### Features
+
+* **windows:** migrate utility windows to custom visual shell ([#2](https://github.com/MetalDevOps/NinjaCrawler-Temp/issues/2)) ([6dd8c63](https://github.com/MetalDevOps/NinjaCrawler-Temp/commit/6dd8c63c6f82bb26de7718362b12685b1f67c6b0))
+
 ## [0.19.2](https://github.com/MetalDevOps/NinjaCrawler/compare/v0.19.1...v0.19.2) (2026-07-15)
 
 
