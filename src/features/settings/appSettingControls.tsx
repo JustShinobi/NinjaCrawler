@@ -3,7 +3,7 @@ import type { AppSetting } from '../../domain/models'
 import { useAppStore } from '../../state/appStore'
 import { HelpTip } from '../shared/HelpTip'
 
-export function useAppSetting(key: string): AppSetting | undefined {
+function useAppSetting(key: string): AppSetting | undefined {
   const snapshot = useAppStore((state) => state.snapshot)
   return useMemo(
     () => snapshot?.appSettings.find((entry) => entry.key === key),
@@ -11,11 +11,11 @@ export function useAppSetting(key: string): AppSetting | undefined {
   )
 }
 
-export function useUpsertAppSetting() {
+function useUpsertAppSetting() {
   return useAppStore((state) => state.upsertAppSetting)
 }
 
-export function usePendingCommand() {
+function usePendingCommand() {
   return useAppStore((state) => state.pendingCommand)
 }
 
