@@ -26,6 +26,29 @@ Source of truth: `Tools/Get-PRMergePolicy.ps1`.
 | `*` → `develop` (features, Dependabot, …) | squash | Squash and merge |
 | other → `main` | merge commit | Create a merge commit |
 
+## Dual Release Please tracks (app + Companion)
+
+The app (`.`) and Companion (`NinjaCrawler.Companion`) use **independent**
+Release Please configs but share **one** `.release-please-manifest.json`.
+
+After a promote that includes both tracks, Release Please may open **two**
+release PRs at once. Each PR rewrites a different version key in that shared
+JSON. Merging one PR therefore makes the sibling PR rewrite the same file from
+a stale base, and Git reports `CONFLICTING` on the whole object (this dirtied
+app release PR #24 after Companion `0.17.0` merged first).
+
+Mitigations (do not “force merge” a conflicting release PR):
+
+1. **Immediate close** — `release-please.yml` closes dirtied/conflicting sibling
+   release PRs as soon as a package draft is created, a release PR lands on
+   `main`, or GitHub marks a release PR as conflicting.
+2. **Re-anchor after publish** — `release.yml` / `release-companion.yml` close
+   any remaining open release PRs and re-dispatch Release Please once the Git
+   tag exists, so the next PR is based on the updated manifest.
+3. **Operator rule** — merge at most one open `release-please--*` PR at a time;
+   if a sibling shows conflicts, wait for automation to close/recreate it
+   instead of resolving the JSON by hand.
+
 ## Layers
 
 1. **Policy script** — classifies every PR.

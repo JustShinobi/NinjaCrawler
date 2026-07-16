@@ -230,12 +230,26 @@ jobs:
             exit 1
           fi
 
-      - name: Quarantine pre-tag release pull requests
+      # Both package tracks share .release-please-manifest.json. When one release
+      # PR merges, the sibling PR rewrites a different key of the same JSON and
+      # Git reports CONFLICTING on the whole object (see PR #24 after companion
+      # 0.17.0). Re-anchor after full publish is too late — close dirtied sibling
+      # PRs as soon as we create a draft, when a release PR just landed, or when
+      # GitHub already marks a release PR as conflicting.
+      - name: Close dirtied sibling release pull requests
         if: ${{ always() && steps.recovery.outputs.requested != 'true' }}
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          APP_RELEASE_CREATED: ${{ steps.app_release.outputs.release_created }}
+          COMPANION_RELEASE_CREATED: ${{ steps.companion_release.outputs['NinjaCrawler.Companion--release_created'] }}
         run: |
+          $headSubject = (& git log -1 --pretty=%s).Trim()
+          $mergedReleasePr = $headSubject -match 'release-please--' `
+            -or $headSubject -match '^chore\(main\): release '
+          $packageReleased = $env:APP_RELEASE_CREATED -eq 'true' `
+            -or $env:COMPANION_RELEASE_CREATED -eq 'true'
+
           $manifest = Get-Content .release-please-manifest.json -Raw | ConvertFrom-Json
           $releaseJson = & gh release list --repo ${{ github.repository }} `
             --limit 1000 --json tagName,isDraft
@@ -259,21 +273,41 @@ jobs:
             $matchingReleases = @($knownReleases | Where-Object tagName -eq $tag)
             return $matchingReleases.Count -eq 1 -and $matchingReleases[0].isDraft
           })
-          if ($unpublished.Count -eq 0) {
-            Write-Host "No unpublished draft release requires PR quarantine."
+
+          $openReleasePrs = @(
+            gh pr list --repo ${{ github.repository }} --base main --state open `
+              --json number,headRefName,mergeable,url |
+              ConvertFrom-Json |
+              Where-Object { $_.headRefName -like 'release-please--*' }
+          )
+
+          $toClose = [System.Collections.Generic.List[object]]::new()
+          foreach ($pr in $openReleasePrs) {
+            $conflicting = $pr.mergeable -eq 'CONFLICTING'
+            $blockedByDraft = $unpublished.Count -gt 0
+            $siblingOfJustReleased = $packageReleased -or $mergedReleasePr
+            if ($conflicting -or $blockedByDraft -or $siblingOfJustReleased) {
+              $toClose.Add($pr)
+            }
+          }
+
+          if ($toClose.Count -eq 0) {
+            Write-Host "No dirtied sibling release PRs to close."
             exit 0
           }
 
-          $stale = gh pr list --repo ${{ github.repository }} --base main --state open `
-            --json number,headRefName `
-            --jq '.[] | select(.headRefName | startswith("release-please--")) | .number'
-          foreach ($pr in @($stale)) {
-            if ($pr) {
-              Write-Host "Closing pre-tag release PR #$pr."
-              gh pr close $pr --repo ${{ github.repository }} `
-                --comment "Closed automatically: the preceding release is still an unpublished draft. A new release PR will be generated only after its Git tag exists."
-            }
+          $reason = if ($unpublished.Count -gt 0) {
+            "the preceding release is still an unpublished draft ($($unpublished -join ', ')). A new release PR will be generated only after its Git tag exists."
+          } elseif ($packageReleased -or $mergedReleasePr) {
+            "a sibling package release updated the shared .release-please-manifest.json. Concurrent release-please PRs always collide on that file; this PR will be recreated after the published tag re-anchors release-please."
+          } else {
+            "GitHub reports merge conflicts against main (shared release manifest)."
           }
+
+          foreach ($pr in $toClose) {
+            Write-Host "Closing dirtied release PR #$($pr.number) ($($pr.headRefName))."
+            gh pr close $pr.number --repo ${{ github.repository }} `
+              --comment "Closed automatically: $reason"
 
       - name: Trigger Windows release build
         # The root package (".") keeps the unprefixed outputs.
