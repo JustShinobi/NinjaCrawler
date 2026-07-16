@@ -136,7 +136,9 @@ foreach ($requiredFragment in @(
     'Resolve reusable promotion validation',
     'Get-CIPromotionValidation.ps1',
     'Frontend quality execution',
-    'Frontend quality reused'
+    'Frontend quality reused',
+    'Hosted quality required',
+    "needs.changes.outputs.quality == 'true'"
 )) {
     if (-not $ciWorkflow.Contains($requiredFragment)) {
         throw "CI is missing release candidate integrity coverage: $requiredFragment"
@@ -189,7 +191,7 @@ foreach ($forbiddenFragment in @('contents: write', 'runs-on: ubuntu-latest', 's
 }
 
 foreach ($requiredFragment in @(
-    'Detect Windows build impact',
+    'Detect CI impact',
     'Tools/Get-CIBuildImpact.ps1',
     "cancel-in-progress: `${{ github.event_name == 'pull_request' }}",
     'Stage versioned portable',
