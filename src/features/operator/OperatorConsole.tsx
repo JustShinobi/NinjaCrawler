@@ -18,6 +18,8 @@ function runStatusClassName(status: SourceSyncRun['status'] | SyncPlanRun['statu
   switch (status) {
     case 'failed':
       return 'status status-failed'
+    case 'warning':
+      return 'status status-warning'
     case 'skipped':
       return 'status status-skipped'
     case 'idle':

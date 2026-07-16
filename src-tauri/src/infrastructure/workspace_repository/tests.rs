@@ -165,6 +165,14 @@ fn twitter_sensitive_media_warning_requires_restricted_account_and_nsfw_profile(
 }
 
 #[test]
+fn source_sync_status_is_productive_includes_warning() {
+    assert!(source_sync_status_is_productive("succeeded"));
+    assert!(source_sync_status_is_productive("warning"));
+    assert!(!source_sync_status_is_productive("failed"));
+    assert!(!source_sync_status_is_productive("skipped"));
+}
+
+#[test]
 fn existing_media_scan_ignores_zero_byte_download_placeholders() {
     let temp = tempfile::tempdir().expect("tempdir");
     std::fs::write(temp.path().join("empty.mp4"), []).expect("placeholder");
