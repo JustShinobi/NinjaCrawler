@@ -1651,6 +1651,13 @@ pub(super) fn execute_twitter_source_sync_with_connection(
                 result.rate_limited || result.limit_aborted,
                 &result.section_errors,
             );
+            // "warning" = sync parcial útil (mídia/ledger ok) com aviso operacional
+            // (ex.: conta sem acesso a NSFW). Não é failed; a fila conta como completed.
+            let outcome_status = if completed_with_warnings {
+                "warning".to_string()
+            } else {
+                "succeeded".to_string()
+            };
             let mut summary = format_download_success_summary(
                 if completed_with_warnings {
                     "Twitter sync completed with warnings."
@@ -1711,7 +1718,7 @@ pub(super) fn execute_twitter_source_sync_with_connection(
                 .map_err(|error| error.to_string())?;
             SourceSyncOutcome {
                 tool: "internal.twitter".to_string(),
-                status: "succeeded".to_string(),
+                status: outcome_status,
                 summary,
                 command_preview,
                 manifest_summary_json: Some(manifest_summary_json),
@@ -1756,12 +1763,11 @@ pub(super) fn execute_twitter_source_sync_with_connection(
     source_sync_runtime::report_source_sync_progress(
         &context.source.id,
         Some(100),
-        Some(if outcome.status == "succeeded" {
-            "Download complete".to_string()
-        } else if outcome.status == "skipped" {
-            "Download skipped".to_string()
-        } else {
-            "Download failed".to_string()
+        Some(match outcome.status.as_str() {
+            "succeeded" => "Download complete".to_string(),
+            "warning" => "Download complete with warnings".to_string(),
+            "skipped" => "Download skipped".to_string(),
+            _ => "Download failed".to_string(),
         }),
         Some(outcome.summary.clone()),
         false,
@@ -1921,6 +1927,12 @@ pub(super) fn twitter_sync_completed_with_warnings(
     limit_aborted || !section_errors.is_empty()
 }
 
+/// Syncs that finished productively enough to refresh `last_synced_at` and feed
+/// incremental state: full success or success-with-warnings.
+pub(super) fn source_sync_status_is_productive(status: &str) -> bool {
+    matches!(status, "succeeded" | "warning")
+}
+
 /// Warning when the operator marked the Account as unable to view sensitive
 /// media and the target profile is NSFW-flagged by X
 /// (`profile_interstitial_type: sensitive_media`).
@@ -2006,7 +2018,8 @@ fn load_twitter_incremental_state(
             "SELECT manifest_summary_json
              FROM source_sync_runs
              WHERE source_id = ?1 AND provider = 'twitter'
-               AND status = 'succeeded' AND manifest_summary_json IS NOT NULL
+               AND status IN ('succeeded', 'warning')
+               AND manifest_summary_json IS NOT NULL
              ORDER BY finished_at DESC
              LIMIT 20",
         )
@@ -4996,7 +5009,7 @@ pub(super) fn persist_source_sync_run(
         )
         .map_err(|error| error.to_string())?;
 
-    if outcome.status == "succeeded" {
+    if source_sync_status_is_productive(&outcome.status) {
         connection
             .execute(
                 "UPDATE source_profiles

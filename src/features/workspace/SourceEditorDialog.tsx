@@ -963,12 +963,14 @@ function resolvePreferredAccountId(provider: ProviderKey, preferredAccountId: st
 
 function historyStatusClass(status: string): string {
   if (status === 'succeeded') return 'status-succeeded source-editor-history-status-quiet'
+  if (status === 'warning') return 'status-warning'
   if (status === 'failed') return 'status-failed'
   return 'status-degraded'
 }
 
 function historyStatusLabel(status: string): string {
   if (status === 'succeeded') return 'Succeeded'
+  if (status === 'warning') return 'Warning'
   if (status === 'failed') return 'Failed'
   if (!status) return 'Unknown'
   return status.charAt(0).toUpperCase() + status.slice(1)

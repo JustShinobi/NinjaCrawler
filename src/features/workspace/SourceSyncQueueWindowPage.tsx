@@ -73,7 +73,7 @@ interface QueueResultTask {
   handle: string
   operation: QueueOperation
   modeDetail?: string
-  status: 'succeeded' | 'failed' | 'skipped'
+  status: 'succeeded' | 'warning' | 'failed' | 'skipped'
   summary: string
   finishedAt: string
   error?: string
@@ -90,10 +90,12 @@ interface ProviderLane {
   activeProgressPercent?: number
 }
 
-function resultStatusClassName(status: 'succeeded' | 'failed' | 'skipped'): string {
+function resultStatusClassName(status: 'succeeded' | 'warning' | 'failed' | 'skipped'): string {
   switch (status) {
     case 'failed':
       return 'status status-failed'
+    case 'warning':
+      return 'status status-warning'
     case 'skipped':
       return 'status status-skipped queue-recent-status-quiet'
     default:

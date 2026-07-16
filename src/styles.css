@@ -697,6 +697,7 @@ p {
   border-color: rgba(47, 109, 79, 0.28);
 }
 
+.status-warning,
 .status-degraded {
   color: var(--accent);
   background: var(--accent-soft);
@@ -6733,7 +6734,8 @@ p {
   background: var(--bg-card);
 }
 
-.queue-recent-item.queue-recent-failed {
+.queue-recent-item.queue-recent-failed,
+.queue-recent-item.queue-recent-warning {
   border-color: var(--accent-line);
 }
 
@@ -9497,6 +9499,10 @@ textarea.accounts-field-mono {
 
 .source-editor-history-failed {
   border-color: color-mix(in srgb, var(--danger) 35%, var(--line));
+}
+
+.source-editor-history-warning {
+  border-color: color-mix(in srgb, var(--accent) 40%, var(--line));
 }
 
 .source-editor-history-body {

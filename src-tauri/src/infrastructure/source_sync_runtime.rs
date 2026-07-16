@@ -778,6 +778,10 @@ fn finish_active(job: &SourceSyncQueueJob, status: &str, summary: &str) {
             "warning",
             format!("Source sync cancelled for '{}'.", job.handle),
         ),
+        "warning" => (
+            "warning",
+            format!("Source sync finished with warnings for '{}'.", job.handle),
+        ),
         _ => (
             "info",
             format!("Source sync finished for '{}'.", job.handle),
