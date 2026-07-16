@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.21.0](https://github.com/MetalDevOps/NinjaCrawler/compare/v0.20.0...v0.21.0) (2026-07-16)
+
+
+### Features
+
+* **windows:** migrate remaining Tauri windows to WindowShell ([#11](https://github.com/MetalDevOps/NinjaCrawler/issues/11)) ([87d5155](https://github.com/MetalDevOps/NinjaCrawler/commit/87d5155e6dcbb4ed70edd85ead45f36a108fbf32))
+
 ## [0.20.0](https://github.com/MetalDevOps/NinjaCrawler-Temp/compare/v0.19.2...v0.20.0) (2026-07-16)
 
 
