@@ -160,6 +160,8 @@ Use `-PortableOnly` with the build wrapper when installers are not required.
 
 GitHub Actions runs lint, frontend tests, a production dependency audit, and a Windows x64 cross-build on `ubuntu-latest` for every pull request and changes to `main`.
 
+Pull requests receive a **merge method** label and sticky comment (`merge:squash` or `merge:merge-commit`). Feature work into `develop` is squash; promotion and release paths into `main` (and release back-sync into `develop`) must be **merge commits**. See [merge policy](docs/merge-policy.md).
+
 Releases are tag-driven. The desktop app and the Chrome Companion are versioned on **independent** Release Please tracks so a release that only touches one of them never bumps the other:
 
 - The **app** track bumps `package.json`, `src-tauri/tauri.conf.json`, and `src-tauri/Cargo.toml`, and tags `vX.Y.Z`.
@@ -237,3 +239,4 @@ The extension communicates only with the local desktop API at `127.0.0.1`.
 - [Architecture](docs/architecture.md)
 - [Provider account flow](docs/provider-account-flow.md)
 - [Windows distribution](docs/windows-distribution.md)
+- [Merge policy](docs/merge-policy.md)
