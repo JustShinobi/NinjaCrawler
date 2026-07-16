@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import type { AppBuildInfo, AppUpdateStatus } from '../../domain/models'
 import { BrandLockup } from '../brand/BrandLockup'
+import { SettingTextField } from '../settings/appSettingControls'
 
 interface AboutPath {
   label: string
@@ -122,6 +123,14 @@ export function AboutPanel({
             ))}
           </dl>
           {copyError ? <p className="about-inline-error" role="alert">{copyError}</p> : null}
+          <div className="about-media-root-edit">
+            <SettingTextField
+              settingKey="storage.media_root"
+              label="Default media root for new sources"
+              hint="Changes apply to new profiles only. Existing sources keep their save path."
+              mono
+            />
+          </div>
         </article>
 
         <article className="panel about-info-panel">

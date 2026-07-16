@@ -39,7 +39,7 @@ describe('SettingsPage', () => {
     cleanup()
   })
 
-  it('uses category navigation and filters internal settings', () => {
+  it('keeps only cross-cutting preferences and hides domain homes', () => {
     renderPage({
       appSettings: [
         {
@@ -50,66 +50,98 @@ describe('SettingsPage', () => {
           mutable: true,
         },
         {
+          key: 'imports.instagram.scrawler.disabledRoots',
+          value: '[]',
+          category: 'general',
+          description: 'Owned by Import.',
+          mutable: true,
+        },
+        {
+          key: 'policy.session_import.enabled',
+          value: 'true',
+          category: 'policy',
+          description: 'Owned by Accounts Workspace.',
+          mutable: true,
+        },
+        {
+          key: 'policy.notifications.default',
+          value: 'summary',
+          category: 'policy',
+          description: 'Owned by Plans.',
+          mutable: true,
+        },
+        {
+          key: 'storage.media_root',
+          value: 'F:\\Data',
+          category: 'storage',
+          description: 'Owned by About.',
+          mutable: true,
+        },
+        {
           key: 'policy.desktop.close_to_tray',
           value: 'true',
           category: 'policy',
           description: 'Close to tray instead of exiting.',
           mutable: true,
         },
-      ],
-    })
-
-    const generalTab = screen.getByRole('tab', { name: /general/i })
-    const policyTab = screen.getByRole('tab', { name: /policy/i })
-
-    expect(screen.queryByText(/connector runtimes/i)).toBeNull()
-    expect(generalTab.getAttribute('aria-selected')).toBe('true')
-    expect(screen.getByRole('tabpanel', { name: /general/i })).not.toBeNull()
-
-    // runtime.* settings are filtered out
-    expect(screen.queryByDisplayValue('2026-03-12T00:00:00Z')).toBeNull()
-
-    fireEvent.click(policyTab)
-
-    expect(policyTab.getAttribute('aria-selected')).toBe('true')
-    expect(screen.getByRole('tabpanel', { name: /policy/i })).not.toBeNull()
-    // Boolean setting renders as checkbox toggle, not text input
-    expect(screen.getByRole('checkbox', { name: 'policy.desktop.close_to_tray' })).not.toBeNull()
-  })
-
-  it('saves enum settings immediately on select change', () => {
-    const { store } = renderPage({
-      appSettings: [
         {
-          key: 'policy.notifications.default',
-          value: 'summary',
-          category: 'policy',
-          description: 'Default post-run notification mode for scheduler plans.',
+          key: 'naming.instagram.media_file_pattern_mode',
+          value: 'preset_new_default',
+          category: 'storage',
+          description: 'Instagram naming.',
           mutable: true,
         },
       ],
     })
 
-    fireEvent.click(screen.getByRole('tab', { name: /policy/i }))
+    expect(screen.getByRole('navigation', { name: /preference sections/i })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Appearance' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Desktop' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Media naming' })).toBeTruthy()
 
-    fireEvent.change(screen.getByLabelText('policy.notifications.default'), {
-      target: { value: 'detailed' },
+    expect(screen.queryByText(/session import/i)).toBeNull()
+    expect(screen.queryByText(/plan notifications/i)).toBeNull()
+    expect(screen.queryByDisplayValue('F:\\Data')).toBeNull()
+    expect(screen.queryByDisplayValue('2026-03-12T00:00:00Z')).toBeNull()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Desktop' }))
+    expect(screen.getByRole('checkbox', { name: 'Close to tray' })).not.toBeNull()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Media naming' }))
+    expect(screen.getByLabelText('Instagram file naming')).not.toBeNull()
+  })
+
+  it('saves Instagram naming enum immediately', () => {
+    const { store } = renderPage({
+      appSettings: [
+        {
+          key: 'naming.instagram.media_file_pattern_mode',
+          value: 'preset_new_default',
+          category: 'storage',
+          description: 'Controls how Instagram media file names are generated.',
+          mutable: true,
+        },
+      ],
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: 'Media naming' }))
+    fireEvent.change(screen.getByLabelText('Instagram file naming'), {
+      target: { value: 'custom' },
     })
 
     expect(store.upsertAppSetting).toHaveBeenCalledWith({
-      key: 'policy.notifications.default',
-      value: 'detailed',
-      category: 'policy',
-      description: 'Default post-run notification mode for scheduler plans.',
+      key: 'naming.instagram.media_file_pattern_mode',
+      value: 'custom',
+      category: 'storage',
+      description: 'Controls how Instagram media file names are generated.',
       mutable: true,
     })
   })
 
-  it('toggles dark mode from the theme card in General', () => {
+  it('toggles dark mode from Appearance', () => {
     renderPage()
 
-    const toggle = screen.getByRole('checkbox', { name: 'appearance.theme' })
-    fireEvent.click(toggle)
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Dark theme' }))
 
     expect(document.documentElement.getAttribute('data-theme')).toBe('dark')
     expect(localStorage.getItem('nc-theme')).toBe('dark')
