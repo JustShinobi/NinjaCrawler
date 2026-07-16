@@ -661,7 +661,11 @@ function normalizeSourceSyncRun(value: unknown): SourceSyncRun | null {
     provider: normalizeProviderKey(pick(value, 'provider', 'provider_key', 'providerKey')),
     tool: stringValue(value, ['tool'], ''),
     trigger: stringValue(value, ['trigger'], 'manual'),
-    status: enumValue(pick(value, 'status'), ['succeeded', 'failed', 'skipped'] as const, 'failed'),
+    status: enumValue(
+      pick(value, 'status'),
+      ['succeeded', 'warning', 'failed', 'skipped'] as const,
+      'failed',
+    ),
     summary: stringValue(value, ['summary'], ''),
     commandPreview: stringValue(value, ['commandPreview', 'command_preview'], ''),
     ...(manifestSummary ? { manifestSummary } : {}),
@@ -1073,7 +1077,11 @@ function normalizeSourceSyncQueueRecentResult(value: unknown): SourceSyncQueueRe
     provider: normalizeProviderKey(pick(value, 'provider', 'providerKey', 'provider_key')),
     handle: stringValue(value, ['handle'], ''),
     accountId: optionalStringValue(value, ['accountId', 'account_id']),
-    status: enumValue(pick(value, 'status'), ['succeeded', 'failed', 'skipped'] as const, 'failed'),
+    status: enumValue(
+      pick(value, 'status'),
+      ['succeeded', 'warning', 'failed', 'skipped'] as const,
+      'failed',
+    ),
     summary: stringValue(value, ['summary'], ''),
     finishedAt: stringValue(value, ['finishedAt', 'finished_at'], new Date().toISOString()),
   }

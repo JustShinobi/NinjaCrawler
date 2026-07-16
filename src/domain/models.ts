@@ -695,7 +695,7 @@ export interface SourceSyncQueueRecentResult {
   provider: ProviderKey
   handle: string
   accountId?: string
-  status: 'succeeded' | 'failed' | 'skipped'
+  status: 'succeeded' | 'warning' | 'failed' | 'skipped'
   summary: string
   finishedAt: string
 }
@@ -840,7 +840,7 @@ export interface SourceSyncRun {
   provider: ProviderKey
   tool: string
   trigger: string
-  status: 'succeeded' | 'failed' | 'skipped'
+  status: 'succeeded' | 'warning' | 'failed' | 'skipped'
   summary: string
   commandPreview: string
   manifestSummary?: InstagramManifestSummary
