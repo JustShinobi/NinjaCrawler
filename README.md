@@ -53,9 +53,9 @@ Companion 0.17.0 ·
 
 <br>
 
-<img src="assets/docs/workspace-preview.jpg" alt="NinjaCrawler workspace preview" width="920">
+<img src="assets/docs/workspace-preview.png" alt="NinjaCrawler desktop workspace" width="920">
 
-<sub>Product preview of the desktop workspace (illustrative).</sub>
+<sub>NinjaCrawler desktop workspace.</sub>
 
 </div>
 
