@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.24.0](https://github.com/JustShinobi/NinjaCrawler/compare/v0.23.0...v0.24.0) (2026-07-16)
+
+
+### Features
+
+* **twitter:** warn on restricted sensitive media and introduce warning sync status ([#49](https://github.com/JustShinobi/NinjaCrawler/issues/49)) ([daeccd2](https://github.com/JustShinobi/NinjaCrawler/commit/daeccd24d22de811ba5050c6d8d7ed858c65a6cf))
+
 ## [0.23.0](https://github.com/JustShinobi/NinjaCrawler/compare/v0.22.0...v0.23.0) (2026-07-16)
 
 
