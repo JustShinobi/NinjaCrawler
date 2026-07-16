@@ -10,6 +10,8 @@ import {
 import type { SchedulerGroup, WorkspaceSnapshot } from '../../domain/models'
 import { TWITTER_SYNC_OPTION_GROUPS } from '../../domain/twitterSyncOptionDefinitions'
 import { closeDesktopWindow } from '../../utils/closeDesktopWindow'
+import { WindowShell } from '../brand/WindowShell'
+import { WindowTitlebar } from '../brand/WindowTitlebar'
 
 type TriState = 'unchanged' | 'on' | 'off'
 
@@ -328,12 +330,22 @@ export function BatchEditorWindowPage({ initialSourceIds }: BatchEditorWindowPag
   const applyBlockedByPendingGroupCreation = groupAction === GROUP_CREATE
 
   return (
+    <WindowShell
+      className="batch-editor-window-frame"
+      contentClassName="batch-editor-window-content"
+      density="compact"
+      titlebar={
+        <WindowTitlebar
+          title="Change Parameters"
+          trailing={
+            <span className="window-titlebar-status-meta">
+              {sourceIds.length} profile{sourceIds.length === 1 ? '' : 's'}
+            </span>
+          }
+        />
+      }
+    >
     <div className="batch-editor-shell">
-      <header className="batch-editor-header">
-        <h2>Change Parameters</h2>
-        <span className="batch-editor-count">{sourceIds.length} profiles selected</span>
-      </header>
-
       <div className="batch-editor-body">
         <BatchSection
           collapsed={collapsedSections.has('labels')}
@@ -591,6 +603,7 @@ export function BatchEditorWindowPage({ initialSourceIds }: BatchEditorWindowPag
         </button>
       </footer>
     </div>
+    </WindowShell>
   )
 }
 

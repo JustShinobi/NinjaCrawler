@@ -2,36 +2,88 @@ import { useMemo, useState } from 'react'
 import type { AppSetting } from '../../domain/models'
 import { useAppStore } from '../../state/appStore'
 import { getStoredTheme, toggleTheme, type Theme } from '../../theme'
+import { HelpTip } from '../shared/HelpTip'
 
-const CATEGORY_ORDER = ['general', 'policy', 'storage'] as const
+/**
+ * Preferences dialog (Tools → Preferences) — cross-cutting hub only.
+ *
+ * Domain homes (do not re-add here):
+ * - imports.* → Import window
+ * - session/sync delay/duplicate/retention → Accounts → Workspace
+ * - plan notification default → Plans editor
+ * - storage.media_root → About
+ * - tool/runtime/instagram.sync internals → hidden
+ */
 
-const CATEGORY_TITLES: Record<string, string> = {
-  general: 'General',
-  policy: 'Policy',
-  storage: 'Storage',
+type PreferenceSectionId = 'appearance' | 'desktop' | 'media'
+
+interface PreferenceSection {
+  id: PreferenceSectionId
+  title: string
+  description: string
 }
 
-const ENUM_OPTIONS: Record<string, string[]> = {
-  'policy.notifications.default': ['summary', 'detailed'],
+const SECTIONS: PreferenceSection[] = [
+  {
+    id: 'appearance',
+    title: 'Appearance',
+    description: 'Theme for the desktop UI.',
+  },
+  {
+    id: 'desktop',
+    title: 'Desktop',
+    description: 'Window and background behaviour on this machine.',
+  },
+  {
+    id: 'media',
+    title: 'Media naming',
+    description: 'Instagram file naming defaults for downloads.',
+  },
+]
+
+/** Keys with domain homes or internal — never list in Preferences. */
+function shouldHideSetting(key: string): boolean {
+  if (key.startsWith('tool.') && key.endsWith('.path')) return true
+  if (key.startsWith('instagram.sync.')) return true
+  if (key.startsWith('runtime.')) return true
+  if (key.startsWith('imports.')) return true
+  if (key === 'storage.media_root') return true
+  if (key.startsWith('policy.session_')) return true
+  if (key.startsWith('policy.sync.')) return true
+  if (key.startsWith('policy.feed.')) return true
+  if (key.startsWith('policy.notifications.')) return true
+  return false
+}
+
+function sectionForKey(key: string): PreferenceSectionId | null {
+  if (shouldHideSetting(key)) return null
+  if (key.startsWith('policy.desktop.')) return 'desktop'
+  if (key.startsWith('naming.')) return 'media'
+  return null
+}
+
+const SETTING_LABELS: Record<string, string> = {
+  'policy.desktop.close_to_tray': 'Close to tray',
+  'policy.desktop.silent_mode': 'Silent mode',
+  'naming.instagram.media_file_pattern_mode': 'Instagram file naming',
+  'naming.instagram.media_file_pattern_template': 'Custom Instagram name template',
+}
+
+const ENUM_OPTIONS: Record<string, Array<{ value: string; label: string }>> = {
   'naming.instagram.media_file_pattern_mode': [
-    'preset_new_default',
-    'preset_legacy_url_basename',
-    'custom',
+    { value: 'preset_new_default', label: 'New default' },
+    { value: 'preset_legacy_url_basename', label: 'Legacy URL basename' },
+    { value: 'custom', label: 'Custom template' },
   ],
 }
 
-interface SettingsCategoryEntry {
-  key: string
-  title: string
-  settings: AppSetting[]
-}
-
-function humanizeCategory(category: string): string {
-  return category
-    .split(/[._-]+/)
-    .filter(Boolean)
-    .map((segment) => segment.charAt(0).toUpperCase() + segment.slice(1))
-    .join(' ')
+function humanizeKey(key: string): string {
+  if (SETTING_LABELS[key]) return SETTING_LABELS[key]
+  const tail = key.split('.').pop() ?? key
+  return tail
+    .replace(/[_-]+/g, ' ')
+    .replace(/([a-z])([A-Z])/g, '$1 $2')
+    .replace(/\b\w/g, (char) => char.toUpperCase())
 }
 
 function isBooleanSetting(value: string): boolean {
@@ -44,70 +96,44 @@ export function SettingsPage() {
   const upsertAppSetting = useAppStore((state) => state.upsertAppSetting)
   const [draftValues, setDraftValues] = useState<Record<string, string>>({})
   const [theme, setThemeState] = useState<Theme>(getStoredTheme)
-  const settingsByCategory = useMemo<SettingsCategoryEntry[]>(() => {
-    const grouped = new Map<string, AppSetting[]>()
+  const [activeSection, setActiveSection] = useState<PreferenceSectionId>('appearance')
+
+  const settingsBySection = useMemo(() => {
+    const grouped: Record<PreferenceSectionId, AppSetting[]> = {
+      appearance: [],
+      desktop: [],
+      media: [],
+    }
 
     for (const setting of snapshot?.appSettings ?? []) {
-      if (setting.key.startsWith('tool.') && setting.key.endsWith('.path')) {
-        continue
-      }
-
-      if (setting.key.startsWith('instagram.sync.')) {
-        continue
-      }
-
-      if (setting.key.startsWith('runtime.')) {
-        continue
-      }
-
-      const current = grouped.get(setting.category) ?? []
-      grouped.set(setting.category, [...current, setting].sort((left, right) => left.key.localeCompare(right.key)))
+      const section = sectionForKey(setting.key)
+      if (!section) continue
+      grouped[section].push(setting)
     }
 
-    const entries = Array.from(grouped.entries()).map(([category, settings]) => ({
-      key: category,
-      title: CATEGORY_TITLES[category] ?? humanizeCategory(category),
-      settings,
-    }))
-
-    const hasGeneral = entries.some((entry) => entry.key === 'general')
-
-    if (!hasGeneral) {
-      entries.push({ key: 'general', title: 'General', settings: [] })
+    for (const id of Object.keys(grouped) as PreferenceSectionId[]) {
+      grouped[id].sort((left, right) => humanizeKey(left.key).localeCompare(humanizeKey(right.key)))
     }
 
-    return entries.sort((left, right) => {
-      const leftIndex = CATEGORY_ORDER.indexOf(left.key as (typeof CATEGORY_ORDER)[number])
-      const rightIndex = CATEGORY_ORDER.indexOf(right.key as (typeof CATEGORY_ORDER)[number])
-
-      if (leftIndex === -1 && rightIndex === -1) {
-        return left.title.localeCompare(right.title)
-      }
-
-      if (leftIndex === -1) {
-        return 1
-      }
-
-      if (rightIndex === -1) {
-        return -1
-      }
-
-      return leftIndex - rightIndex
-    })
+    return grouped
   }, [snapshot])
-  const [requestedCategory, setRequestedCategory] = useState<string>('')
 
-  const activeCategoryEntry = useMemo(
-    () => settingsByCategory.find((category) => category.key === requestedCategory) ?? settingsByCategory[0],
-    [requestedCategory, settingsByCategory],
+  const visibleSections = useMemo(
+    () =>
+      SECTIONS.filter(
+        (section) => section.id === 'appearance' || settingsBySection[section.id].length > 0,
+      ),
+    [settingsBySection],
   )
+
+  const resolvedSection =
+    visibleSections.find((section) => section.id === activeSection)?.id ??
+    visibleSections[0]?.id ??
+    'appearance'
 
   async function handleSave(key: string, explicitValue?: string) {
     const setting = snapshot?.appSettings.find((entry) => entry.key === key)
-
-    if (!setting) {
-      return
-    }
+    if (!setting) return
 
     await upsertAppSetting({
       key,
@@ -122,147 +148,185 @@ export function SettingsPage() {
     return null
   }
 
+  const sectionMeta = SECTIONS.find((section) => section.id === resolvedSection) ?? SECTIONS[0]
+  const sectionSettings = settingsBySection[resolvedSection]
+
   return (
-    <div className="settings-shell">
-      <section className="settings-page-frame">
-        <div className="settings-tab-bar" role="tablist" aria-label="Settings categories">
-          {settingsByCategory.map((category) => {
-            const isActive = category.key === activeCategoryEntry?.key
+    <div className="preferences-shell">
+      <nav className="preferences-nav" aria-label="Preference sections">
+        {visibleSections.map((section) => {
+          const isActive = section.id === resolvedSection
+          return (
+            <button
+              key={section.id}
+              type="button"
+              className={isActive ? 'preferences-nav-item is-active' : 'preferences-nav-item'}
+              aria-current={isActive ? 'page' : undefined}
+              onClick={() => setActiveSection(section.id)}
+            >
+              {section.title}
+            </button>
+          )
+        })}
+      </nav>
+
+      <section className="preferences-panel" aria-labelledby="preferences-section-title">
+        <header className="preferences-panel-header">
+          <div>
+            <h2 id="preferences-section-title">{sectionMeta.title}</h2>
+            <p className="muted-text">{sectionMeta.description}</p>
+          </div>
+        </header>
+
+        <div className="preferences-entry-list">
+          {resolvedSection === 'appearance' ? (
+            <article className="preferences-entry">
+              <div className="preferences-entry-copy">
+                <label className="preferences-entry-label" htmlFor="pref-theme">
+                  Dark theme
+                </label>
+                <p className="preferences-entry-hint">Use the dark Precision Stealth palette.</p>
+              </div>
+              <input
+                id="pref-theme"
+                type="checkbox"
+                className="settings-toggle"
+                aria-label="Dark theme"
+                checked={theme === 'dark'}
+                onChange={() => setThemeState(toggleTheme())}
+              />
+            </article>
+          ) : null}
+
+          {sectionSettings.map((setting) => {
+            const currentValue = draftValues[setting.key] ?? setting.value
+            const isDirty = currentValue !== setting.value
+            const label = humanizeKey(setting.key)
+            const enumOptions = ENUM_OPTIONS[setting.key]
+            const description = setting.description?.trim() || undefined
+
+            if (enumOptions) {
+              return (
+                <article
+                  className="preferences-entry preferences-entry-stack"
+                  data-locked={!setting.mutable || undefined}
+                  key={setting.key}
+                >
+                  <div className="preferences-entry-copy">
+                    <div className="preferences-entry-label-row">
+                      <span className="preferences-entry-label">{label}</span>
+                      <HelpTip label={label} tooltip={`${description ?? label} (${setting.key})`} />
+                    </div>
+                    {description ? <p className="preferences-entry-hint">{description}</p> : null}
+                  </div>
+                  <select
+                    aria-label={label}
+                    className="preferences-select"
+                    disabled={!setting.mutable || Boolean(pendingCommand)}
+                    title={setting.key}
+                    value={currentValue}
+                    onChange={(event) => {
+                      setDraftValues((current) => ({ ...current, [setting.key]: event.target.value }))
+                      void handleSave(setting.key, event.target.value)
+                    }}
+                  >
+                    {enumOptions.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                </article>
+              )
+            }
+
+            if (isBooleanSetting(setting.value)) {
+              return (
+                <article
+                  className="preferences-entry"
+                  data-locked={!setting.mutable || undefined}
+                  key={setting.key}
+                >
+                  <div className="preferences-entry-copy">
+                    <div className="preferences-entry-label-row">
+                      <label className="preferences-entry-label" htmlFor={`pref-${setting.key}`}>
+                        {label}
+                      </label>
+                      <HelpTip label={label} tooltip={`${description ?? label} (${setting.key})`} />
+                    </div>
+                    {description ? <p className="preferences-entry-hint">{description}</p> : null}
+                  </div>
+                  <input
+                    id={`pref-${setting.key}`}
+                    type="checkbox"
+                    className="settings-toggle"
+                    aria-label={label}
+                    title={setting.key}
+                    checked={currentValue === 'true'}
+                    disabled={!setting.mutable || Boolean(pendingCommand)}
+                    onChange={() => {
+                      const next = currentValue === 'true' ? 'false' : 'true'
+                      setDraftValues((current) => ({ ...current, [setting.key]: next }))
+                      void handleSave(setting.key, next)
+                    }}
+                  />
+                </article>
+              )
+            }
+
             return (
-              <button
-                aria-controls={`settings-category-panel-${category.key}`}
-                aria-selected={isActive}
-                className={isActive ? 'settings-tab settings-tab-active' : 'settings-tab'}
-                id={`settings-category-tab-${category.key}`}
-                key={category.key}
-                onClick={() => setRequestedCategory(category.key)}
-                role="tab"
-                type="button"
+              <article
+                className="preferences-entry preferences-entry-stack"
+                data-locked={!setting.mutable || undefined}
+                key={setting.key}
               >
-                <span>{category.title}</span>
-              </button>
+                <div className="preferences-entry-copy">
+                  <div className="preferences-entry-label-row">
+                    <label className="preferences-entry-label" htmlFor={`pref-${setting.key}`}>
+                      {label}
+                    </label>
+                    <HelpTip label={label} tooltip={`${description ?? label} (${setting.key})`} />
+                  </div>
+                  {description ? <p className="preferences-entry-hint">{description}</p> : null}
+                </div>
+                <div className="preferences-input-row">
+                  <input
+                    id={`pref-${setting.key}`}
+                    aria-label={label}
+                    className="preferences-input"
+                    disabled={!setting.mutable}
+                    title={setting.key}
+                    value={currentValue}
+                    onChange={(event) =>
+                      setDraftValues((current) => ({
+                        ...current,
+                        [setting.key]: event.target.value,
+                      }))
+                    }
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter' && isDirty && setting.mutable) {
+                        event.preventDefault()
+                        void handleSave(setting.key)
+                      }
+                    }}
+                  />
+                  <button
+                    className="ghost-button preferences-save"
+                    disabled={Boolean(pendingCommand) || !setting.mutable || !isDirty}
+                    onClick={() => void handleSave(setting.key)}
+                    type="button"
+                  >
+                    Save
+                  </button>
+                </div>
+              </article>
             )
           })}
+
+          {resolvedSection !== 'appearance' && sectionSettings.length === 0 ? (
+            <div className="preferences-empty muted-text">No preferences in this section.</div>
+          ) : null}
         </div>
-
-        <section
-          aria-labelledby={activeCategoryEntry ? `settings-category-tab-${activeCategoryEntry.key}` : undefined}
-          className="panel panel-accent settings-tab-panel"
-          id={activeCategoryEntry ? `settings-category-panel-${activeCategoryEntry.key}` : undefined}
-          role={activeCategoryEntry ? 'tabpanel' : undefined}
-        >
-          {activeCategoryEntry ? (
-            <div className="settings-entry-list">
-              {activeCategoryEntry.key === 'general' ? (
-                <article className="settings-entry-card">
-                  <label className="settings-toggle-row">
-                    <span className="settings-key-chip">appearance.theme</span>
-                    <input
-                      type="checkbox"
-                      className="settings-toggle"
-                      checked={theme === 'dark'}
-                      onChange={() => setThemeState(toggleTheme())}
-                    />
-                  </label>
-                </article>
-              ) : null}
-
-              {activeCategoryEntry.settings.map((setting) => {
-                const currentValue = draftValues[setting.key] ?? setting.value
-                const isDirty = currentValue !== setting.value
-                const enumOptions = ENUM_OPTIONS[setting.key]
-
-                if (enumOptions) {
-                  return (
-                    <article className="settings-entry-card" data-locked={!setting.mutable || undefined} key={setting.key}>
-                      <div className="settings-select-row">
-                        <span className="settings-key-chip">{setting.key}</span>
-                        <select
-                          aria-describedby={setting.description ? `setting-description-${setting.key}` : undefined}
-                          aria-label={setting.key}
-                          className="settings-select"
-                          disabled={!setting.mutable || Boolean(pendingCommand)}
-                          value={currentValue}
-                          onChange={(event) => {
-                            setDraftValues((current) => ({ ...current, [setting.key]: event.target.value }))
-                            void handleSave(setting.key, event.target.value)
-                          }}
-                        >
-                          {enumOptions.map((option) => (
-                            <option key={option} value={option}>
-                              {option}
-                            </option>
-                          ))}
-                        </select>
-                      </div>
-                      {setting.description ? (
-                        <p className="settings-entry-description" id={`setting-description-${setting.key}`}>{setting.description}</p>
-                      ) : null}
-                    </article>
-                  )
-                }
-
-                if (isBooleanSetting(setting.value)) {
-                  return (
-                    <article className="settings-entry-card" data-locked={!setting.mutable || undefined} key={setting.key}>
-                      <label className="settings-toggle-row">
-                        <span className="settings-key-chip">{setting.key}</span>
-                        <input
-                          type="checkbox"
-                          className="settings-toggle"
-                          aria-describedby={setting.description ? `setting-description-${setting.key}` : undefined}
-                          checked={currentValue === 'true'}
-                          disabled={!setting.mutable || Boolean(pendingCommand)}
-                          onChange={() => {
-                            const next = currentValue === 'true' ? 'false' : 'true'
-                            setDraftValues((current) => ({ ...current, [setting.key]: next }))
-                            void handleSave(setting.key, next)
-                          }}
-                        />
-                      </label>
-                      {setting.description ? (
-                        <p className="settings-entry-description" id={`setting-description-${setting.key}`}>{setting.description}</p>
-                      ) : null}
-                    </article>
-                  )
-                }
-
-                return (
-                  <article className="settings-entry-card" data-locked={!setting.mutable || undefined} key={setting.key}>
-                    <span className="settings-key-chip">{setting.key}</span>
-                    {setting.description ? (
-                      <p className="settings-entry-description" id={`setting-description-${setting.key}`}>{setting.description}</p>
-                    ) : null}
-                    <div className="setting-input-row settings-entry-input-row">
-                      <input
-                        aria-describedby={setting.description ? `setting-description-${setting.key}` : undefined}
-                        aria-label={setting.key}
-                        disabled={!setting.mutable}
-                        value={currentValue}
-                        onChange={(event) =>
-                          setDraftValues((current) => ({
-                            ...current,
-                            [setting.key]: event.target.value,
-                          }))
-                        }
-                      />
-                      <button
-                        className="primary-button"
-                        disabled={Boolean(pendingCommand) || !setting.mutable || !isDirty}
-                        onClick={() => void handleSave(setting.key)}
-                        type="button"
-                      >
-                        Save
-                      </button>
-                    </div>
-                  </article>
-                )
-              })}
-            </div>
-          ) : (
-            <div className="empty-state">No workspace settings are available.</div>
-          )}
-        </section>
       </section>
     </div>
   )

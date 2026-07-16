@@ -23,6 +23,19 @@ vi.mock('../../bridge/desktop', () => bridgeMocks)
 vi.mock('../../state/appStore', () => ({
   useAppStore: (selector: (state: Record<string, unknown>) => unknown) => useAppStoreMock(selector),
 }))
+vi.mock('@tauri-apps/api/window', () => ({
+  getCurrentWindow: () => ({
+    close: vi.fn(),
+    isFocused: () => Promise.resolve(true),
+    isMaximized: () => Promise.resolve(false),
+    minimize: vi.fn(),
+    onFocusChanged: () => Promise.resolve(() => undefined),
+    onResized: () => Promise.resolve(() => undefined),
+    startDragging: vi.fn(),
+    toggleMaximize: vi.fn(),
+    setTitle: vi.fn(() => Promise.resolve()),
+  }),
+}))
 
 function renderWindow(snapshot?: {
   schedulerSets: Array<{
@@ -135,7 +148,7 @@ describe('SchedulerWindowPage', () => {
       ],
     })
 
-    expect(screen.getByRole('heading', { name: 'Scheduler' })).toBeTruthy()
+    expect(screen.getByText('Scheduler')).toBeTruthy()
     expect(screen.getByText('Instagram Sweep')).toBeTruthy()
 
     fireEvent.click(screen.getByRole('button', { name: 'Edit' }))

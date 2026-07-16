@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import { loadSystemShortDatePattern } from '../../bridge/desktop'
-import { closeDesktopWindow } from '../../utils/closeDesktopWindow'
+
 import type {
   PlanEditorWindowIntent,
   ProviderKey,
@@ -16,6 +16,7 @@ import type {
   SyncPlanUpsert,
 } from '../../domain/models'
 import { useAppStore } from '../../state/appStore'
+import { SettingSelect } from '../settings/appSettingControls'
 import { HelpTip } from '../shared/HelpTip'
 import {
   PAUSE_PRESETS,
@@ -32,6 +33,20 @@ import {
   statusLabel,
   syncNotificationMode,
 } from './schedulerShared'
+
+function PlanWorkspaceNotificationDefault() {
+  return (
+    <SettingSelect
+      settingKey="policy.notifications.default"
+      label="Default notification style for new plans"
+      options={[
+        { value: 'summary', label: 'Summary (simple)' },
+        { value: 'detailed', label: 'Detailed' },
+      ]}
+      hint="Applied when creating new plans. This plan's style above is independent."
+    />
+  )
+}
 
 type EditorTab = 'general' | 'filters' | 'runtime'
 type FilterBooleanKey =
@@ -761,8 +776,9 @@ export function SchedulerPage({ initialIntent }: SchedulerPageProps) {
     <div className="plans-editor-shell">
       <header className="plans-editor-header">
         <div>
-          <p className="eyebrow">Plan Editor</p>
-          <h1>{planDraft.name.trim() || (normalizedIntent.mode === 'new' ? 'New plan' : selectedPlan?.name ?? 'Plans')}</h1>
+          <h1 className="plans-editor-plan-title">
+            {planDraft.name.trim() || (normalizedIntent.mode === 'new' ? 'New plan' : selectedPlan?.name ?? 'Plan')}
+          </h1>
         </div>
         <div className="plans-editor-header-meta">
           <span className="pill">{selectedSet?.name ?? 'No set'}</span>
@@ -905,6 +921,12 @@ export function SchedulerPage({ initialIntent }: SchedulerPageProps) {
               ) : (
                 <p className="plans-help-text">Notification details stay hidden until desktop alerts are enabled.</p>
               )}
+              <div className="plans-workspace-default">
+                <p className="plans-help-text">
+                  Workspace default for new plans (summary vs detailed). Existing plans keep their own style above.
+                </p>
+                <PlanWorkspaceNotificationDefault />
+              </div>
             </article>
 
             <article className="panel plans-section-card">
@@ -1479,9 +1501,6 @@ export function SchedulerPage({ initialIntent }: SchedulerPageProps) {
             <button className="danger-button" disabled={!selectedPlan} onClick={() => selectedPlan && void deleteSyncPlan(selectedPlan.id)} type="button">Delete</button>
             <button className="ghost-button" disabled={!selectedPlan} onClick={() => selectedPlan && void moveSyncPlan(selectedPlan.id, 'up')} type="button">Up</button>
             <button className="ghost-button" disabled={!selectedPlan} onClick={() => selectedPlan && void moveSyncPlan(selectedPlan.id, 'down')} type="button">Down</button>
-          </div>
-          <div className="action-row">
-            <button className="ghost-button" onClick={() => void closeDesktopWindow()} type="button">Close</button>
           </div>
         </footer>
       </form>

@@ -27,6 +27,8 @@ import type {
   ProviderKey,
   WorkspaceSnapshot,
 } from '../../domain/models'
+import { WindowShell } from '../brand/WindowShell'
+import { WindowTitlebar } from '../brand/WindowTitlebar'
 
 interface ImportResolutionDraft {
   action: ImportResolutionAction
@@ -739,13 +741,31 @@ export function ImportWindowPage() {
     void persistDisabledRoots(nextRoots, disabledRoots)
   }
 
+  const activeProviderName =
+    providers.find((provider) => provider.key === selectedProvider)?.displayName ?? 'Import'
+
   return (
+    <WindowShell
+      className="import-window-frame"
+      contentClassName="import-window-content"
+      density="compact"
+      titlebar={
+        <WindowTitlebar
+          title="Import"
+          trailing={
+            <span className="window-titlebar-status-meta">
+              {activeProviderName}
+              {queueBusy ? ` · ${queueHeadlineLabel}` : ''}
+            </span>
+          }
+        />
+      }
+    >
     <div className={`import-window-shell${showProviderSidebar ? '' : ' import-window-shell-compact'}`}>
       {showProviderSidebar ? (
         <aside className="panel settings-nav-panel import-window-sidebar">
           <div className="import-window-sidebar-header">
-            <span className="eyebrow">Import</span>
-            <h1>Providers</h1>
+            <h2 className="import-window-sidebar-title">Providers</h2>
           </div>
           <div className="settings-category-list import-provider-nav" role="tablist" aria-label="Import providers">
             {providers.map((provider) => (
@@ -1161,5 +1181,6 @@ export function ImportWindowPage() {
         </section>
       </main>
     </div>
+    </WindowShell>
   )
 }

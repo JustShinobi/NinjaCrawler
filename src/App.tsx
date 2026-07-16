@@ -109,10 +109,15 @@ interface ContextMenuPresetAction {
 
 type WindowKind = 'unknown' | 'main' | 'runtime-log'
 
-const sectionDescriptors: Record<'settings', { title: string; subtitle?: string; width: 'medium' | 'large' | 'wide' }> = {
+const sectionDescriptors: Record<
+  'settings',
+  { title: string; subtitle?: string; width: 'medium' | 'large' | 'wide'; height?: 'fit' | 'full' }
+> = {
   settings: {
-    title: 'Settings',
-    width: 'wide',
+    title: 'Preferences',
+    subtitle: 'Appearance, desktop behaviour, sync defaults, and media paths',
+    width: 'large',
+    height: 'fit',
   },
 }
 
@@ -714,7 +719,7 @@ function App() {
     { label: 'Runtime log', onSelect: () => void handleOpenRuntimeLog() },
     { label: 'Connectors', onSelect: () => void handleOpenConnectorRuntimes() },
     { label: 'Single videos', onSelect: () => void handleOpenSingleVideos() },
-    { label: 'Settings', onSelect: () => openSectionDialog('settings') },
+    { label: 'Preferences', onSelect: () => openSectionDialog('settings') },
   ]
   const helpMenuItems: MenuItem[] = [
     { label: 'About NinjaCrawler', onSelect: () => openAboutDialog() },
@@ -1802,6 +1807,9 @@ function App() {
 
       {openSection ? (
         <InternalDialog
+          closeVariant="icon"
+          headerDensity="compact"
+          height={sectionDescriptors[openSection].height ?? 'full'}
           onClose={closeSectionDialog}
           subtitle={sectionDescriptors[openSection].subtitle}
           title={sectionDescriptors[openSection].title}

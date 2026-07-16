@@ -8,10 +8,16 @@ afterEach(cleanup)
 
 function createWindowController() {
   let resizedHandler: (() => void) | undefined
+  let focusHandler: ((focused: boolean) => void) | undefined
   const controller: WindowController = {
     close: vi.fn().mockResolvedValue(undefined),
+    isFocused: vi.fn().mockResolvedValue(true),
     isMaximized: vi.fn().mockResolvedValue(false),
     minimize: vi.fn().mockResolvedValue(undefined),
+    onFocusChanged: vi.fn().mockImplementation(async (handler: (focused: boolean) => void) => {
+      focusHandler = handler
+      return vi.fn()
+    }),
     onResized: vi.fn().mockImplementation(async (handler: () => void) => {
       resizedHandler = handler
       return vi.fn()
@@ -19,7 +25,11 @@ function createWindowController() {
     startDragging: vi.fn().mockResolvedValue(undefined),
     toggleMaximize: vi.fn().mockResolvedValue(undefined),
   }
-  return { controller, resized: () => resizedHandler?.() }
+  return {
+    controller,
+    resized: () => resizedHandler?.(),
+    setFocused: (focused: boolean) => focusHandler?.(focused),
+  }
 }
 
 describe('WindowTitlebar', () => {
@@ -83,5 +93,28 @@ describe('WindowTitlebar', () => {
 
     expect(screen.getByRole('navigation', { name: 'Application menu' })).toBeTruthy()
     expect(screen.getByRole('button', { name: 'File' })).toBeTruthy()
+  })
+
+  it('marks the titlebar focused/blurred for stacked window chrome contrast', async () => {
+    const { controller, setFocused } = createWindowController()
+    const rendered = render(<WindowTitlebar title="Profile View" windowController={controller} />)
+    const titlebar = rendered.container.querySelector('.window-titlebar') as HTMLElement
+
+    await waitFor(() => expect(controller.onFocusChanged).toHaveBeenCalled())
+    expect(titlebar.classList.contains('is-window-focused')).toBe(true)
+    expect(titlebar.getAttribute('data-window-focused')).toBe('true')
+
+    setFocused(false)
+    await waitFor(() => {
+      expect(titlebar.classList.contains('is-window-blurred')).toBe(true)
+      expect(titlebar.getAttribute('data-window-focused')).toBe('false')
+      expect(document.documentElement.dataset.windowFocused).toBe('false')
+    })
+
+    setFocused(true)
+    await waitFor(() => {
+      expect(titlebar.classList.contains('is-window-focused')).toBe(true)
+      expect(document.documentElement.dataset.windowFocused).toBe('true')
+    })
   })
 })

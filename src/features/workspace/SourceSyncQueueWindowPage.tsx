@@ -759,13 +759,15 @@ export function SourceSyncQueueWindowPage() {
   useEffect(() => {
     if (!maintenanceOpen) return
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') {
-        setMaintenanceOpen(false)
-        maintenanceButtonRef.current?.focus()
-      }
+      if (event.key !== 'Escape') return
+      // Capture + stop so the entrypoint does not close the window first.
+      event.preventDefault()
+      event.stopImmediatePropagation()
+      setMaintenanceOpen(false)
+      maintenanceButtonRef.current?.focus()
     }
-    window.addEventListener('keydown', handleKeyDown)
-    return () => window.removeEventListener('keydown', handleKeyDown)
+    window.addEventListener('keydown', handleKeyDown, true)
+    return () => window.removeEventListener('keydown', handleKeyDown, true)
   }, [maintenanceOpen])
 
   const activeProviderCount = lanes.filter((lane) => lane.running.length > 0).length
@@ -1054,6 +1056,7 @@ export function SourceSyncQueueWindowPage() {
 
   return (
     <WindowShell
+      density="compact"
       titlebar={
         <WindowTitlebar
           title="Queue Status"

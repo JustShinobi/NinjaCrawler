@@ -3,6 +3,8 @@ import { useEffect, useMemo, useState } from 'react'
 import { openPlansWindow, subscribeToDesktopRuntimeEvents } from '../../bridge/desktop'
 import type { SchedulerPauseMode, SchedulerSetUpsert, SetSyncPlanPauseInput, SkipSyncPlanInput, SyncPlan } from '../../domain/models'
 import { useAppStore } from '../../state/appStore'
+import { WindowShell } from '../brand/WindowShell'
+import { WindowTitlebar } from '../brand/WindowTitlebar'
 import {
   PAUSE_PRESETS,
   createSetDraft,
@@ -138,18 +140,19 @@ export function SchedulerWindowPage() {
     }
 
     function handleEscape(event: KeyboardEvent) {
-      if (event.key === 'Escape') {
-        setOpenMenu(null)
-      }
+      if (event.key !== 'Escape' || openMenu === null) return
+      event.preventDefault()
+      event.stopImmediatePropagation()
+      setOpenMenu(null)
     }
 
     document.addEventListener('mousedown', handlePointerDown)
-    document.addEventListener('keydown', handleEscape)
+    document.addEventListener('keydown', handleEscape, true)
     return () => {
       document.removeEventListener('mousedown', handlePointerDown)
-      document.removeEventListener('keydown', handleEscape)
+      document.removeEventListener('keydown', handleEscape, true)
     }
-  }, [])
+  }, [openMenu])
 
   const effectiveSetId = selectedSetId ?? firstActiveSet(schedulerSets)?.id
   const selectedSet = useMemo(
@@ -264,17 +267,37 @@ export function SchedulerWindowPage() {
   }
 
   if (!snapshot) {
-    return <div className="panel runtime-log-window-empty">Loading scheduler...</div>
+    return (
+      <WindowShell
+        className="scheduler-window-frame"
+        contentClassName="scheduler-window-content"
+        density="compact"
+        titlebar={<WindowTitlebar title="Scheduler" />}
+      >
+        <div className="panel runtime-log-window-empty">Loading scheduler...</div>
+      </WindowShell>
+    )
   }
 
   return (
+    <WindowShell
+      className="scheduler-window-frame"
+      contentClassName="scheduler-window-content"
+      density="compact"
+      titlebar={
+        <WindowTitlebar
+          title="Scheduler"
+          trailing={
+            <span className="window-titlebar-status-meta">
+              {selectedSet ? `${selectedSet.name} · ${plans.length}` : 'No set'}
+            </span>
+          }
+        />
+      }
+    >
     <div className="scheduler-window-shell scheduler-window-shell-compact">
       <header className="scheduler-legacy-header panel scheduler-legacy-header-compact">
         <div className="scheduler-legacy-title-row scheduler-legacy-title-row-compact">
-          <div>
-            <p className="eyebrow">Scheduler</p>
-            <h1>Scheduler</h1>
-          </div>
           {showSetSelector ? (
             <label className="field scheduler-legacy-set-picker scheduler-legacy-set-picker-compact">
               <span>Scheduler set</span>
@@ -282,7 +305,9 @@ export function SchedulerWindowPage() {
                 {schedulerSets.map((entry) => <option key={entry.id} value={entry.id}>{entry.name}</option>)}
               </select>
             </label>
-          ) : null}
+          ) : (
+            <span className="muted-text">{selectedSet?.name ?? 'Scheduler set'}</span>
+          )}
         </div>
 
         <div className="scheduler-toolbar-strip">
@@ -406,5 +431,6 @@ export function SchedulerWindowPage() {
         <span>{pendingCommand ?? 'idle'}</span>
       </footer>
     </div>
+    </WindowShell>
   )
 }

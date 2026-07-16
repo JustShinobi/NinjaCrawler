@@ -11,6 +11,8 @@ import {
   upsertSourceProfile,
 } from '../../bridge/desktop'
 import type { ProviderKey, SingleVideo } from '../../domain/models'
+import { WindowShell } from '../brand/WindowShell'
+import { WindowTitlebar } from '../brand/WindowTitlebar'
 import { MediaCard } from './MediaCard'
 import { MediaLightbox } from './MediaLightbox'
 
@@ -266,6 +268,38 @@ export function SingleVideosPage() {
     selectAnchorRef.current = null
   }, [])
 
+  // Escape: lightbox (MediaLightbox) → confirm → select → context menu → window close.
+  useEffect(() => {
+    const handler = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return
+      if (lightboxIndex !== undefined) return
+      if (confirmIds && confirmIds.length > 0) {
+        if (deleting) {
+          event.preventDefault()
+          event.stopImmediatePropagation()
+          return
+        }
+        event.preventDefault()
+        event.stopImmediatePropagation()
+        setConfirmIds(undefined)
+        return
+      }
+      if (selectMode) {
+        event.preventDefault()
+        event.stopImmediatePropagation()
+        exitSelectMode()
+        return
+      }
+      if (contextMenu) {
+        event.preventDefault()
+        event.stopImmediatePropagation()
+        setContextMenu(undefined)
+      }
+    }
+    document.addEventListener('keydown', handler, true)
+    return () => document.removeEventListener('keydown', handler, true)
+  }, [lightboxIndex, confirmIds, deleting, selectMode, contextMenu, exitSelectMode])
+
   const openLightbox = useCallback(
     (video: SingleVideo) => {
       const index = previewItems.findIndex(
@@ -434,18 +468,23 @@ export function SingleVideosPage() {
   )
 
   return (
-    <div className="profile-view-shell single-videos-shell">
-      <header className="profile-view-header">
-        <div className="profile-view-identity">
-          <h1>Single videos</h1>
-          <p className="profile-view-meta">
-            <span className="muted-text">
+    <WindowShell
+      className="single-videos-window-frame"
+      contentClassName="single-videos-window-content"
+      density="compact"
+      titlebar={
+        <WindowTitlebar
+          title="Single Videos"
+          trailing={
+            <span className="window-titlebar-status-meta">
               {videos.length} video{videos.length === 1 ? '' : 's'}
+              {filtered.length !== videos.length ? ` · ${filtered.length} shown` : ''}
             </span>
-          </p>
-        </div>
-      </header>
-
+          }
+        />
+      }
+    >
+    <div className="profile-view-shell single-videos-shell">
       <form className="single-videos-add" onSubmit={handleAdd}>
         <input
           className="single-videos-add-input"
@@ -521,7 +560,7 @@ export function SingleVideosPage() {
                   type="button"
                   aria-pressed={viewMode === 'grid'}
                 >
-                  All media
+                  Flat grid
                 </button>
               </div>
               {providers.length > 0 ? (
@@ -702,5 +741,6 @@ export function SingleVideosPage() {
         </div>
       ) : null}
     </div>
+    </WindowShell>
   )
 }

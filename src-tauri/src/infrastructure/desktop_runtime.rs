@@ -586,6 +586,7 @@ fn create_batch_editor_window(
     .min_inner_size(700.0, 500.0)
     .resizable(true)
     .maximizable(false)
+    .decorations(false)
     .closable(true)
     .visible(false)
     .build()
@@ -670,14 +671,21 @@ fn create_scheduler_window(app: &tauri::AppHandle) -> Result<(), String> {
     .title("Scheduler")
     .inner_size(1120.0, 720.0)
     .min_inner_size(760.0, 480.0)
+    .decorations(false)
     .closable(true)
+    .visible(false)
     .build()
     .map_err(|error| error.to_string())?;
 
-    window.show().map_err(|error| error.to_string())?;
-    window.unminimize().map_err(|error| error.to_string())?;
-    window.set_focus().map_err(|error| error.to_string())?;
-    Ok(())
+    show_new_standalone_window(
+        app,
+        &window,
+        WindowSizeSpec {
+            width: 1120,
+            height: 720,
+        },
+        |_| Ok(()),
+    )
 }
 
 fn create_source_sync_queue_window(app: &tauri::AppHandle) -> Result<(), String> {
@@ -720,6 +728,7 @@ fn create_profile_view_window(
     .inner_size(1280.0, 860.0)
     .min_inner_size(940.0, 600.0)
     .resizable(true)
+    .decorations(false)
     .closable(true)
     .visible(false)
     .build()
@@ -751,6 +760,7 @@ fn create_plans_window(
     .max_inner_size(960.0, 4096.0)
     .resizable(true)
     .maximizable(false)
+    .decorations(false)
     .closable(true)
     .visible(false)
     .build()
@@ -777,6 +787,7 @@ fn create_single_videos_window(app: &tauri::AppHandle) -> Result<(), String> {
     .inner_size(1280.0, 860.0)
     .min_inner_size(940.0, 600.0)
     .resizable(true)
+    .decorations(false)
     .closable(true)
     .visible(false)
     .build()
@@ -990,6 +1001,7 @@ fn create_import_window(app: &tauri::AppHandle) -> Result<(), String> {
     .title("Import")
     .inner_size(1180.0, 820.0)
     .min_inner_size(980.0, 620.0)
+    .decorations(false)
     .closable(true)
     .visible(false)
     .build()

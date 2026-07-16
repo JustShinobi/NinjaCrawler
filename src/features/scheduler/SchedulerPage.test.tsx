@@ -16,6 +16,20 @@ vi.mock('../../state/appStore', () => ({
   useAppStore: (selector: (state: Record<string, unknown>) => unknown) => useAppStoreMock(selector),
 }))
 
+vi.mock('@tauri-apps/api/window', () => ({
+  getCurrentWindow: () => ({
+    close: vi.fn(),
+    isFocused: () => Promise.resolve(true),
+    isMaximized: () => Promise.resolve(false),
+    minimize: vi.fn(),
+    onFocusChanged: () => Promise.resolve(() => undefined),
+    onResized: () => Promise.resolve(() => undefined),
+    startDragging: vi.fn(),
+    toggleMaximize: vi.fn(),
+    setTitle: vi.fn(() => Promise.resolve()),
+  }),
+}))
+
 function createSnapshot() {
   return {
     ...createEmptyWorkspaceSnapshot(),

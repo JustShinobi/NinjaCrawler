@@ -172,7 +172,7 @@ const TIKTOK_SETTINGS_LAYOUT: ProviderAccountSettingsLayout = {
     { key: 'tiktok.defaults.useParsedVideoDate', category: 'download', label: 'Use video date as file date', kind: 'toggle', defaultValue: 'true' },
     { key: 'tiktok.defaults.abortOnLimit', category: 'download', label: 'Abort on limit', kind: 'toggle', defaultValue: 'true' },
     { key: 'tiktok.defaults.sleepTimerSecs', category: 'timers', label: 'Sleep timer (s)', tooltip: 'Seconds between sections. -1 disables.', kind: 'number', defaultValue: '-1' },
-    { key: 'tiktok.account.delayBetweenDownloadsSecs', category: 'timers', label: 'Delay between profiles (s)', tooltip: "Seconds the sync queue waits after each of this account's profiles before the next download. 0 falls back to the global default in Settings.", kind: 'number', defaultValue: '0' },
+    { key: 'tiktok.account.delayBetweenDownloadsSecs', category: 'timers', label: 'Delay between profiles (s)', tooltip: "Seconds the sync queue waits after each of this account's profiles before the next download. 0 falls back to the global default on the Accounts → Workspace tab.", kind: 'number', defaultValue: '0' },
   ],
 }
 

@@ -1,13 +1,14 @@
 import ReactDOM from 'react-dom/client'
 import './styles.css'
 import { applyTheme, watchTheme } from './theme'
+import { closeDesktopWindow } from './utils/closeDesktopWindow'
 
 applyTheme()
 watchTheme()
 
 document.addEventListener('keydown', (event) => {
   if (event.key === 'Escape') {
-    window.close()
+    void closeDesktopWindow()
   }
 })
 

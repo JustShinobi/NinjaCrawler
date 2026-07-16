@@ -18,7 +18,17 @@ const bridgeMocks = vi.hoisted(() => ({
 
 vi.mock('../../bridge/desktop', () => bridgeMocks)
 vi.mock('@tauri-apps/api/window', () => ({
-  getCurrentWindow: () => ({ close: closeWindowMock }),
+  getCurrentWindow: () => ({
+    close: closeWindowMock,
+    isFocused: () => Promise.resolve(true),
+    isMaximized: () => Promise.resolve(false),
+    minimize: vi.fn(),
+    onFocusChanged: () => Promise.resolve(() => undefined),
+    onResized: () => Promise.resolve(() => undefined),
+    startDragging: vi.fn(),
+    toggleMaximize: vi.fn(),
+    setTitle: vi.fn(() => Promise.resolve()),
+  }),
 }))
 
 function createSnapshot(provider: 'instagram' | 'twitter' = 'instagram'): WorkspaceSnapshot {
@@ -96,7 +106,7 @@ describe('BatchEditorWindowPage', () => {
 
     const view = render(<BatchEditorWindowPage initialSourceIds={['source-1']} />)
 
-    await screen.findByText('1 profiles selected')
+    await screen.findByText('1 profile')
 
     const groupSelect = view.container.querySelector('.batch-editor-group-select') as HTMLSelectElement
     fireEvent.change(groupSelect, { target: { value: '__create__' } })
@@ -128,10 +138,11 @@ describe('BatchEditorWindowPage', () => {
     const snapshot = createSnapshot()
     bridgeMocks.loadWorkspaceSnapshot.mockResolvedValue(snapshot)
     bridgeMocks.batchUpdateSourceProfiles.mockRejectedValue(new Error('boom'))
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined)
 
     const view = render(<BatchEditorWindowPage initialSourceIds={['source-1']} />)
 
-    await screen.findByText('1 profiles selected')
+    await screen.findByText('1 profile')
 
     const groupSelect = view.container.querySelector('.batch-editor-group-select') as HTMLSelectElement
     fireEvent.change(groupSelect, { target: { value: '__clear__' } })
@@ -141,6 +152,8 @@ describe('BatchEditorWindowPage', () => {
       expect(screen.getByText('Failed to apply changes: boom')).toBeTruthy()
     })
     expect(closeWindowMock).not.toHaveBeenCalled()
+    expect(consoleError).toHaveBeenCalled()
+    consoleError.mockRestore()
   })
 
   it('renders the shared Twitter option schema and applies only a Twitter patch', async () => {

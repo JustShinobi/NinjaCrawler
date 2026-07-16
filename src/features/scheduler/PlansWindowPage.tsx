@@ -2,6 +2,8 @@ import { useEffect, useMemo, useState } from 'react'
 import { subscribeToDesktopRuntimeEvents, subscribeToPlansWindowIntent } from '../../bridge/desktop'
 import type { PlanEditorWindowIntent } from '../../domain/models'
 import { useAppStore } from '../../state/appStore'
+import { WindowShell } from '../brand/WindowShell'
+import { WindowTitlebar } from '../brand/WindowTitlebar'
 import { SchedulerPage } from './SchedulerPage'
 
 interface PlansWindowPageProps {
@@ -80,12 +82,41 @@ export function PlansWindowPage({ initialIntent }: PlansWindowPageProps) {
   }, [refreshSnapshot, signature])
 
   if (loading && !snapshot) {
-    return <div className="app-shell loading-shell">Loading plans window...</div>
+    return (
+      <WindowShell
+        className="plans-window-frame"
+        contentClassName="plans-window-content"
+        density="compact"
+        titlebar={<WindowTitlebar title="Plans" />}
+      >
+        <div className="loading-shell plans-window-loading">Loading plans window...</div>
+      </WindowShell>
+    )
   }
 
   if (!snapshot) {
-    return <div className="app-shell loading-shell">Failed to load plans window: {error ?? 'missing snapshot'}</div>
+    return (
+      <WindowShell
+        className="plans-window-frame"
+        contentClassName="plans-window-content"
+        density="compact"
+        titlebar={<WindowTitlebar title="Plans" />}
+      >
+        <div className="loading-shell plans-window-loading">
+          Failed to load plans window: {error ?? 'missing snapshot'}
+        </div>
+      </WindowShell>
+    )
   }
 
-  return <SchedulerPage initialIntent={{ ...activeIntent }} key={`${intentRevision}:${signature}`} />
+  return (
+    <WindowShell
+      className="plans-window-frame"
+      contentClassName="plans-window-content"
+      density="compact"
+      titlebar={<WindowTitlebar title="Plans" />}
+    >
+      <SchedulerPage initialIntent={{ ...activeIntent }} key={`${intentRevision}:${signature}`} />
+    </WindowShell>
+  )
 }

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { CSSProperties } from 'react'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { convertFileSrc } from '@tauri-apps/api/core'
+import { getCurrentWindow } from '@tauri-apps/api/window'
 import {
   deleteSourceMedia,
   loadMediaThumbnails,
@@ -15,6 +16,8 @@ import {
 } from '../../bridge/desktop'
 import { DEFAULT_PROVIDER_CATALOG } from '../../domain/defaults'
 import type { MediaGalleryPost, ProviderKey, SourceMediaGallery } from '../../domain/models'
+import { WindowShell } from '../brand/WindowShell'
+import { WindowTitlebar } from '../brand/WindowTitlebar'
 import { MediaCard } from './MediaCard'
 import { MediaLightbox } from './MediaLightbox'
 
@@ -274,6 +277,19 @@ const ROW_OVERSCAN = 3
 /** Quantos thumbnails de vídeo pedir ao backend por lote. */
 const THUMBNAIL_BATCH = 32
 
+function profileWindowTitle(handle?: string, provider?: ProviderKey): string {
+  if (!handle) return 'Profile View'
+  const clean = handle.replace(/^@/, '')
+  if (!provider) return `${clean} · Profile View`
+  return `${clean} · ${providerDisplayName(provider)}`
+}
+
+function isEditableKeyboardTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false
+  const tag = target.tagName
+  return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || target.isContentEditable
+}
+
 /** Uma linha virtual: cabeçalho de grupo (dia/autor) ou uma fileira de cards. */
 type VirtualRow =
   | { type: 'header'; key: string; label: string; count: number; plain?: boolean }
@@ -377,6 +393,18 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
     if (likesSearchOpen) likesSearchInputRef.current?.focus()
   }, [likesSearchOpen])
 
+  // Título nativo (Alt+Tab) e da titlebar compartilham a identidade do perfil.
+  useEffect(() => {
+    const title = profileWindowTitle(gallery?.handle, gallery?.provider)
+    try {
+      void getCurrentWindow()
+        .setTitle(title)
+        .catch(() => undefined)
+    } catch {
+      /* browser / test harness without Tauri */
+    }
+  }, [gallery?.handle, gallery?.provider])
+
   const load = useCallback(async (id: string) => {
     setLoading(true)
     setError(undefined)
@@ -456,6 +484,21 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
       }
     }
     return sortSections([...present])
+  }, [gallery])
+
+  // Contagens por chip — espelham a lógica de filtro (Highlights = posts com álbum).
+  const sectionCounts = useMemo(() => {
+    const counts = new Map<string, number>()
+    if (!gallery) return counts
+    counts.set(SECTION_FILTER_ALL, gallery.posts.length)
+    let highlights = 0
+    for (const post of gallery.posts) {
+      const section = post.section || 'timeline'
+      counts.set(section, (counts.get(section) ?? 0) + 1)
+      if ((post.albums?.length ?? 0) > 0) highlights += 1
+    }
+    if (highlights > 0) counts.set(HIGHLIGHTS_SECTION, highlights)
+    return counts
   }, [gallery])
 
   // Se o filtro aponta para uma seção que sumiu (troca de perfil), volta a "all".
@@ -597,15 +640,14 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
     return () => observer.disconnect()
   }, [gallery])
 
-  // Colunas e altura da linha, derivadas da largura medida e da densidade. A
-  // fórmula das colunas espelha a do CSS grid `minmax(min, 1fr)` do browser.
+  // Colunas pela densidade (thumbs com largura fixa, alinhados à esquerda —
+  // poucos itens não esticam para preencher a janela).
   const gridMetrics = useMemo(() => {
     const min = DENSITY_STEPS[densityIndex]
     const width = containerWidth
     if (width <= 0) return { cols: 1, rowHeight: Math.round(min * THUMB_ASPECT + GRID_GAP_PX) }
     const cols = Math.max(1, Math.floor((width + GRID_GAP_PX) / (min + GRID_GAP_PX)))
-    const cellWidth = (width - (cols - 1) * GRID_GAP_PX) / cols
-    return { cols, rowHeight: Math.round(cellWidth * THUMB_ASPECT + GRID_GAP_PX) }
+    return { cols, rowHeight: Math.round(min * THUMB_ASPECT + GRID_GAP_PX) }
   }, [containerWidth, densityIndex])
 
   // Achata o conteúdo do modo atual (grid, day ou user) em linhas virtuais.
@@ -911,6 +953,62 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
     selectAnchorRef.current = null
   }, [])
 
+  // Escape: lightbox (MediaLightbox) → confirm → select → sort/search → window close.
+  // Capture phase + stopImmediatePropagation impede o entrypoint de fechar cedo.
+  useEffect(() => {
+    const handler = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return
+      if (lightboxOpenRef.current) return
+      if (confirmPosts && confirmPosts.length > 0) {
+        if (deleting) {
+          event.preventDefault()
+          event.stopImmediatePropagation()
+          return
+        }
+        event.preventDefault()
+        event.stopImmediatePropagation()
+        setConfirmPosts(undefined)
+        return
+      }
+      if (selectMode) {
+        event.preventDefault()
+        event.stopImmediatePropagation()
+        exitSelectMode()
+        return
+      }
+      if (sortMenuOpen) {
+        event.preventDefault()
+        event.stopImmediatePropagation()
+        setSortMenuOpen(false)
+        return
+      }
+      if (likesSearchOpen) {
+        event.preventDefault()
+        event.stopImmediatePropagation()
+        setLikesQuery('')
+        setLikesSearchOpen(false)
+      }
+    }
+    document.addEventListener('keydown', handler, true)
+    return () => document.removeEventListener('keydown', handler, true)
+  }, [confirmPosts, deleting, selectMode, sortMenuOpen, likesSearchOpen, exitSelectMode])
+
+  // Atalhos de operador: S = select mode (fora de campos editáveis / overlays).
+  useEffect(() => {
+    const handler = (event: KeyboardEvent) => {
+      if (isEditableKeyboardTarget(event.target)) return
+      if (lightboxOpenRef.current || (confirmPosts && confirmPosts.length > 0)) return
+      if (event.key === 's' || event.key === 'S') {
+        if (event.ctrlKey || event.metaKey || event.altKey) return
+        event.preventDefault()
+        if (selectMode) exitSelectMode()
+        else setSelectMode(true)
+      }
+    }
+    document.addEventListener('keydown', handler)
+    return () => document.removeEventListener('keydown', handler)
+  }, [confirmPosts, selectMode, exitSelectMode])
+
   const selectedPosts = useMemo(
     () => sortedPosts.filter((post) => selectedKeys.has(postKey(post))),
     [sortedPosts, selectedKeys],
@@ -957,6 +1055,43 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
         ? 'Newest'
         : 'Oldest'
   const sortControlLabel = `${sortFieldLabel}: ${sortDirectionLabel}`
+  const densityLevelLabel = `${densityIndex + 1}/${DENSITY_STEPS.length}`
+  const handleDisplay = gallery?.handle?.replace(/^@/, '') ?? ''
+  const titlebarTitle = handleDisplay
+    ? `@${handleDisplay}`
+    : 'Profile View'
+  const titlebarStatus = gallery
+    ? loading
+      ? 'Loading…'
+      : sortedPosts.length === gallery.posts.length
+        ? `${gallery.posts.length} posts · ${totalMedia} files`
+        : `${sortedPosts.length} of ${gallery.posts.length} posts`
+    : loading
+      ? 'Loading…'
+      : undefined
+  const activeSectionLabel =
+    sectionFilter === SECTION_FILTER_ALL || !gallery
+      ? undefined
+      : sectionLabel(gallery.provider, sectionFilter)
+  const filteredEmpty =
+    !!gallery && gallery.posts.length > 0 && sortedPosts.length === 0
+
+  // Sticky group header for virtualized day/user modes (absolute rows can't sticky natively).
+  const stickyGroupHeader = useMemo(() => {
+    if (!isVirtualized || effectiveMode === 'grid' || virtualItems.length === 0) return null
+    const firstVisible = virtualItems[0]?.index ?? 0
+    let header: Extract<VirtualRow, { type: 'header' }> | null = null
+    for (let i = 0; i <= firstVisible; i++) {
+      const row = virtualRows[i]
+      if (row?.type === 'header') header = row
+    }
+    if (!header) return null
+    // Hide when the live header row is the topmost visible item (avoid double label).
+    if (virtualRows[firstVisible]?.type === 'header' && (virtualItems[0]?.start ?? 0) <= 2) {
+      return null
+    }
+    return header
+  }, [isVirtualized, effectiveMode, virtualItems, virtualRows])
 
   const renderCard = (post: MediaGalleryPost, key: string) => {
     const thumb = post.files[0]
@@ -990,7 +1125,8 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
         isVideo={video}
         slideshowCount={post.mediaType === 'slideshow' ? post.files.length : undefined}
         badge={
-          post.section && post.section !== 'timeline'
+          // Com filtro de seção ativo o badge só repete o chip — mostre só em All.
+          sectionFilter === SECTION_FILTER_ALL && post.section && post.section !== 'timeline'
             ? gallery
               ? sectionLabel(gallery.provider, post.section)
               : post.section
@@ -1030,7 +1166,22 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
   const hasMedia = !!gallery && gallery.posts.length > 0
 
   return (
-    <div className="profile-view-shell">
+    <WindowShell
+      className="profile-view-window-shell"
+      contentClassName="profile-view-window-content"
+      density="compact"
+      titlebar={
+        <WindowTitlebar
+          title={titlebarTitle}
+          trailing={
+            titlebarStatus ? (
+              <span className="window-titlebar-status-meta">{titlebarStatus}</span>
+            ) : undefined
+          }
+        />
+      }
+    >
+      <div className="profile-view-shell">
       <header className="profile-view-header">
         <span className="profile-view-avatar" aria-hidden="true">
           {avatarPath ? (
@@ -1050,7 +1201,10 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
                   {providerDisplayName(gallery.provider)}
                 </span>
                 <span className="muted-text">
-                  {gallery.posts.length} post{gallery.posts.length === 1 ? '' : 's'} · {totalMedia} file{totalMedia === 1 ? '' : 's'}
+                  {gallery.posts.length} post{gallery.posts.length === 1 ? '' : 's'}
+                  {' · '}
+                  {totalMedia} file{totalMedia === 1 ? '' : 's'}
+                  {activeSectionLabel ? ` · ${activeSectionLabel}` : ''}
                 </span>
               </>
             ) : null}
@@ -1079,12 +1233,34 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
                   <path d="M20 11a8 8 0 1 0-2.34 5.66M20 4v7h-7" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
                 </svg>
               )}
-              <span>{statsRefreshState === 'queueing' ? 'Queueing…' : statsRefreshState === 'queued' ? 'Queued' : 'Refresh stats'}</span>
+              <span className="profile-view-header-action-label">
+                {statsRefreshState === 'queueing'
+                  ? 'Queueing…'
+                  : statsRefreshState === 'queued'
+                    ? 'Queued'
+                    : 'Refresh stats'}
+              </span>
             </button>
           ) : null}
           {gallery?.profileUrl ? (
-            <button className="ghost-button profile-view-header-action" onClick={handleOpenProfileOnline} type="button">
-              Open profile online
+            <button
+              className="ghost-button profile-view-header-action profile-view-open-online"
+              onClick={handleOpenProfileOnline}
+              type="button"
+              aria-label="Open profile online"
+              title="Open profile online"
+            >
+              <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true" focusable="false">
+                <path
+                  d="M14 4h6v6M20 4l-9 9M12 6H7a3 3 0 0 0-3 3v8a3 3 0 0 0 3 3h8a3 3 0 0 0 3-3v-5"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="1.8"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+              </svg>
+              <span className="profile-view-header-action-label">Open profile online</span>
             </button>
           ) : null}
         </div>
@@ -1166,7 +1342,7 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
                         type="button"
                         aria-pressed={highlightsMode === 'grid'}
                       >
-                        All media
+                        Flat grid
                       </button>
                     </>
                   ) : isAuthorTab ? (
@@ -1195,7 +1371,7 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
                         type="button"
                         aria-pressed={likesMode === 'grid'}
                       >
-                        All media
+                        Flat grid
                       </button>
                     </>
                   ) : (
@@ -1214,7 +1390,7 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
                         type="button"
                         aria-pressed={viewMode === 'grid'}
                       >
-                        All media
+                        Flat grid
                       </button>
                     </>
                   )}
@@ -1226,20 +1402,32 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
                       onClick={() => setSectionFilter(SECTION_FILTER_ALL)}
                       type="button"
                       aria-pressed={sectionFilter === SECTION_FILTER_ALL}
+                      aria-label={`All ${sectionCounts.get(SECTION_FILTER_ALL) ?? 0}`}
                     >
-                      All
+                      <span className="profile-view-section-label">All</span>
+                      <span className="profile-view-section-count" aria-hidden="true">
+                        {sectionCounts.get(SECTION_FILTER_ALL) ?? 0}
+                      </span>
                     </button>
-                    {sections.map((section) => (
-                      <button
-                        key={section}
-                        className={sectionFilter === section ? 'is-active' : ''}
-                        onClick={() => setSectionFilter(section)}
-                        type="button"
-                        aria-pressed={sectionFilter === section}
-                      >
-                        {gallery ? sectionLabel(gallery.provider, section) : section}
-                      </button>
-                    ))}
+                    {sections.map((section) => {
+                      const label = gallery ? sectionLabel(gallery.provider, section) : section
+                      const count = sectionCounts.get(section) ?? 0
+                      return (
+                        <button
+                          key={section}
+                          className={sectionFilter === section ? 'is-active' : ''}
+                          onClick={() => setSectionFilter(section)}
+                          type="button"
+                          aria-pressed={sectionFilter === section}
+                          aria-label={`${label} ${count}`}
+                        >
+                          <span className="profile-view-section-label">{label}</span>
+                          <span className="profile-view-section-count" aria-hidden="true">
+                            {count}
+                          </span>
+                        </button>
+                      )
+                    })}
                   </div>
                 ) : null}
               </div>
@@ -1323,7 +1511,7 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
                       strokeLinejoin="round"
                     />
                   </svg>
-                  <span>{sortControlLabel}</span>
+                  <span className="profile-view-sort-label">{sortControlLabel}</span>
                 </button>
                 {sortMenuOpen ? (
                   <div className="profile-view-sort-menu" role="menu">
@@ -1405,6 +1593,13 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
                 >
                   −
                 </button>
+                <span
+                  className="profile-view-density-level"
+                  title={`Thumbnail size ${densityLevelLabel}`}
+                  aria-label={`Thumbnail size ${densityLevelLabel}`}
+                >
+                  {densityLevelLabel}
+                </span>
                 <button
                   className="ghost-button queue-icon-button"
                   onClick={() => setDensityIndex((index) => Math.min(DENSITY_STEPS.length - 1, index + 1))}
@@ -1421,6 +1616,7 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
                 onClick={() => setSelectMode(true)}
                 type="button"
                 aria-pressed={false}
+                title="Select media (S)"
               >
                 Select
               </button>
@@ -1430,14 +1626,47 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
         </div>
       ) : null}
 
-      {error ? <div className="runtime-log-window-error">{error}</div> : null}
+      {error ? <div className="profile-view-banner profile-view-banner-error" role="alert">{error}</div> : null}
 
       {loading && !gallery ? (
-        <div className="runtime-log-window-empty">Loading media…</div>
+        <div className="profile-view-empty" role="status">
+          <span className="profile-view-empty-title">Loading media…</span>
+          <span className="muted-text">Fetching the local gallery for this profile.</span>
+        </div>
       ) : gallery && gallery.posts.length === 0 ? (
-        <div className="runtime-log-window-empty">No downloaded media found for this profile.</div>
+        <div className="profile-view-empty" role="status">
+          <span className="profile-view-empty-title">No downloaded media</span>
+          <span className="muted-text">Sync this profile to download posts into the local gallery.</span>
+        </div>
+      ) : filteredEmpty ? (
+        <div className="profile-view-empty" role="status">
+          <span className="profile-view-empty-title">
+            {activeSectionLabel
+              ? `No ${activeSectionLabel} media`
+              : likesQuery.trim()
+                ? 'No matches'
+                : 'No media in this view'}
+          </span>
+          <span className="muted-text">
+            {likesQuery.trim()
+              ? 'Try another author or clear the search.'
+              : activeSectionLabel
+                ? `Nothing downloaded in ${activeSectionLabel} yet — switch to All or pick another section.`
+                : 'Adjust filters to see more media.'}
+          </span>
+        </div>
       ) : (
         <div className="profile-view-days" ref={scrollRef}>
+          {stickyGroupHeader ? (
+            <div className="profile-view-sticky-header" aria-hidden="true">
+              <span className="profile-view-day-title">
+                <span className={stickyGroupHeader.plain ? 'eyebrow profile-view-user-title' : 'eyebrow'}>
+                  {stickyGroupHeader.label}
+                </span>
+                <span className="pill">{stickyGroupHeader.count}</span>
+              </span>
+            </div>
+          ) : null}
           {!isVirtualized ? (
             albums.map((album) => (
               <section className="profile-view-day profile-view-album" key={album.key}>
@@ -1536,6 +1765,9 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
                 {deleting ? 'Deleting…' : 'Delete'}
               </button>
             </div>
+            <p className="profile-view-confirm-hint muted-text">
+              Tip: in the lightbox, Shift+Delete skips this dialog.
+            </p>
           </div>
         </div>
       ) : null}
@@ -1580,6 +1812,7 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
           }
         />
       ) : null}
-    </div>
+      </div>
+    </WindowShell>
   )
 }

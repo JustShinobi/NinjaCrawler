@@ -205,7 +205,7 @@ describe('App search shortcut', () => {
     expect(toolsWithin.getByRole('button', { name: 'Scheduler' })).toBeTruthy()
     expect(toolsWithin.getByRole('button', { name: 'Runtime log' })).toBeTruthy()
     expect(toolsWithin.getByRole('button', { name: 'Connectors' })).toBeTruthy()
-    expect(toolsWithin.getByRole('button', { name: 'Settings' })).toBeTruthy()
+    expect(toolsWithin.getByRole('button', { name: 'Preferences' })).toBeTruthy()
 
     const toolbar = document.querySelector('.toolbar-strip')
     expect(toolbar).toBeTruthy()

@@ -26,11 +26,12 @@ import {
   type ProviderAccountSettingsCategoryKey,
   serializeProviderAccountSettingsDraft,
 } from './providerAccountSettings'
+import { WorkspacePolicyPanel } from './WorkspacePolicyPanel'
 
 const EMPTY_ACCOUNTS: ProviderAccount[] = []
 const EMPTY_ACCOUNT_SESSIONS: ProviderAccountSession[] = []
 
-type AccountsTabKey = 'account' | 'defaults' | 'provider'
+type AccountsTabKey = 'account' | 'defaults' | 'provider' | 'workspace'
 
 type PendingNavigation =
   | { kind: 'edit'; account: ProviderAccount }
@@ -40,10 +41,13 @@ const ACCOUNTS_TABS: Array<{
   key: AccountsTabKey
   label: string
   categories?: ProviderAccountSettingsCategoryKey[]
+  /** Workspace policy is global — available even with no account selected. */
+  always?: boolean
 }> = [
   { key: 'account', label: 'Account' },
   { key: 'defaults', label: 'Defaults', categories: ['defaults', 'extractVideo'] },
   { key: 'provider', label: 'Provider', categories: ['authorization', 'download', 'timers', 'errors'] },
+  { key: 'workspace', label: 'Workspace', always: true },
 ]
 
 const PRESET_SCOPE_OPTIONS: Array<{ key: keyof InstagramSourceSyncPreset['sections']; label: string }> = [
@@ -1115,6 +1119,17 @@ export function AccountsPage({
                   </div>
                 </section>
               ) : null}
+            </section>
+          ) : null}
+
+          {activeTab === 'workspace' ? (
+            <section
+              aria-labelledby="accounts-tab-button-workspace"
+              className="accounts-tab-panel"
+              id="accounts-tab-workspace"
+              role="tabpanel"
+            >
+              <WorkspacePolicyPanel />
             </section>
           ) : null}
         </form>
