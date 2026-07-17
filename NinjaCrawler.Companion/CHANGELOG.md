@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.18.0](https://github.com/JustShinobi/NinjaCrawler/compare/companion-v0.17.1...companion-v0.18.0) (2026-07-17)
+
+
+### Features
+
+* **companion:** support automated updates and improve story detection ([#66](https://github.com/JustShinobi/NinjaCrawler/issues/66)) ([30cbbc7](https://github.com/JustShinobi/NinjaCrawler/commit/30cbbc73306394982918fdb81e70c780c73ad448))
+
 ## [0.17.1](https://github.com/JustShinobi/NinjaCrawler/compare/companion-v0.17.0...companion-v0.17.1) (2026-07-16)
 
 
