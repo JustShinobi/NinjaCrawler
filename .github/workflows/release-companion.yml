@@ -101,7 +101,13 @@ jobs:
               throw "Companion release asset upload failed."
             }
 
-            $releaseId = & gh api "repos/$env:GH_REPO/releases/tags/$env:RELEASE_TAG" --jq '.id'
+            # The REST endpoint that resolves a release by tag returns 404 for
+            # drafts. gh release view can see authenticated drafts and exposes
+            # the REST database id needed for the atomic publish PATCH.
+            $releaseId = & gh release view $env:RELEASE_TAG `
+              --repo $env:GH_REPO `
+              --json databaseId `
+              --jq '.databaseId'
             if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($releaseId)) {
               throw "Could not resolve Companion release id for $env:RELEASE_TAG."
             }
@@ -297,7 +303,7 @@ jobs:
             throw "Companion README update PR is missing required checks: $($missingChecks -join ', ')."
           }
 
-          gh pr merge $pr --repo ${{ github.repository }} --squash --delete-branch `
+          gh pr merge $pr --repo ${{ github.repository }} --merge --delete-branch `
             --subject "docs(readme): update Companion download links for $env:RELEASE_TAG" `
             --body "[skip ci]"
           if ($LASTEXITCODE -ne 0) {

@@ -442,7 +442,8 @@ foreach ($requiredFragment in @(
 }
 
 foreach ($requiredFragment in @(
-    'repos/$env:GH_REPO/releases/tags/$env:RELEASE_TAG',
+    'gh release view $env:RELEASE_TAG',
+    '--json databaseId',
     'repos/$env:GH_REPO/releases/$releaseId',
     "'--field', 'make_latest=false'",
     "'--latest=false'"
@@ -454,6 +455,9 @@ foreach ($requiredFragment in @(
 
 if ($companionReleaseWorkflow.Contains("'release', 'edit'")) {
     throw 'Companion draft publication must use the Releases API so make_latest=false is applied atomically.'
+}
+if ($companionReleaseWorkflow.Contains('releases/tags/$env:RELEASE_TAG')) {
+    throw 'Companion draft publication must not resolve draft releases through the REST tag endpoint.'
 }
 
 foreach ($requiredFragment in @(
@@ -499,6 +503,12 @@ if ($appReleaseWorkflow.Contains('gh pr merge $pr --repo ${{ github.repository }
 }
 if (-not $appReleaseWorkflow.Contains('gh pr merge $pr --repo ${{ github.repository }} --merge')) {
     throw "App README automation must use gh pr merge --merge."
+}
+if ($companionReleaseWorkflow.Contains('gh pr merge $pr --repo ${{ github.repository }} --squash')) {
+    throw "Companion README automation must not use gh pr merge --squash (main ruleset is merge-only)."
+}
+if (-not $companionReleaseWorkflow.Contains('gh pr merge $pr --repo ${{ github.repository }} --merge')) {
+    throw "Companion README automation must use gh pr merge --merge."
 }
 
 foreach ($requiredFragment in @(
