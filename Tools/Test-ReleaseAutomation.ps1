@@ -18,6 +18,7 @@ $cargoLockPath = Join-Path $repoRoot "src-tauri\Cargo.lock"
 $buildScriptPath = Join-Path $repoRoot "Tools\Build-NinjaCrawler.ps1"
 $ciBuildImpactTestPath = Join-Path $repoRoot "Tools\Test-CIBuildImpact.ps1"
 $versionTestPath = Join-Path $repoRoot "Tools\Test-NinjaCrawlerVersion.ps1"
+$changelogTestPath = Join-Path $repoRoot "Tools\Test-NinjaCrawlerChangelog.ps1"
 $config = Get-Content -LiteralPath $configPath -Raw | ConvertFrom-Json
 $companionConfig = Get-Content -LiteralPath $companionConfigPath -Raw | ConvertFrom-Json
 $workflow = Get-Content -LiteralPath $workflowPath -Raw
@@ -527,6 +528,11 @@ foreach ($requiredFragment in @(
 & $ciBuildImpactTestPath
 if ($LASTEXITCODE -ne 0) {
     throw "CI build-impact tests failed."
+}
+
+& $changelogTestPath
+if ($LASTEXITCODE -ne 0) {
+    throw "NinjaCrawler changelog tests failed."
 }
 
 Write-Host "Release automation configuration tests passed."
