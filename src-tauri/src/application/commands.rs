@@ -13,8 +13,8 @@ use crate::domain::models::{
     SyncPlanUpsert, WorkspaceSnapshot,
 };
 use crate::infrastructure::{
-    app_update, connector_debug, connector_runtime, desktop_runtime, import_runtime,
-    media_path_migration_runtime, media_thumbnail_runtime, single_video_runtime,
+    app_update, companion_install, connector_debug, connector_runtime, desktop_runtime,
+    import_runtime, media_path_migration_runtime, media_thumbnail_runtime, single_video_runtime,
     source_delete_runtime, source_sync_runtime, workspace_repository,
 };
 
@@ -36,6 +36,18 @@ pub async fn check_app_update() -> Result<AppUpdateStatus, String> {
     tauri::async_runtime::spawn_blocking(app_update::check_app_update)
         .await
         .map_err(|error| format!("Update check task failed: {error}"))?
+}
+
+#[tauri::command]
+pub fn get_companion_install_status() -> Result<companion_install::CompanionInstallStatus, String> {
+    companion_install::managed_install_status()
+}
+
+#[tauri::command]
+pub async fn install_companion() -> Result<companion_install::CompanionInstallStatus, String> {
+    tauri::async_runtime::spawn_blocking(companion_install::install_managed_companion)
+        .await
+        .map_err(|error| format!("Companion install worker failed: {error}"))?
 }
 
 #[tauri::command]

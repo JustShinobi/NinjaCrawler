@@ -5,7 +5,7 @@
 
 ### Bug Fixes
 
-* **companion:** stop treating Instagram highlights as [@highlights](https://github.com/highlights) ([#52](https://github.com/JustShinobi/NinjaCrawler/issues/52)) ([a09e365](https://github.com/JustShinobi/NinjaCrawler/commit/a09e36584287b9962d644361ef48c544a61cbaa0))
+* **companion:** stop treating Instagram highlights as `@highlights` ([#52](https://github.com/JustShinobi/NinjaCrawler/issues/52)) ([a09e365](https://github.com/JustShinobi/NinjaCrawler/commit/a09e36584287b9962d644361ef48c544a61cbaa0))
 
 ## [0.17.0](https://github.com/JustShinobi/NinjaCrawler/compare/companion-v0.16.0...companion-v0.17.0) (2026-07-16)
 

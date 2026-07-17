@@ -240,6 +240,14 @@ export interface ConnectorRuntimeStatus {
   activePath?: string
 }
 
+export interface CompanionInstallStatus {
+  installPath: string
+  stagedVersion?: string
+  availableVersion: string
+  updateReady: boolean
+  downloadUrl: string
+}
+
 export interface ImportProviderDescriptor {
   key: ProviderKey
   displayName: string

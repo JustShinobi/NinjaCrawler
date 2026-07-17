@@ -18,6 +18,7 @@ $cargoLockPath = Join-Path $repoRoot "src-tauri\Cargo.lock"
 $buildScriptPath = Join-Path $repoRoot "Tools\Build-NinjaCrawler.ps1"
 $ciBuildImpactTestPath = Join-Path $repoRoot "Tools\Test-CIBuildImpact.ps1"
 $versionTestPath = Join-Path $repoRoot "Tools\Test-NinjaCrawlerVersion.ps1"
+$changelogTestPath = Join-Path $repoRoot "Tools\Test-NinjaCrawlerChangelog.ps1"
 $config = Get-Content -LiteralPath $configPath -Raw | ConvertFrom-Json
 $companionConfig = Get-Content -LiteralPath $companionConfigPath -Raw | ConvertFrom-Json
 $workflow = Get-Content -LiteralPath $workflowPath -Raw
@@ -441,6 +442,35 @@ foreach ($requiredFragment in @(
 }
 
 foreach ($requiredFragment in @(
+    'repos/$env:GH_REPO/releases/tags/$env:RELEASE_TAG',
+    'repos/$env:GH_REPO/releases/$releaseId',
+    "'--field', 'make_latest=false'",
+    "'--latest=false'"
+)) {
+    if (-not $companionReleaseWorkflow.Contains($requiredFragment)) {
+        throw "Companion release workflow can replace the desktop app as Latest: $requiredFragment"
+    }
+}
+
+if ($companionReleaseWorkflow.Contains("'release', 'edit'")) {
+    throw 'Companion draft publication must use the Releases API so make_latest=false is applied atomically.'
+}
+
+foreach ($requiredFragment in @(
+    'Mirror Companion asset into latest NinjaCrawler release',
+    'repos/$env:GH_REPO/releases/latest',
+    "'^v\d+\.\d+\.\d+$'",
+    '$latest.immutable',
+    'Update-NinjaCrawlerReleaseCompanionMetadata.ps1',
+    'gh release upload $latest.tag_name @mirrorAssets',
+    'gh release delete-asset $latest.tag_name $staleAsset'
+)) {
+    if (-not $companionReleaseWorkflow.Contains($requiredFragment)) {
+        throw "Companion release workflow is missing latest app asset mirroring: $requiredFragment"
+    }
+}
+
+foreach ($requiredFragment in @(
     "EVENT_PR_NUMBER: `${{ github.event.pull_request.number || '' }}",
     'if [ "$EVENT_NAME" = "pull_request" ]; then',
     'pr="$EVENT_PR_NUMBER"',
@@ -498,6 +528,11 @@ foreach ($requiredFragment in @(
 & $ciBuildImpactTestPath
 if ($LASTEXITCODE -ne 0) {
     throw "CI build-impact tests failed."
+}
+
+& $changelogTestPath
+if ($LASTEXITCODE -ne 0) {
+    throw "NinjaCrawler changelog tests failed."
 }
 
 Write-Host "Release automation configuration tests passed."

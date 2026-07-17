@@ -20,6 +20,7 @@ import type {
   AuthMode,
   AuthState,
   ConnectorRuntimeStatus,
+  CompanionInstallStatus,
   ConnectorDebugEntry,
   ConnectorDebugEventType,
   ConnectorDebugQuery,
@@ -1706,6 +1707,17 @@ function normalizeConnectorRuntimeStatus(value: unknown): ConnectorRuntimeStatus
   }
 }
 
+function normalizeCompanionInstallStatus(value: unknown): CompanionInstallStatus {
+  const record = isRecord(value) ? value : {}
+  return {
+    installPath: stringValue(record, ['installPath', 'install_path'], ''),
+    stagedVersion: optionalStringValue(record, ['stagedVersion', 'staged_version']),
+    availableVersion: stringValue(record, ['availableVersion', 'available_version'], 'unknown'),
+    updateReady: booleanValue(record, ['updateReady', 'update_ready'], false),
+    downloadUrl: stringValue(record, ['downloadUrl', 'download_url'], ''),
+  }
+}
+
 function normalizeImportProblem(value: unknown): ImportProblem | null {
   if (!isRecord(value)) {
     return null
@@ -2186,6 +2198,20 @@ export async function setDesktopSilentMode(enabled: boolean): Promise<WorkspaceS
 
 export async function prepareConnectorRuntimes(): Promise<WorkspaceSnapshot> {
   return invokeWorkspaceCommand('prepare_connector_runtimes')
+}
+
+export async function getCompanionInstallStatus(): Promise<CompanionInstallStatus> {
+  return normalizeCompanionInstallStatus(await invoke<unknown>('get_companion_install_status'))
+}
+
+export async function installCompanion(): Promise<CompanionInstallStatus> {
+  return normalizeCompanionInstallStatus(await invoke<unknown>('install_companion'))
+}
+
+export async function openCompanionInstallFolder(path: string): Promise<void> {
+  if (path.trim().length > 0) {
+    await openPath(path)
+  }
 }
 
 export async function checkConnectorUpdates(key?: string): Promise<ConnectorRuntimeStatus[]> {

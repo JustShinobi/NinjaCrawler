@@ -184,6 +184,56 @@ try {
         throw "App SHA256SUMS.txt must include the co-shipped Companion ZIP."
     }
 
+    # Companion-only releases must refresh the latest app release metadata
+    # without invalidating checksums or leaving the old version referenced.
+    $mirrorCompanionVersion = "9.9.9"
+    $mirrorAssetName = "NinjaCrawler-Companion-$mirrorCompanionVersion.zip"
+    $mirrorAssetPath = Join-Path $testOutputPath $mirrorAssetName
+    $mirrorChangelogPath = Join-Path $testOutputPath "CHANGELOG.mirror-test.md"
+    $mirrorChecksumPath = Join-Path $testOutputPath "SHA256SUMS.mirror-test.txt"
+    Set-Content -LiteralPath $mirrorAssetPath -Value "new companion fixture"
+    Set-Content -LiteralPath $mirrorChangelogPath -Value @(
+        "# NinjaCrawler fixture"
+        ""
+        "This desktop release includes **NinjaCrawler Companion 1.2.3** (NinjaCrawler-Companion-1.2.3.zip)."
+        "Companion-only updates continue to ship under independent companion-vX.Y.Z tags."
+    )
+    Set-Content -LiteralPath $mirrorChecksumPath -Value @(
+        "aaaaaaaa  NinjaCrawler-9.8.7-windows-x64-portable.exe"
+        "bbbbbbbb  CHANGELOG.md"
+        "cccccccc  NinjaCrawler-Companion-1.2.3.zip"
+    )
+
+    & (Join-Path $PSScriptRoot "Update-NinjaCrawlerReleaseCompanionMetadata.ps1") `
+        -CompanionVersion $mirrorCompanionVersion `
+        -CompanionAssetPath $mirrorAssetPath `
+        -ChangelogPath $mirrorChangelogPath `
+        -ChecksumPath $mirrorChecksumPath
+
+    $mirrorChangelog = Get-Content -LiteralPath $mirrorChangelogPath -Raw
+    if (-not $mirrorChangelog.Contains("provides **NinjaCrawler Companion $mirrorCompanionVersion** ($mirrorAssetName) as its current Companion asset.")) {
+        throw "Latest app release changelog was not updated to the mirrored Companion version."
+    }
+    if ($mirrorChangelog.Contains("NinjaCrawler Companion 1.2.3")) {
+        throw "Latest app release changelog still references the stale Companion version."
+    }
+
+    $mirrorChecksums = @(Get-Content -LiteralPath $mirrorChecksumPath)
+    $mirrorCompanionHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $mirrorAssetPath).Hash.ToLowerInvariant()
+    $mirrorChangelogHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $mirrorChangelogPath).Hash.ToLowerInvariant()
+    foreach ($expectedChecksum in @(
+        "aaaaaaaa  NinjaCrawler-9.8.7-windows-x64-portable.exe",
+        "$mirrorChangelogHash  CHANGELOG.md",
+        "$mirrorCompanionHash  $mirrorAssetName"
+    )) {
+        if ($mirrorChecksums -notcontains $expectedChecksum) {
+            throw "Mirrored release checksum is missing: '$expectedChecksum'."
+        }
+    }
+    if (@($mirrorChecksums | Where-Object { $_ -match 'NinjaCrawler-Companion-1\.2\.3\.zip$' }).Count -ne 0) {
+        throw "Latest app release checksums still reference the stale Companion asset."
+    }
+
     # -SkipCompanion remains available for local app-only packaging.
     & (Join-Path $PSScriptRoot "Package-NinjaCrawlerRelease.ps1") `
         -Version "9.8.7" `

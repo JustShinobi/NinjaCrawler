@@ -46,6 +46,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             application::commands::get_app_build_info,
             application::commands::check_app_update,
+            application::commands::get_companion_install_status,
+            application::commands::install_companion,
             application::commands::bootstrap_workspace,
             application::commands::prepare_connector_runtimes,
             application::commands::check_connector_updates,

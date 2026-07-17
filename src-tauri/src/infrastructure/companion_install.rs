@@ -14,6 +14,7 @@ use zip::ZipArchive;
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 const ARCHIVE_ROOT: &str = "NinjaCrawler-Companion";
+const GITHUB_RELEASES_URL: &str = "https://github.com/MetalDevOps/NinjaCrawler/releases";
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -25,12 +26,42 @@ pub struct CompanionInstallStatus {
     pub download_url: String,
 }
 
+pub fn managed_install_status() -> Result<CompanionInstallStatus, String> {
+    let available_version = bundled_companion_version();
+    let download_url = companion_download_url(&available_version);
+    install_status(&available_version, &download_url)
+}
+
+pub fn install_managed_companion() -> Result<CompanionInstallStatus, String> {
+    let available_version = bundled_companion_version();
+    let download_url = companion_download_url(&available_version);
+    stage_update(&available_version, &download_url)
+}
+
+pub fn bundled_companion_version() -> String {
+    serde_json::from_str::<serde_json::Value>(include_str!(
+        "../../../NinjaCrawler.Companion/manifest.json"
+    ))
+    .ok()
+    .and_then(|manifest| manifest.get("version")?.as_str().map(str::to_string))
+    .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string())
+}
+
+pub fn companion_download_url(available_version: &str) -> String {
+    format!(
+        "{GITHUB_RELEASES_URL}/download/companion-v{available_version}/NinjaCrawler-Companion-{available_version}.zip"
+    )
+}
+
 pub fn companion_install_dir() -> Result<PathBuf, String> {
     let layout = storage::ensure_workspace_layout().map_err(|error| error.to_string())?;
     Ok(layout.root.join("Companion"))
 }
 
-pub fn install_status(available_version: &str, download_url: &str) -> Result<CompanionInstallStatus, String> {
+pub fn install_status(
+    available_version: &str,
+    download_url: &str,
+) -> Result<CompanionInstallStatus, String> {
     let install_path = companion_install_dir()?;
     let staged_version = read_staged_version(&install_path);
     let update_ready = staged_version
@@ -46,7 +77,10 @@ pub fn install_status(available_version: &str, download_url: &str) -> Result<Com
     })
 }
 
-pub fn stage_update(available_version: &str, download_url: &str) -> Result<CompanionInstallStatus, String> {
+pub fn stage_update(
+    available_version: &str,
+    download_url: &str,
+) -> Result<CompanionInstallStatus, String> {
     if available_version.trim().is_empty() {
         return Err("Available Companion version is unknown.".to_string());
     }
@@ -129,7 +163,10 @@ fn download_to_file(url: &str, destination: &Path) -> Result<(), String> {
         )
     })?;
     io::copy(&mut response, &mut file).map_err(|error| {
-        format!("Failed to write Companion archive '{}': {error}", temporary.display())
+        format!(
+            "Failed to write Companion archive '{}': {error}",
+            temporary.display()
+        )
     })?;
     file.flush().map_err(|error| error.to_string())?;
     drop(file);
@@ -270,7 +307,8 @@ mod tests {
         let mut buffer = Cursor::new(Vec::new());
         {
             let mut zip = zip::ZipWriter::new(&mut buffer);
-            let options = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
+            let options =
+                SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
             zip.start_file("NinjaCrawler-Companion/manifest.json", options)
                 .expect("start file");
             zip.write_all(br#"{"version":"0.99.0"}"#).expect("write");

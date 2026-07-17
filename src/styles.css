@@ -13490,6 +13490,26 @@ dialog.dialog-overlay::backdrop {
   border-color: var(--danger);
 }
 
+.companion-runtime-instructions {
+  margin: 0 0 0.5rem;
+  color: var(--muted-strong);
+  font-size: 0.78rem;
+}
+
+.companion-runtime-path {
+  display: block;
+  overflow: hidden;
+  padding: 0.55rem 0.65rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-code);
+  color: var(--ink);
+  font-family: var(--font-data);
+  font-size: 0.74rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .connector-path-error {
   margin-top: 0.4rem;
 }

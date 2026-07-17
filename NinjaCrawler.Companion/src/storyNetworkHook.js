@@ -9,8 +9,27 @@
 
   const writeCache = (payload) => {
     try {
-      document.documentElement?.setAttribute('data-nc-story-media', JSON.stringify(payload))
-      globalThis.dispatchEvent(new CustomEvent('nc-story-media', { detail: payload }))
+      let existing = null
+      const raw = document.documentElement?.getAttribute('data-nc-story-media')
+      if (raw) existing = JSON.parse(raw)
+      const sameHandle = existing?.handle
+        && String(existing.handle).toLowerCase() === String(payload.handle).toLowerCase()
+      const mergedItems = sameHandle && Array.isArray(existing?.items) ? [...existing.items] : []
+      for (const item of payload.items ?? []) {
+        const previous = mergedItems.find((entry) => entry.storyId === item.storyId)
+        if (previous) {
+          previous.mediaUrls = [...new Set([...(previous.mediaUrls ?? []), ...(item.mediaUrls ?? [])])]
+        } else {
+          mergedItems.push(item)
+        }
+      }
+      const merged = {
+        handle: payload.handle,
+        items: mergedItems.slice(-100),
+        mediaIds: mergedItems.slice(-100).map((item) => item.storyId),
+      }
+      document.documentElement?.setAttribute('data-nc-story-media', JSON.stringify(merged))
+      globalThis.dispatchEvent(new CustomEvent('nc-story-media', { detail: merged }))
     } catch {
       // Page may be tearing down.
     }
@@ -31,12 +50,33 @@
   const extract = (data) => {
     const byHandle = new Map()
 
+    const mediaUrlsOf = (item) => {
+      const urls = new Set()
+      const add = (value) => {
+        if (typeof value === 'string' && /^https?:\/\//i.test(value)) urls.add(value)
+      }
+      for (const candidate of item?.image_versions2?.candidates ?? []) add(candidate?.url)
+      for (const candidate of Object.values(item?.image_versions2?.additional_candidates ?? {})) add(candidate?.url)
+      for (const version of item?.video_versions ?? []) add(version?.url)
+      add(item?.display_url)
+      add(item?.thumbnail_url)
+      add(item?.video_url)
+      add(item?.image_url)
+      return [...urls]
+    }
+
     const addItem = (username, item) => {
       const handle = String(username || '').replace(/^@/, '').trim()
       const mediaId = mediaIdOf(item)
       if (!handle || !mediaId) return
       const list = byHandle.get(handle.toLowerCase()) ?? []
-      if (!list.includes(mediaId)) list.push(mediaId)
+      const existing = list.find((entry) => entry.storyId === mediaId)
+      const mediaUrls = mediaUrlsOf(item)
+      if (existing) {
+        existing.mediaUrls = [...new Set([...existing.mediaUrls, ...mediaUrls])]
+      } else {
+        list.push({ storyId: mediaId, mediaUrls })
+      }
       byHandle.set(handle.toLowerCase(), list)
       byHandle.set(`__name__:${handle.toLowerCase()}`, handle)
     }
@@ -79,17 +119,17 @@
 
     if (preferredHandle) {
       const key = preferredHandle.toLowerCase()
-      const mediaIds = byHandle.get(key)
-      if (mediaIds?.length) {
+      const items = byHandle.get(key)
+      if (items?.length) {
         const handle = byHandle.get(`__name__:${key}`) || preferredHandle
-        return { handle, mediaIds }
+        return { handle, items, mediaIds: items.map((item) => item.storyId) }
       }
     }
 
-    for (const [key, mediaIds] of byHandle.entries()) {
-      if (key.startsWith('__name__:') || !mediaIds?.length) continue
+    for (const [key, items] of byHandle.entries()) {
+      if (key.startsWith('__name__:') || !items?.length) continue
       const handle = byHandle.get(`__name__:${key}`) || key
-      return { handle, mediaIds }
+      return { handle, items, mediaIds: items.map((item) => item.storyId) }
     }
     return null
   }

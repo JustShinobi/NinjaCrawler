@@ -512,6 +512,35 @@ h2 {
   min-height: 30px;
 }
 
+.preference-toggle {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.preference-toggle input {
+  width: 16px;
+  height: 16px;
+  margin: 2px 0 0;
+  accent-color: var(--accent);
+}
+
+.preference-toggle span {
+  display: grid;
+  gap: 3px;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.preference-toggle small {
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 400;
+  line-height: 1.35;
+}
+
 .shortcut-list {
   display: grid;
   gap: 7px;
