@@ -442,7 +442,8 @@ foreach ($requiredFragment in @(
 }
 
 foreach ($requiredFragment in @(
-    'repos/$env:GH_REPO/releases/tags/$env:RELEASE_TAG',
+    'gh release view $env:RELEASE_TAG',
+    '--json databaseId',
     'repos/$env:GH_REPO/releases/$releaseId',
     "'--field', 'make_latest=false'",
     "'--latest=false'"
@@ -454,6 +455,9 @@ foreach ($requiredFragment in @(
 
 if ($companionReleaseWorkflow.Contains("'release', 'edit'")) {
     throw 'Companion draft publication must use the Releases API so make_latest=false is applied atomically.'
+}
+if ($companionReleaseWorkflow.Contains('releases/tags/$env:RELEASE_TAG')) {
+    throw 'Companion draft publication must not resolve draft releases through the REST tag endpoint.'
 }
 
 foreach ($requiredFragment in @(
