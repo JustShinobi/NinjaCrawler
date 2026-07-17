@@ -23,7 +23,7 @@ Supports **Instagram** · **TikTok** · **X / Twitter** · optional **Chrome Com
 <!-- ninjacrawler-release-end -->
 &nbsp;
 <!-- ninjacrawler-companion-release-start -->
-<a href="https://github.com/JustShinobi/NinjaCrawler/releases/download/companion-v0.17.1/NinjaCrawler-Companion-0.17.1.zip">
+<a href="https://github.com/JustShinobi/NinjaCrawler/releases/download/companion-v0.18.0/NinjaCrawler-Companion-0.18.0.zip">
   <img src="https://img.shields.io/badge/Download%20Companion-Chrome-1f6feb?style=for-the-badge&logo=googlechrome&logoColor=white" alt="Download Companion" height="46">
 </a>
 <!-- ninjacrawler-companion-release-end -->
@@ -44,8 +44,8 @@ App v0.24.1 ·
 <!-- ninjacrawler-companion-release-start -->
 <p>
 <sub>
-Companion 0.17.1 ·
-<a href="https://github.com/JustShinobi/NinjaCrawler/releases/download/companion-v0.17.1/NinjaCrawler-Companion-0.17.1.zip">extension ZIP</a> ·
+Companion 0.18.0 ·
+<a href="https://github.com/JustShinobi/NinjaCrawler/releases/download/companion-v0.18.0/NinjaCrawler-Companion-0.18.0.zip">extension ZIP</a> ·
 <a href="https://github.com/JustShinobi/NinjaCrawler/releases?q=companion-v&amp;expanded=true">companion releases</a>
 </sub>
 </p>
@@ -108,7 +108,7 @@ On first launch the app downloads and verifies connector runtimes (internet requ
 ### Chrome Companion (optional)
 
 <!-- ninjacrawler-companion-release-start -->
-1. **[Download the Companion ZIP](https://github.com/JustShinobi/NinjaCrawler/releases/download/companion-v0.17.1/NinjaCrawler-Companion-0.17.1.zip)** (also attached to desktop app releases).
+1. **[Download the Companion ZIP](https://github.com/JustShinobi/NinjaCrawler/releases/download/companion-v0.18.0/NinjaCrawler-Companion-0.18.0.zip)** (also attached to desktop app releases).
 2. Extract it. The archive always contains a stable `NinjaCrawler-Companion` folder.
 3. Start NinjaCrawler, open `chrome://extensions`, enable **Developer mode**, then **Load unpacked** and select that folder.
 <!-- ninjacrawler-companion-release-end -->
