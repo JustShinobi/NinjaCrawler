@@ -60,6 +60,26 @@ function Get-SectionName {
     }
 }
 
+function Protect-GitHubMentions {
+    param(
+        [AllowEmptyString()]
+        [string]$Text = ""
+    )
+
+    if (-not $Text) {
+        return $Text
+    }
+
+    # Release notes must not turn technical handles into GitHub mentions. Raw
+    # mentions can notify unrelated accounts and make them appear as contributors.
+    # Keep email addresses and already escaped/code-formatted handles unchanged.
+    $mentionPattern = '(?<![A-Za-z0-9._%+`-])@[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})(?:/[A-Za-z0-9](?:[A-Za-z0-9-]{0,38}))?'
+    return ([regex]::new($mentionPattern)).Replace(
+        $Text,
+        { param($match) "``$($match.Value)``" }
+    )
+}
+
 function Resolve-Commit {
     param(
         [Parameter(Mandatory = $true)]
@@ -144,6 +164,8 @@ foreach ($record in $records) {
         $breakingMarker = if ($Matches.ContainsKey("breaking")) { [string]$Matches["breaking"] } else { "" }
         $isBreaking = $isBreaking -or $breakingMarker -eq "!"
     }
+
+    $description = Protect-GitHubMentions -Text $description
 
     $prefix = if ($scope) { "**${scope}:** " } else { "" }
     $line = "- $prefix$description $commitReference"

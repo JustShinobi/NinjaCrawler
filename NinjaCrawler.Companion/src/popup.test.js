@@ -3,6 +3,8 @@ import { describe, expect, it } from 'vitest'
 
 const popupHtml = readFileSync(new URL('../popup.html', import.meta.url), 'utf8')
 const popupSource = readFileSync(new URL('./popup.js', import.meta.url), 'utf8')
+const storyDetectionSource = readFileSync(new URL('./storyDetection.js', import.meta.url), 'utf8')
+const storyNetworkHookSource = readFileSync(new URL('./storyNetworkHook.js', import.meta.url), 'utf8')
 const manifest = JSON.parse(readFileSync(new URL('../manifest.json', import.meta.url), 'utf8'))
 
 describe('Companion popup layout', () => {
@@ -78,21 +80,38 @@ describe('Companion popup layout', () => {
 
   it('offers a guided update when NinjaCrawler reports a newer Companion', () => {
     expect(popupHtml).toContain('id="updatePanel"')
-    expect(popupHtml).toContain('id="downloadUpdateButton"')
-    expect(popupHtml).toContain('id="reloadExtensionButton"')
+    expect(popupHtml).toContain('id="copyInstallPathButton"')
     expect(popupHtml).toContain('id="openExtensionsButton"')
-    expect(popupHtml).toContain('Download to AppData')
+    expect(popupHtml).toContain("NinjaCrawler's Connector Runtimes window")
     expect(popupSource).toContain("compatibility?.status === 'update_available'")
     expect(popupSource).toContain("compatibility?.status === 'incompatible'")
-    expect(popupSource).toContain('stageCompanionUpdate')
-    expect(popupSource).toContain('reloadExtension')
+    expect(popupSource).not.toContain('stageCompanionUpdate')
+    expect(popupSource).toContain('navigator.clipboard.writeText(installPath)')
     expect(popupSource).toContain("chrome.tabs.create({ url: 'chrome://extensions' })")
     expect(popupSource).toContain('const compatibilityTask = loadCompatibility()')
+  })
+
+  it('grants alarm access for managed live reload', () => {
+    expect(manifest.permissions).toContain('alarms')
+  })
+
+  it('keeps managed auto reload disabled until the user opts in', () => {
+    expect(popupHtml).toContain('id="autoReloadCompanionUpdates"')
+    expect(popupHtml).toContain('Off by default')
+    expect(popupSource).toContain('autoReloadCompanionUpdates = false')
+    expect(popupSource).toContain('saveUpdatePreferences()')
   })
 
   it('registers Instagram story content scripts in MAIN and isolated worlds', () => {
     const scripts = manifest.content_scripts ?? []
     expect(scripts.some((entry) => entry.world === 'MAIN' && entry.js.includes('src/storyNetworkHook.js'))).toBe(true)
     expect(scripts.some((entry) => entry.js.includes('src/storyDetection.js'))).toBe(true)
+  })
+
+  it('identifies the rendered story instead of assuming the first network item is active', () => {
+    expect(storyDetectionSource).toContain('storyIdForRenderedMedia(items, activeStoryMediaUrls())')
+    expect(storyDetectionSource).not.toContain('mediaIds[0]')
+    expect(storyNetworkHookSource).toContain('items: mergedItems.slice(-100)')
+    expect(storyNetworkHookSource).toContain('const mediaUrls = mediaUrlsOf(item)')
   })
 })

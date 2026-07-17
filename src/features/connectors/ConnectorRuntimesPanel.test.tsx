@@ -1,12 +1,19 @@
 // @vitest-environment jsdom
 
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ConnectorRuntimeStatus } from '../../domain/models'
 import { createEmptyWorkspaceSnapshot } from '../../domain/workspaceSnapshot'
 import { ConnectorRuntimesPanel } from './ConnectorRuntimesPanel'
 
 const useAppStoreMock = vi.fn()
+const bridgeMocks = vi.hoisted(() => ({
+  getCompanionInstallStatus: vi.fn(),
+  installCompanion: vi.fn(),
+  openCompanionInstallFolder: vi.fn(),
+}))
+
+vi.mock('../../bridge/desktop', () => bridgeMocks)
 
 vi.mock('../../state/appStore', () => ({
   useAppStore: (selector: (state: Record<string, unknown>) => unknown) => useAppStoreMock(selector),
@@ -42,6 +49,20 @@ function renderPanel(runtimes: ConnectorRuntimeStatus[]) {
 describe('ConnectorRuntimesPanel', () => {
   beforeEach(() => {
     useAppStoreMock.mockReset()
+    bridgeMocks.getCompanionInstallStatus.mockReset().mockResolvedValue({
+      installPath: 'C:\\Users\\ninja\\AppData\\Local\\NinjaCrawler\\Companion',
+      availableVersion: '0.18.0',
+      updateReady: false,
+      downloadUrl: 'https://github.com/MetalDevOps/NinjaCrawler/releases/example.zip',
+    })
+    bridgeMocks.installCompanion.mockReset().mockResolvedValue({
+      installPath: 'C:\\Users\\ninja\\AppData\\Local\\NinjaCrawler\\Companion',
+      stagedVersion: '0.18.0',
+      availableVersion: '0.18.0',
+      updateReady: true,
+      downloadUrl: 'https://github.com/MetalDevOps/NinjaCrawler/releases/example.zip',
+    })
+    bridgeMocks.openCompanionInstallFolder.mockReset().mockResolvedValue(undefined)
   })
   afterEach(() => cleanup())
 
@@ -74,5 +95,16 @@ describe('ConnectorRuntimesPanel', () => {
     const { store } = renderPanel([])
     fireEvent.click(screen.getByRole('button', { name: 'Check again' }))
     expect(store.checkConnectorUpdates).toHaveBeenCalledWith()
+  })
+
+  it('downloads Companion into the managed path from the runtime window', async () => {
+    renderPanel([runtime()])
+
+    const download = await screen.findByRole('button', { name: 'Download Companion' })
+    fireEvent.click(download)
+
+    await waitFor(() => expect(bridgeMocks.installCompanion).toHaveBeenCalledTimes(1))
+    expect(await screen.findByText('Companion v0.18.0 is ready.')).not.toBeNull()
+    expect(screen.getByText('Automatic')).not.toBeNull()
   })
 })

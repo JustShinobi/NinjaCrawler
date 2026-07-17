@@ -11,6 +11,8 @@ name: Release Companion
 # in the config), so the git tag does not exist yet; this workflow packages the
 # static extension ZIP, attaches it, and only then publishes — which finally
 # creates the tag. Mirrors the draft->attach->publish dance in release.yml.
+# Companion releases deliberately use make_latest=false so they remain available
+# in the release list without replacing the desktop app as the repository Latest.
 
 on:
   workflow_dispatch:
@@ -79,6 +81,7 @@ jobs:
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
           RELEASE_TAG: ${{ steps.version.outputs.tag }}
           RELEASE_VERSION: ${{ steps.version.outputs.version }}
           RELEASE_SHA: ${{ inputs.sha || github.sha }}
@@ -98,11 +101,20 @@ jobs:
               throw "Companion release asset upload failed."
             }
 
+            $releaseId = & gh api "repos/$env:GH_REPO/releases/tags/$env:RELEASE_TAG" --jq '.id'
+            if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($releaseId)) {
+              throw "Could not resolve Companion release id for $env:RELEASE_TAG."
+            }
+
+            # gh release edit cannot explicitly opt out of Latest. Publish through
+            # the Releases API so draft=false and make_latest=false are atomic.
             $publishArgs = @(
-              'release', 'edit', $env:RELEASE_TAG
-              '--title', "NinjaCrawler Companion $env:RELEASE_VERSION"
-              '--draft=false'
-              '--prerelease=false'
+              'api', '--method', 'PATCH'
+              "repos/$env:GH_REPO/releases/$releaseId"
+              '--field', "name=NinjaCrawler Companion $env:RELEASE_VERSION"
+              '--field', 'draft=false'
+              '--field', 'prerelease=false'
+              '--field', 'make_latest=false'
             )
             & gh @publishArgs
           } else {
@@ -113,12 +125,96 @@ jobs:
               '--target', $env:RELEASE_SHA
               '--title', "NinjaCrawler Companion $env:RELEASE_VERSION"
               '--notes', "NinjaCrawler Companion $env:RELEASE_VERSION"
+              '--latest=false'
             )
             $arguments += $assets
             & gh @arguments
           }
           if ($LASTEXITCODE -ne 0) {
             throw "Companion GitHub Release publication failed."
+          }
+
+      - name: Mirror Companion asset into latest NinjaCrawler release
+        if: ${{ steps.publish_release.outcome == 'success' }}
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          COMPANION_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          $assetName = "NinjaCrawler-Companion-$env:COMPANION_VERSION.zip"
+          $companionAsset = Get-Item -LiteralPath (Join-Path release $assetName)
+
+          $latestJson = & gh api "repos/$env:GH_REPO/releases/latest"
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Could not resolve the latest NinjaCrawler release.'
+          }
+          $latest = $latestJson | ConvertFrom-Json
+          if ($latest.tag_name -notmatch '^v\d+\.\d+\.\d+$' -or $latest.draft -or $latest.prerelease) {
+            throw "Latest release '$($latest.tag_name)' is not a published NinjaCrawler app release."
+          }
+          if ($latest.immutable) {
+            throw "Latest NinjaCrawler release '$($latest.tag_name)' is immutable and cannot receive the Companion update."
+          }
+
+          $metadataDir = Join-Path $env:RUNNER_TEMP "latest-$($latest.tag_name)-companion"
+          New-Item -ItemType Directory -Path $metadataDir -Force | Out-Null
+          & gh release download $latest.tag_name `
+            --repo $env:GH_REPO `
+            --dir $metadataDir `
+            --pattern 'CHANGELOG.md' `
+            --pattern 'SHA256SUMS.txt' `
+            --clobber
+          if ($LASTEXITCODE -ne 0) {
+            throw "Could not download metadata from latest NinjaCrawler release '$($latest.tag_name)'."
+          }
+
+          $changelogPath = Join-Path $metadataDir 'CHANGELOG.md'
+          $checksumPath = Join-Path $metadataDir 'SHA256SUMS.txt'
+          & Tools/Update-NinjaCrawlerReleaseCompanionMetadata.ps1 `
+            -CompanionVersion $env:COMPANION_VERSION `
+            -CompanionAssetPath $companionAsset.FullName `
+            -ChangelogPath $changelogPath `
+            -ChecksumPath $checksumPath
+
+          $staleCompanionAssets = @(
+            $latest.assets |
+              Where-Object {
+                $_.name -match '^NinjaCrawler-Companion-\d+\.\d+\.\d+\.zip$' -and
+                $_.name -ne $assetName
+              } |
+              ForEach-Object name
+          )
+
+          # Keep the old Companion ZIP until the new asset and its integrity
+          # metadata are uploaded successfully. A failed run can then be retried.
+          $mirrorAssets = @($companionAsset.FullName, $changelogPath, $checksumPath)
+          & gh release upload $latest.tag_name @mirrorAssets --repo $env:GH_REPO --clobber
+          if ($LASTEXITCODE -ne 0) {
+            throw "Could not mirror Companion $env:COMPANION_VERSION into '$($latest.tag_name)'."
+          }
+
+          $releasePayloadPath = Join-Path $metadataDir 'release-body.json'
+          $releasePayload = @{
+            body = Get-Content -LiteralPath $changelogPath -Raw
+          } | ConvertTo-Json
+          [System.IO.File]::WriteAllText(
+            $releasePayloadPath,
+            $releasePayload,
+            [System.Text.UTF8Encoding]::new($false)
+          )
+          & gh api --method PATCH `
+            "repos/$env:GH_REPO/releases/$($latest.id)" `
+            --input $releasePayloadPath
+          if ($LASTEXITCODE -ne 0) {
+            throw "Could not update release notes for '$($latest.tag_name)'."
+          }
+
+          foreach ($staleAsset in $staleCompanionAssets) {
+            & gh release delete-asset $latest.tag_name $staleAsset --repo $env:GH_REPO --yes
+            if ($LASTEXITCODE -ne 0) {
+              throw "Could not remove stale Companion asset '$staleAsset' from '$($latest.tag_name)'."
+            }
           }
 
       - name: Update README Companion download links

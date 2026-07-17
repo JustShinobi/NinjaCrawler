@@ -365,21 +365,11 @@ fn route_request(app: AppHandle, request: HttpRequest) -> Vec<u8> {
 }
 
 fn companion_update_status() -> Result<companion_install::CompanionInstallStatus, String> {
-    let available_version = bundled_companion_version();
-    let download_url = companion_download_url(&available_version);
-    companion_install::install_status(&available_version, &download_url)
+    companion_install::managed_install_status()
 }
 
 fn stage_companion_update() -> Result<companion_install::CompanionInstallStatus, String> {
-    let available_version = bundled_companion_version();
-    let download_url = companion_download_url(&available_version);
-    companion_install::stage_update(&available_version, &download_url)
-}
-
-fn companion_download_url(available_version: &str) -> String {
-    format!(
-        "{GITHUB_RELEASES_URL}/download/companion-v{available_version}/NinjaCrawler-Companion-{available_version}.zip"
-    )
+    companion_install::install_managed_companion()
 }
 
 fn ensure_sensitive_companion_request(request: &HttpRequest) -> Result<(), String> {
@@ -453,12 +443,7 @@ fn build_context_from_snapshot(
 }
 
 fn bundled_companion_version() -> String {
-    serde_json::from_str::<serde_json::Value>(include_str!(
-        "../../../NinjaCrawler.Companion/manifest.json"
-    ))
-    .ok()
-    .and_then(|manifest| manifest.get("version")?.as_str().map(str::to_string))
-    .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string())
+    companion_install::bundled_companion_version()
 }
 
 fn companion_compatibility(installed_version: Option<&str>) -> CompanionCompatibility {
@@ -473,8 +458,8 @@ fn companion_compatibility(installed_version: Option<&str>) -> CompanionCompatib
     // independent of the desktop app tag, so its download links are anchored to
     // the Companion release rather than the app's CARGO_PKG_VERSION.
     let release_page_url = format!("{GITHUB_RELEASES_URL}/tag/companion-v{available_version}");
-    let download_url = companion_download_url(&available_version);
-    let install = companion_install::install_status(&available_version, &download_url).ok();
+    let download_url = companion_install::companion_download_url(&available_version);
+    let install = companion_install::managed_install_status().ok();
 
     CompanionCompatibility {
         installed_version: installed_version.map(str::to_string),
@@ -484,7 +469,9 @@ fn companion_compatibility(installed_version: Option<&str>) -> CompanionCompatib
         release_page_url,
         download_url,
         install_path: install.as_ref().map(|value| value.install_path.clone()),
-        staged_version: install.as_ref().and_then(|value| value.staged_version.clone()),
+        staged_version: install
+            .as_ref()
+            .and_then(|value| value.staged_version.clone()),
         update_ready: install.as_ref().is_some_and(|value| value.update_ready),
     }
 }
@@ -892,7 +879,11 @@ fn detect_target_from_url(url: &str) -> Option<DetectedTarget> {
 
 fn is_reserved_instagram_segment(segment: &str) -> bool {
     matches!(
-        segment.trim().trim_start_matches('@').to_ascii_lowercase().as_str(),
+        segment
+            .trim()
+            .trim_start_matches('@')
+            .to_ascii_lowercase()
+            .as_str(),
         "accounts"
             | "direct"
             | "explore"
@@ -1106,8 +1097,9 @@ mod tests {
 
     #[test]
     fn detects_profile_from_bare_instagram_stories_path() {
-        let detected = detect_profile_from_url("https://www.instagram.com/stories/example.profile/")
-            .expect("story profile");
+        let detected =
+            detect_profile_from_url("https://www.instagram.com/stories/example.profile/")
+                .expect("story profile");
         assert_eq!(detected.provider, "instagram");
         assert_eq!(detected.handle, "@example.profile");
     }

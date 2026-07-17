@@ -28,12 +28,11 @@
         <div>
           <h2 id="updateTitle">Companion update available</h2>
           <p id="updateMeta" class="update-meta"></p>
-          <p id="updateInstructions" class="update-instructions">NinjaCrawler can download the new Companion into AppData. Then reload the extension here when you are ready.</p>
+          <p id="updateInstructions" class="update-instructions">Download the Companion from NinjaCrawler's Connector Runtimes window.</p>
           <p id="updateInstallPath" class="update-meta muted hidden"></p>
         </div>
         <div class="actions inline-actions">
-          <button id="downloadUpdateButton" type="button" class="update-primary">Download to AppData</button>
-          <button id="reloadExtensionButton" type="button" class="secondary hidden">Reload extension</button>
+          <button id="copyInstallPathButton" type="button" class="secondary hidden">Copy managed folder</button>
           <button id="openExtensionsButton" type="button">Open extensions</button>
         </div>
         <button id="viewReleaseButton" type="button" class="link-button update-release-link">View release details</button>
@@ -76,7 +75,7 @@
       </form>
 
       <details id="preferencesPanel" class="panel preferences-panel">
-        <summary>Appearance &amp; shortcuts</summary>
+        <summary>Appearance, updates &amp; shortcuts</summary>
         <div class="preferences-content">
           <label class="field compact-field">
             Theme
@@ -85,6 +84,13 @@
               <option value="light">Light</option>
               <option value="dark">Dark</option>
             </select>
+          </label>
+          <label class="preference-toggle">
+            <input id="autoReloadCompanionUpdates" type="checkbox" />
+            <span>
+              Automatically reload managed Companion updates
+              <small>Off by default. When disabled, the badge only notifies you that an update is ready.</small>
+            </span>
           </label>
           <div class="shortcut-list" aria-label="Keyboard shortcuts">
             <div class="shortcut-row">

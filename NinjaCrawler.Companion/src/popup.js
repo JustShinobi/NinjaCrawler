@@ -16,7 +16,6 @@ import {
   loadCompanionUpdateStatus,
   previewAccount,
   resolveLiveTabUrl,
-  stageCompanionUpdate,
   syncSource,
 } from './core.js'
 
@@ -27,8 +26,7 @@ const elements = {
   updatePanel: document.querySelector('#updatePanel'),
   updateTitle: document.querySelector('#updateTitle'),
   updateMeta: document.querySelector('#updateMeta'),
-  downloadUpdateButton: document.querySelector('#downloadUpdateButton'),
-  reloadExtensionButton: document.querySelector('#reloadExtensionButton'),
+  copyInstallPathButton: document.querySelector('#copyInstallPathButton'),
   openExtensionsButton: document.querySelector('#openExtensionsButton'),
   viewReleaseButton: document.querySelector('#viewReleaseButton'),
   updateInstructions: document.querySelector('#updateInstructions'),
@@ -66,14 +64,14 @@ const elements = {
   accountImportMessage: document.querySelector('#accountImportMessage'),
   message: document.querySelector('#message'),
   themeSelect: document.querySelector('#themeSelect'),
+  autoReloadCompanionUpdates: document.querySelector('#autoReloadCompanionUpdates'),
   syncShortcut: document.querySelector('#syncShortcut'),
   storyShortcut: document.querySelector('#storyShortcut'),
   configureShortcutsButton: document.querySelector('#configureShortcutsButton'),
 }
 
-// Folga acima do timeout interno da sonda (10s) para que o erro real do
-// background chegue primeiro. Este corte é a rede de segurança caso o service
-// worker morra sem responder e o `sendMessage` fique pendente para sempre.
+// Leave headroom above the probe's internal timeout so its real error arrives
+// first. This remains the safety net if the service worker stops responding.
 const ACCOUNT_CAPTURE_TIMEOUT_MS = 15_000
 
 const state = {
@@ -85,6 +83,7 @@ const state = {
   context: null,
   compatibility: null,
   updateStatus: null,
+  pendingCompanionVersion: null,
   accountCapture: null,
   accountPreview: null,
   profiles: [],
@@ -98,6 +97,7 @@ boot()
 async function boot() {
   bindEvents()
   await loadPreferences()
+  await loadPendingCompanionUpdate()
   await renderShortcuts()
   const activeTabPromise = chrome.tabs.query({ active: true, currentWindow: true })
   const allTabsPromise = chrome.tabs.query({})
@@ -231,9 +231,9 @@ function bindEvents() {
   elements.selectAllButton?.addEventListener('click', () => toggleSelectAll())
   elements.addSelectedButton?.addEventListener('click', () => submitSelectedProfiles())
   elements.themeSelect?.addEventListener('change', () => saveTheme(elements.themeSelect.value))
+  elements.autoReloadCompanionUpdates?.addEventListener('change', () => saveUpdatePreferences())
   elements.configureShortcutsButton?.addEventListener('click', () => openShortcutSettings())
-  elements.downloadUpdateButton?.addEventListener('click', () => stageUpdateToAppData())
-  elements.reloadExtensionButton?.addEventListener('click', () => reloadExtension())
+  elements.copyInstallPathButton?.addEventListener('click', () => copyManagedInstallPath())
   elements.viewReleaseButton?.addEventListener('click', () => openCompatibilityUrl('releasePageUrl'))
   elements.openExtensionsButton?.addEventListener('click', () => openChromeExtensions())
 }
@@ -409,8 +409,8 @@ function renderContext() {
     elements.addButton.classList.remove('hidden')
   }
 
-  // "Save as single video" aparece sempre que a aba é uma URL de vídeo baixável,
-  // independente de haver perfil rastreado (baixa avulso na estrutura própria).
+  // "Save as single video" is available for every downloadable video URL,
+  // even when no tracked profile exists for that standalone download.
   elements.singleVideoButton?.classList.toggle('hidden', !state.video)
 
   elements.importAccountButton?.classList.remove('hidden')
@@ -482,8 +482,8 @@ function renderAccountDestination() {
   const creating = elements.accountDestination.value === '__new__'
   elements.newAccountNameField.classList.toggle('hidden', !creating)
   elements.confirmAccountImport.textContent = creating ? 'Create and import' : 'Update account'
-  // A sessão incompleta é rejeitada pelo desktop de qualquer forma; bloqueamos
-  // o import aqui para não fazer o operador clicar só para ver o erro.
+  // The desktop rejects incomplete sessions; disable this action so the user
+  // does not have to click it only to receive the same validation error.
   const incomplete = (state.accountPreview?.missingRequiredFields ?? []).length > 0
   elements.confirmAccountImport.disabled = state.isBusy || incomplete
 }
@@ -663,12 +663,13 @@ function setBusy(isBusy) {
     elements.cancelAccountImport,
     elements.selectAllButton,
     elements.addSelectedButton,
+    elements.copyInstallPathButton,
   ]) {
     if (button) {
       button.disabled = isBusy
     }
   }
-  // Uma sessão incompleta nunca deve reabilitar o import, mesmo quando o busy sai.
+  // Finishing a busy operation must not re-enable an incomplete session import.
   if (!isBusy && (state.accountPreview?.missingRequiredFields ?? []).length > 0) {
     elements.confirmAccountImport.disabled = true
   }
@@ -715,7 +716,9 @@ function renderCompatibility() {
   elements.updateTitle.textContent = compatibility.status === 'incompatible'
     ? 'Companion update required'
     : ready
-      ? 'Companion update ready'
+      ? state.pendingCompanionVersion
+        ? 'Chrome is using another Companion folder'
+        : 'Managed update is ready'
       : 'Companion update available'
   elements.updateMeta.textContent = ready
     ? `Installed ${installed} · staged ${updateStatus.stagedVersion || compatibility.availableVersion}`
@@ -723,8 +726,10 @@ function renderCompatibility() {
 
   if (elements.updateInstructions) {
     elements.updateInstructions.textContent = ready
-      ? 'Files are in AppData. Reload the extension to apply them (Load unpacked from the path below if this install is not that folder).'
-      : 'NinjaCrawler can download the new Companion into AppData. Then reload the extension when you are ready.'
+      ? state.pendingCompanionVersion
+        ? 'The managed folder is current, but Chrome is still running an older copy. Open extensions and choose Load unpacked with the folder below once.'
+        : 'The managed folder is current. The Companion will reload automatically.'
+      : 'Open NinjaCrawler > Connector Runtimes to download the update into the managed folder.'
   }
 
   if (elements.updateInstallPath) {
@@ -732,52 +737,34 @@ function renderCompatibility() {
     elements.updateInstallPath.classList.toggle('hidden', !installPath)
   }
 
-  elements.downloadUpdateButton?.classList.toggle('hidden', ready)
-  if (elements.downloadUpdateButton) {
-    elements.downloadUpdateButton.disabled = state.isBusy
-    elements.downloadUpdateButton.textContent = 'Download to AppData'
-  }
-  elements.reloadExtensionButton?.classList.toggle('hidden', !ready)
-  if (elements.reloadExtensionButton) {
-    elements.reloadExtensionButton.disabled = state.isBusy
+  if (elements.copyInstallPathButton) {
+    elements.copyInstallPathButton.classList.toggle('hidden', !ready || !installPath)
+    elements.copyInstallPathButton.disabled = state.isBusy
   }
 }
 
-async function stageUpdateToAppData() {
-  setBusy(true)
-  setUpdateMessage('Downloading Companion into AppData…')
+async function copyManagedInstallPath() {
+  const installPath = state.updateStatus?.installPath || state.compatibility?.installPath || ''
+  if (!installPath) return
   try {
-    state.updateStatus = await stageCompanionUpdate()
-    setUpdateMessage(
-      state.updateStatus?.updateReady
-        ? 'Update staged. Reload the extension to apply it.'
-        : 'Download finished.',
-      'ok',
-    )
-    renderCompatibility()
+    await navigator.clipboard.writeText(installPath)
+    setUpdateMessage('Managed folder copied. Use it with Load unpacked in Chrome Extensions.', 'ok')
   } catch (error) {
-    setUpdateMessage(error?.message || 'Could not download the Companion update.', 'error')
-  } finally {
-    setBusy(false)
-    renderCompatibility()
+    setUpdateMessage(error?.message || 'Could not copy the managed folder.', 'error')
   }
 }
 
-async function reloadExtension() {
-  setUpdateMessage('Reloading extension…')
-  try {
-    await chrome.runtime.sendMessage({ type: 'reloadExtension' })
-    // Service worker reloads the extension; popup closes as a side effect.
-  } catch (error) {
-    try {
-      chrome.runtime.reload()
-    } catch (reloadError) {
-      setUpdateMessage(
-        reloadError?.message || error?.message || 'Could not reload the extension.',
-        'error',
-      )
-    }
+async function loadPendingCompanionUpdate() {
+  const installedVersion = chrome.runtime.getManifest().version
+  const { pendingCompanionVersion = null } = await chrome.storage.local.get({
+    pendingCompanionVersion: null,
+  })
+  if (pendingCompanionVersion === installedVersion) {
+    await chrome.storage.local.remove(['pendingCompanionVersion', 'pendingCompanionReloadAt'])
+    state.pendingCompanionVersion = null
+    return
   }
+  state.pendingCompanionVersion = pendingCompanionVersion
 }
 
 function setUpdateMessage(text, kind = '') {
@@ -825,14 +812,29 @@ function formatDate(value) {
 }
 
 async function loadPreferences() {
-  const { theme = 'system' } = await chrome.storage.sync.get({ theme: 'system' })
+  const {
+    theme = 'system',
+    autoReloadCompanionUpdates = false,
+  } = await chrome.storage.sync.get({
+    theme: 'system',
+    autoReloadCompanionUpdates: false,
+  })
   elements.themeSelect.value = theme
+  if (elements.autoReloadCompanionUpdates) {
+    elements.autoReloadCompanionUpdates.checked = autoReloadCompanionUpdates
+  }
   applyTheme(theme)
 }
 
 async function saveTheme(theme) {
   applyTheme(theme)
   await chrome.storage.sync.set({ theme })
+}
+
+async function saveUpdatePreferences() {
+  await chrome.storage.sync.set({
+    autoReloadCompanionUpdates: Boolean(elements.autoReloadCompanionUpdates?.checked),
+  })
 }
 
 function applyTheme(theme) {

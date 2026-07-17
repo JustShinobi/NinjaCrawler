@@ -3,23 +3,38 @@ import {
   detectTargetFromUrl,
   downloadTarget,
   installInstagramStoryNetworkHook,
+  loadCompanionUpdateStatus,
   loadContext,
   resolveLiveTabUrl,
   syncSource,
 } from './core.js'
 import { captureAccountFromTab } from './accountCapture.js'
 
-/** @type {Map<number, { url: string, target: object|null, updatedAt: number }>} */
-const storyTargetsByTab = new Map()
 /** @type {Set<number>} */
 const storyHookedTabs = new Set()
+const COMPANION_UPDATE_ALARM = 'ninjacrawler-companion-update'
+const COMPANION_UPDATE_PERIOD_MINUTES = 5
 
 chrome.runtime.onInstalled.addListener(() => {
   void initializeBadgeFeedback()
+  void initializeCompanionLiveReload()
 })
 
 chrome.runtime.onStartup.addListener(() => {
   void initializeBadgeFeedback()
+  void initializeCompanionLiveReload()
+})
+
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name === COMPANION_UPDATE_ALARM) {
+    void reloadManagedCompanionWhenReady()
+  }
+})
+
+chrome.storage.onChanged.addListener((changes, areaName) => {
+  if (areaName === 'sync' && changes.autoReloadCompanionUpdates) {
+    void reloadManagedCompanionWhenReady()
+  }
 })
 
 chrome.tabs.onActivated.addListener(({ tabId }) => {
@@ -34,7 +49,6 @@ chrome.tabs.onActivated.addListener(({ tabId }) => {
 })
 
 chrome.tabs.onRemoved.addListener((tabId) => {
-  storyTargetsByTab.delete(tabId)
   storyHookedTabs.delete(tabId)
 })
 
@@ -42,10 +56,6 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   if (changeInfo.url) {
     // Full navigation resets MAIN-world hooks.
     storyHookedTabs.delete(tabId)
-    const stillStory = /\/stories\//i.test(changeInfo.url)
-    if (!stillStory) {
-      storyTargetsByTab.delete(tabId)
-    }
   }
 
   if (changeInfo.status === 'complete' || changeInfo.url) {
@@ -62,33 +72,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.type === 'storyTargetChanged') {
     const tabId = sender.tab?.id
     if (tabId != null) {
-      if (message.target?.storyId) {
-        storyTargetsByTab.set(tabId, {
-          url: message.target.url || message.url,
-          target: message.target,
-          updatedAt: Date.now(),
-        })
-      } else if (message.url) {
-        // Keep bare stories URL for profile context; clear resolved target.
-        const existing = storyTargetsByTab.get(tabId)
-        if (existing?.target && detectTargetFromUrl(message.url)) {
-          // Page now has a full story URL.
-          storyTargetsByTab.set(tabId, {
-            url: message.url,
-            target: detectTargetFromUrl(message.url),
-            updatedAt: Date.now(),
-          })
-        } else if (!message.target) {
-          // No media id yet — do not wipe a fresher cached target for the same handle.
-          const cached = storyTargetsByTab.get(tabId)
-          const cachedHandle = cached?.target?.handle?.toLocaleLowerCase?.()
-          const messageHandle = message.handle?.toLocaleLowerCase?.()
-          if (!cached || (messageHandle && cachedHandle && messageHandle !== cachedHandle)) {
-            storyTargetsByTab.delete(tabId)
-          }
-        }
-      }
-
       chrome.tabs.get(tabId, (tab) => {
         if (!chrome.runtime.lastError && tab) {
           void refreshBadge(tab).catch(() => undefined)
@@ -99,26 +82,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true
   }
 
-  if (message?.type === 'getStoryTarget') {
-    sendResponse(storyTargetsByTab.get(message.tabId) ?? null)
-    return true
-  }
-
   if (message?.type === 'refreshBadges') {
     chrome.tabs.query({ active: true })
       .then((tabs) => Promise.all(tabs.map((tab) => refreshBadge(tab))))
       .then(() => sendResponse({ ok: true }))
       .catch((error) => sendResponse({ ok: false, error: error?.message || 'Badge refresh failed.' }))
-    return true
-  }
-
-  if (message?.type === 'reloadExtension') {
-    try {
-      chrome.runtime.reload()
-      sendResponse({ ok: true })
-    } catch (error) {
-      sendResponse({ ok: false, error: error?.message || 'Reload failed.' })
-    }
     return true
   }
 
@@ -131,9 +99,77 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   return true
 })
 
-// "Reload" em chrome://extensions reinicia o service worker sem necessariamente
-// ativar ou atualizar a aba atual. Atualiza o badge assim que o worker sobe.
+// Reloading from chrome://extensions restarts the service worker without
+// necessarily activating or updating the current tab. Refresh feedback now.
 void initializeBadgeFeedback()
+void initializeCompanionLiveReload()
+
+async function initializeCompanionLiveReload() {
+  await chrome.alarms.create(COMPANION_UPDATE_ALARM, {
+    periodInMinutes: COMPANION_UPDATE_PERIOD_MINUTES,
+  })
+  await reloadManagedCompanionWhenReady()
+}
+
+async function reloadManagedCompanionWhenReady() {
+  try {
+    const installedVersion = chrome.runtime.getManifest().version
+    const { pendingCompanionVersion = null } = await chrome.storage.local.get({
+      pendingCompanionVersion: null,
+    })
+
+    if (pendingCompanionVersion === installedVersion) {
+      await chrome.storage.local.remove(['pendingCompanionVersion', 'pendingCompanionReloadAt'])
+    }
+
+    const updateStatus = await loadCompanionUpdateStatus()
+    const stagedVersion = updateStatus?.stagedVersion
+    if (!updateStatus?.updateReady || !versionIsOlder(installedVersion, stagedVersion)) return
+
+    await notifyManagedCompanionUpdate(stagedVersion)
+    const { autoReloadCompanionUpdates = false } = await chrome.storage.sync.get({
+      autoReloadCompanionUpdates: false,
+    })
+    if (!autoReloadCompanionUpdates) return
+
+    if (pendingCompanionVersion === stagedVersion) {
+      return
+    }
+
+    await chrome.storage.local.set({
+      pendingCompanionVersion: stagedVersion,
+      pendingCompanionReloadAt: Date.now(),
+    })
+    chrome.runtime.reload()
+  } catch {
+    // NinjaCrawler may be closed; the next alarm retries without disturbing browsing.
+  }
+}
+
+async function notifyManagedCompanionUpdate(stagedVersion) {
+  await safeAction(() => chrome.action.setBadgeText({ text: '↑' }))
+  await safeAction(() => chrome.action.setBadgeBackgroundColor({ color: '#b45309' }))
+  await safeAction(() => chrome.action.setTitle({
+    title: `NinjaCrawler Companion: managed update ${stagedVersion} is ready`,
+  }))
+}
+
+function versionIsOlder(installedVersion, stagedVersion) {
+  const installed = parseVersion(installedVersion)
+  const staged = parseVersion(stagedVersion)
+  if (!installed || !staged) return false
+  for (let index = 0; index < Math.max(installed.length, staged.length); index += 1) {
+    const left = installed[index] ?? 0
+    const right = staged[index] ?? 0
+    if (left !== right) return left < right
+  }
+  return false
+}
+
+function parseVersion(value) {
+  if (typeof value !== 'string' || !/^\d+(?:\.\d+)*$/.test(value)) return null
+  return value.split('.').map(Number)
+}
 
 async function initializeBadgeFeedback() {
   await safeAction(() => chrome.action.setBadgeBackgroundColor({ color: '#2f855a' }))
@@ -173,24 +209,12 @@ function isInstagramTab(url) {
 async function refreshBadge(tab) {
   if (!tab?.id) return
 
-  const cached = storyTargetsByTab.get(tab.id)
-  const liveUrl = await resolveLiveTabUrl(tab, {
-    preferredUrl: cached?.url,
-    skipCacheLookup: true,
-  })
+  const liveUrl = await resolveLiveTabUrl(tab)
 
-  // Persist a resolved target discovered via page inspection.
   const inspectedTarget = detectTargetFromUrl(liveUrl)
-  if (inspectedTarget) {
-    storyTargetsByTab.set(tab.id, {
-      url: liveUrl,
-      target: inspectedTarget,
-      updatedAt: Date.now(),
-    })
-  }
 
   const detected = detectProfileFromUrl(liveUrl)
-  const target = inspectedTarget ?? cached?.target ?? detectTargetFromUrl(liveUrl)
+  const target = inspectedTarget ?? detectTargetFromUrl(liveUrl)
   if (!detected) {
     await clearBadge(tab.id)
     return
@@ -254,11 +278,7 @@ async function runActiveTabCommand(command, commandTab) {
 
   try {
     await ensureStoryNetworkHook(tab)
-    const cached = storyTargetsByTab.get(tab.id)
-    const liveUrl = await resolveLiveTabUrl(tab, {
-      preferredUrl: cached?.url,
-      skipCacheLookup: true,
-    })
+    const liveUrl = await resolveLiveTabUrl(tab)
     const detected = detectProfileFromUrl(liveUrl)
     if (!detected) {
       throw new Error('Open a supported profile or story first.')
@@ -278,9 +298,7 @@ async function runActiveTabCommand(command, commandTab) {
     }
 
     if (command === 'download-story') {
-      const target = context.detectedTarget
-        ?? cached?.target
-        ?? detectTargetFromUrl(liveUrl)
+      const target = context.detectedTarget ?? detectTargetFromUrl(liveUrl)
       if (!target) {
         throw new Error('The active tab is not a supported story URL.')
       }

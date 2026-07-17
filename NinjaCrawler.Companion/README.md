@@ -14,20 +14,18 @@ Instagram or TikTok URL identifies a supported story. Command results are shown
 on the extension badge, so the popup does not need to remain open.
 
 NinjaCrawler reports the Companion version bundled with its current release and
-the minimum compatible version. When the installed extension is older, the
-popup shows the installed and available versions. With NinjaCrawler running you
-can:
+the minimum compatible version. Download or update it from **Connector
+Runtimes** in NinjaCrawler. The desktop app owns the download and keeps the
+stable `%LocalAppData%\NinjaCrawler\Companion` folder current.
 
-1. **Download to AppData** — the desktop app stages the Companion ZIP under
-   `%LocalAppData%\NinjaCrawler\Companion`.
-2. **Reload extension** — the popup calls `chrome.runtime.reload()` so Chrome
-   picks up the staged files without opening `chrome://extensions`.
-
-`chrome.runtime.reload()` only applies files from the folder Chrome already
-loaded. For one-click updates, load unpacked from the AppData path above (or
-point Load unpacked there once). If you keep a different folder loaded, use
-**Open extensions** and reload that install after copying files, or switch Load
-unpacked to the AppData path.
+Chrome requires one manual setup for extensions distributed outside the Chrome
+Web Store: enable Developer mode and use **Load unpacked** with that managed
+folder. The Companion checks that managed folder through NinjaCrawler and
+notifies you when a newer staged version appears. Automatic reload is disabled
+by default and can be enabled under **Appearance, updates & shortcuts**. If Chrome is
+still running a copy from another folder after an update, the popup detects the
+version mismatch, offers **Copy managed folder**, and opens
+`chrome://extensions`.
 
 The extension badge uses `↑` for an available update and `!` when an update is
 required for compatibility.
@@ -38,14 +36,17 @@ required for compatibility.
 2. Open `chrome://extensions`.
 3. Enable Developer mode.
 4. Select **Load unpacked** and choose this `NinjaCrawler.Companion` folder
-   (or `%LocalAppData%\NinjaCrawler\Companion` after staging an update).
+   (or `%LocalAppData%\NinjaCrawler\Companion` after downloading it from
+   Connector Runtimes).
 
 ## Updating an unpacked installation
 
-Version 0.3.0 introduces a stable extension ID. Prefer the in-popup
-**Download to AppData** + **Reload extension** flow when NinjaCrawler is
-running. Manual fallback: extract the release ZIP over the loaded Companion
-folder and click **Reload** on `chrome://extensions`.
+Version 0.3.0 introduces a stable extension ID. The one-time installation must
+point Chrome at `%LocalAppData%\NinjaCrawler\Companion`; download that folder
+from NinjaCrawler's **Connector Runtimes** window. Later downloads replace the
+managed files and the extension can reload automatically when that preference
+is enabled. The popup guides the
+one-time path correction if Chrome is still using another folder.
 
 The extension calls the desktop API at:
 

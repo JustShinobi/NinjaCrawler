@@ -96,22 +96,32 @@ describe('detectProfileFromUrl', () => {
 })
 
 describe('pickBestLiveUrl', () => {
-  it('reconstructs the first story URL from network media cache when path has no id', () => {
+  it('reconstructs the first story URL from the media rendered in the viewer', () => {
     expect(pickBestLiveUrl({
       candidates: ['https://www.instagram.com/stories/someone/'],
       handle: 'someone',
       mediaIds: ['1234567890', '999'],
-    })).toBe('https://www.instagram.com/stories/someone/1234567890/')
+      currentStoryId: '999',
+    })).toBe('https://www.instagram.com/stories/someone/999/')
   })
 
-  it('prefers a full story candidate over media cache', () => {
+  it('does not guess the current story from the next item in the network queue', () => {
+    expect(pickBestLiveUrl({
+      candidates: ['https://www.instagram.com/stories/someone/'],
+      handle: 'someone',
+      mediaIds: ['1234567890', '999'],
+    })).toBe('https://www.instagram.com/stories/someone/')
+  })
+
+  it('prefers a full current location over the rendered-media cache', () => {
     expect(pickBestLiveUrl({
       candidates: [
-        'https://www.instagram.com/stories/someone/',
         'https://www.instagram.com/stories/someone/555/',
+        'https://www.instagram.com/stories/someone/',
       ],
       handle: 'someone',
       mediaIds: ['1234567890'],
+      currentStoryId: '1234567890',
     })).toBe('https://www.instagram.com/stories/someone/555/')
   })
 
@@ -166,7 +176,7 @@ describe('resolveLiveTabUrl', () => {
     }
   })
 
-  it('uses network media cache when the first story URL has no media id', async () => {
+  it('uses the rendered-media match when the first story URL has no media id', async () => {
     const previousChrome = globalThis.chrome
     globalThis.chrome = {
       scripting: {
@@ -175,6 +185,7 @@ describe('resolveLiveTabUrl', () => {
             candidates: ['https://www.instagram.com/stories/someone/'],
             handle: 'someone',
             mediaIds: ['4242424242'],
+            currentStoryId: '4242424242',
           },
         }]),
       },
@@ -191,11 +202,66 @@ describe('resolveLiveTabUrl', () => {
     }
   })
 
-  it('prefers an explicit preferredUrl from the background story cache', async () => {
-    await expect(resolveLiveTabUrl(
-      { id: 7, url: 'https://www.instagram.com/stories/someone/' },
-      { preferredUrl: 'https://www.instagram.com/stories/someone/111/', skipCacheLookup: true },
-    )).resolves.toBe('https://www.instagram.com/stories/someone/111/')
+  it('briefly retries while the first story media is still rendering', async () => {
+    const previousChrome = globalThis.chrome
+    globalThis.chrome = {
+      scripting: {
+        executeScript: vi.fn()
+          .mockResolvedValueOnce([{
+            result: {
+              candidates: ['https://www.instagram.com/stories/someone/'],
+              handle: 'someone',
+              mediaIds: ['222', '111'],
+              currentStoryId: null,
+            },
+          }])
+          .mockResolvedValueOnce([{
+            result: {
+              candidates: ['https://www.instagram.com/stories/someone/'],
+              handle: 'someone',
+              mediaIds: ['222', '111'],
+              currentStoryId: '111',
+            },
+          }]),
+      },
+    }
+
+    try {
+      await expect(resolveLiveTabUrl({
+        id: 7,
+        url: 'https://www.instagram.com/stories/someone/',
+      })).resolves.toBe('https://www.instagram.com/stories/someone/111/')
+      expect(globalThis.chrome.scripting.executeScript).toHaveBeenCalledTimes(2)
+    } finally {
+      if (previousChrome) globalThis.chrome = previousChrome
+      else delete globalThis.chrome
+    }
+  })
+
+  it('does not let a cached queue item override the story rendered in the tab', async () => {
+    const previousChrome = globalThis.chrome
+    globalThis.chrome = {
+      scripting: {
+        executeScript: vi.fn().mockResolvedValue([{
+          result: {
+            candidates: ['https://www.instagram.com/stories/someone/'],
+            handle: 'someone',
+            mediaIds: ['111', '222'],
+            currentStoryId: '222',
+          },
+        }]),
+      },
+    }
+
+    try {
+      await expect(resolveLiveTabUrl(
+        { id: 7, url: 'https://www.instagram.com/stories/someone/' },
+        { preferredUrl: 'https://www.instagram.com/stories/someone/111/' },
+      )).resolves.toBe('https://www.instagram.com/stories/someone/222/')
+    } finally {
+      if (previousChrome) globalThis.chrome = previousChrome
+      else delete globalThis.chrome
+    }
   })
 
   it('falls back to the tab URL when page inspection is unavailable', async () => {
@@ -251,6 +317,191 @@ describe('story page probes', () => {
   it('exports self-contained injectables for scripting.executeScript', () => {
     expect(typeof inspectLiveStoryPage).toBe('function')
     expect(typeof installInstagramStoryNetworkHook).toBe('function')
+  })
+
+  it('matches the visible story media instead of taking the next queue item', () => {
+    const previous = {
+      document: globalThis.document,
+      getComputedStyle: globalThis.getComputedStyle,
+      innerHeight: globalThis.innerHeight,
+      innerWidth: globalThis.innerWidth,
+      location: globalThis.location,
+    }
+    const currentMediaUrl = 'https://scontent.example.net/current-story.jpg?signature=current'
+    const mediaElement = {
+      currentSrc: currentMediaUrl,
+      src: currentMediaUrl,
+      poster: '',
+      tagName: 'IMG',
+      getBoundingClientRect: () => ({
+        top: 50,
+        left: 300,
+        right: 700,
+        bottom: 750,
+        width: 400,
+        height: 700,
+      }),
+    }
+
+    globalThis.location = {
+      href: 'https://www.instagram.com/stories/someone/',
+      pathname: '/stories/someone/',
+      origin: 'https://www.instagram.com',
+    }
+    globalThis.innerWidth = 1_000
+    globalThis.innerHeight = 800
+    globalThis.getComputedStyle = () => ({ display: 'block', visibility: 'visible', opacity: '1' })
+    globalThis.document = {
+      documentElement: {
+        clientWidth: 1_000,
+        clientHeight: 800,
+        getAttribute: () => JSON.stringify({
+          handle: 'someone',
+          mediaIds: ['222', '111'],
+          items: [
+            { storyId: '222', mediaUrls: ['https://scontent.example.net/next-story.jpg'] },
+            { storyId: '111', mediaUrls: ['https://scontent.example.net/current-story.jpg?other=token'] },
+          ],
+        }),
+      },
+      querySelector: () => null,
+      querySelectorAll: () => [mediaElement],
+    }
+
+    try {
+      expect(inspectLiveStoryPage()).toMatchObject({
+        handle: 'someone',
+        mediaIds: ['222', '111'],
+        currentStoryId: '111',
+      })
+    } finally {
+      Object.assign(globalThis, previous)
+    }
+  })
+
+  it('reads a single bare-URL story from Instagram hydration when the player uses a blob URL', () => {
+    const previous = {
+      document: globalThis.document,
+      getComputedStyle: globalThis.getComputedStyle,
+      innerHeight: globalThis.innerHeight,
+      innerWidth: globalThis.innerWidth,
+      location: globalThis.location,
+    }
+    const mediaElement = {
+      currentSrc: 'blob:https://www.instagram.com/story-player',
+      src: 'blob:https://www.instagram.com/story-player',
+      poster: '',
+      paused: true,
+      tagName: 'VIDEO',
+      getBoundingClientRect: () => ({
+        top: 20,
+        left: 250,
+        right: 750,
+        bottom: 780,
+        width: 500,
+        height: 760,
+      }),
+    }
+    const hydration = JSON.stringify({
+      result: {
+        data: {
+          xdt_api__v1__feed__reels_media: {
+            reels_media: [{
+              user: { username: 'nataliebournias' },
+              seen: 1_784_233_561,
+              items: [{
+                id: '3942759357498900592_33474071478',
+                pk: '3942759357498900592',
+                taken_at: 1_784_233_561,
+                video_versions: [{ url: 'https://scontent.example.net/story.mp4' }],
+              }],
+            }],
+          },
+        },
+      },
+    })
+
+    globalThis.location = {
+      href: 'https://www.instagram.com/stories/nataliebournias/',
+      pathname: '/stories/nataliebournias/',
+      origin: 'https://www.instagram.com',
+    }
+    globalThis.innerWidth = 1_000
+    globalThis.innerHeight = 800
+    globalThis.getComputedStyle = () => ({ display: 'block', visibility: 'visible', opacity: '1' })
+    globalThis.document = {
+      documentElement: {
+        clientWidth: 1_000,
+        clientHeight: 800,
+        getAttribute: () => null,
+      },
+      querySelector: () => null,
+      querySelectorAll: (selector) => selector.startsWith('script')
+        ? [{ textContent: hydration }]
+        : [mediaElement],
+    }
+
+    try {
+      expect(inspectLiveStoryPage()).toMatchObject({
+        handle: 'nataliebournias',
+        mediaIds: ['3942759357498900592'],
+        currentStoryId: '3942759357498900592',
+        initialStoryId: '3942759357498900592',
+      })
+    } finally {
+      Object.assign(globalThis, previous)
+    }
+  })
+
+  it('selects the first unseen hydrated story instead of the next arbitrary payload item', () => {
+    const previous = {
+      document: globalThis.document,
+      getComputedStyle: globalThis.getComputedStyle,
+      innerHeight: globalThis.innerHeight,
+      innerWidth: globalThis.innerWidth,
+      location: globalThis.location,
+    }
+    const hydration = JSON.stringify({
+      reels_media: [{
+        user: { username: 'someone' },
+        seen: 200,
+        items: [
+          { pk: '111', taken_at: 100 },
+          { pk: '222', taken_at: 300 },
+          { pk: '333', taken_at: 400 },
+        ],
+      }],
+    })
+
+    globalThis.location = {
+      href: 'https://www.instagram.com/stories/someone/',
+      pathname: '/stories/someone/',
+      origin: 'https://www.instagram.com',
+    }
+    globalThis.innerWidth = 1_000
+    globalThis.innerHeight = 800
+    globalThis.getComputedStyle = () => ({ display: 'block', visibility: 'visible', opacity: '1' })
+    globalThis.document = {
+      documentElement: {
+        clientWidth: 1_000,
+        clientHeight: 800,
+        getAttribute: () => null,
+      },
+      querySelector: () => null,
+      querySelectorAll: (selector) => selector.startsWith('script')
+        ? [{ textContent: hydration }]
+        : [],
+    }
+
+    try {
+      expect(inspectLiveStoryPage()).toMatchObject({
+        mediaIds: ['111', '222', '333'],
+        currentStoryId: '222',
+        initialStoryId: '222',
+      })
+    } finally {
+      Object.assign(globalThis, previous)
+    }
   })
 })
 

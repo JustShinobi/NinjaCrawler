@@ -39,15 +39,21 @@ describe('Companion update feedback', () => {
 })
 
 describe('Companion story target cache', () => {
-  it('tracks content-script story targets and injects the MAIN-world network hook', () => {
+  it('uses content-script changes to re-probe the live tab and injects the network hook', () => {
     expect(backgroundSource).toContain("message?.type === 'storyTargetChanged'")
-    expect(backgroundSource).toContain("message?.type === 'getStoryTarget'")
+    expect(backgroundSource).not.toContain('storyTargetsByTab')
+    expect(backgroundSource).toContain('const liveUrl = await resolveLiveTabUrl(tab)')
     expect(backgroundSource).toContain('installInstagramStoryNetworkHook')
     expect(backgroundSource).toContain("world: 'MAIN'")
   })
 
-  it('supports user-triggered extension reload after AppData staging', () => {
-    expect(backgroundSource).toContain("message?.type === 'reloadExtension'")
+  it('notifies by default and reloads only after explicit opt-in', () => {
+    expect(backgroundSource).toContain("const COMPANION_UPDATE_ALARM = 'ninjacrawler-companion-update'")
+    expect(backgroundSource).toContain('loadCompanionUpdateStatus()')
+    expect(backgroundSource).toContain('autoReloadCompanionUpdates = false')
+    expect(backgroundSource).toContain('if (!autoReloadCompanionUpdates) return')
+    expect(backgroundSource).toContain('notifyManagedCompanionUpdate(stagedVersion)')
+    expect(backgroundSource).toContain('pendingCompanionVersion === stagedVersion')
     expect(backgroundSource).toContain('chrome.runtime.reload()')
   })
 })

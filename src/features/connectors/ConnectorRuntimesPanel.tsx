@@ -2,6 +2,7 @@ import { useState } from 'react'
 import type { ConnectorRuntimeStatus } from '../../domain/models'
 import { useAppStore } from '../../state/appStore'
 import { connectorRuntimeStatusClassName, connectorRuntimeStatusLabel } from './connectorRuntimeStatus'
+import { CompanionRuntimeCard } from './CompanionRuntimeCard'
 
 export function ConnectorRuntimesPanel() {
   const snapshot = useAppStore((state) => state.snapshot)
@@ -37,6 +38,7 @@ export function ConnectorRuntimesPanel() {
     <section className="connector-runtime-panel" aria-label="Connector runtimes" aria-busy={Boolean(pendingCommand)}>
       {connectorRuntimes.length > 0 ? (
         <div className="connector-runtime-list">
+          <CompanionRuntimeCard />
           {connectorRuntimes.map((runtime) => (
             <article className="connector-runtime-row" key={runtime.key}>
               <header className="connector-settings-card-header">
@@ -115,10 +117,13 @@ export function ConnectorRuntimesPanel() {
           ))}
         </div>
       ) : (
-        <div className="connector-runtime-empty">
-          <h2>No connector runtimes</h2>
-          <p>Check again after the workspace finishes loading.</p>
-          <button className="primary-button" disabled={Boolean(pendingCommand)} onClick={() => void checkConnectorUpdates()} type="button">Check again</button>
+        <div className="connector-runtime-list">
+          <CompanionRuntimeCard />
+          <div className="connector-runtime-empty">
+            <h2>No connector runtimes</h2>
+            <p>Check again after the workspace finishes loading.</p>
+            <button className="primary-button" disabled={Boolean(pendingCommand)} onClick={() => void checkConnectorUpdates()} type="button">Check again</button>
+          </div>
         </div>
       )}
     </section>
