@@ -3708,6 +3708,103 @@ p {
   text-overflow: ellipsis;
 }
 
+.profile-paused-badge {
+  max-width: 100%;
+  border-radius: 999px;
+  padding: 0.14rem 0.34rem;
+  background: var(--pill-warning-bg);
+  color: var(--pill-warning-ink);
+  border: 1px solid color-mix(in srgb, var(--pill-warning-ink) 20%, transparent 80%);
+  font-family: var(--font-mono);
+  font-size: 0.52rem;
+  letter-spacing: 0.06em;
+  line-height: 1;
+  text-transform: uppercase;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Perfil pausado recua no grid: a miniatura perde cor e opacidade. */
+.profile-card-paused .profile-thumb {
+  filter: grayscale(0.85);
+  opacity: 0.62;
+  transition: filter 0.12s ease, opacity 0.12s ease;
+}
+
+/* No hover/seleção volta a cor cheia para inspeção. */
+.profile-card-paused:hover .profile-thumb,
+.profile-card-paused.profile-card-selected .profile-thumb {
+  filter: none;
+  opacity: 1;
+}
+
+/* Fingerprint de sections de sync: trilha de slots fixos acima do provider
+   badge. A posição de cada chip carrega significado (ver profileSyncSections.ts),
+   então ligadas ganham cor do provider e desligadas ficam fantasma. */
+.profile-sections-strip {
+  position: absolute;
+  left: 3px;
+  right: 3px;
+  bottom: 24px;
+  display: flex;
+  gap: 2px;
+  justify-content: center;
+  flex-wrap: nowrap;
+  padding: 2px;
+  border-radius: 5px;
+  background: rgba(17, 17, 17, 0.72);
+  pointer-events: none;
+}
+
+.profile-section-chip {
+  flex: 0 0 auto;
+  min-width: 15px;
+  padding: 0 2px;
+  border-radius: 2px;
+  font-family: var(--font-mono);
+  font-size: 0.5rem;
+  line-height: 1.35;
+  letter-spacing: 0.03em;
+  text-align: center;
+}
+
+/* Desligada: apenas presente para manter a posição do slot. */
+.profile-section-chip-off {
+  color: rgba(233, 233, 233, 0.32);
+}
+
+/* Ligada: cor viva do provider sobre o fundo escuro da trilha (contraste
+   confiável em cima de qualquer thumbnail). */
+.profile-section-chip-on {
+  color: #f4f4f4;
+  font-weight: 500;
+}
+
+.profile-sections-strip[data-provider="instagram"] .profile-section-chip-on {
+  color: #ff9dbd;
+}
+
+.profile-sections-strip[data-provider="tiktok"] .profile-section-chip-on {
+  color: #6fe0ef;
+}
+
+.profile-sections-strip[data-provider="twitter"] .profile-section-chip-on {
+  color: #7fc0f0;
+}
+
+/* Modo "on hover": trilha escondida por padrão, revelada ao passar o mouse
+   (ou com foco via teclado no card). */
+.profile-card-sections-hover .profile-sections-strip {
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+
+.profile-card-sections-hover:hover .profile-sections-strip,
+.profile-card-sections-hover:focus-visible .profile-sections-strip {
+  opacity: 1;
+}
+
 .profile-card-has-sync-issue .profile-thumb-frame {
   border-color: color-mix(in srgb, var(--warning) 55%, var(--line) 45%);
 }

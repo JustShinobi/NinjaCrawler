@@ -21,12 +21,17 @@ import {
 } from './workspaceProfiles'
 import { syncProblemBadgeLabel } from './syncProblemBadges'
 import { computeSyncFreshness } from './syncFreshness'
+import { resolveSyncSectionChips, summarizeEnabledSections } from './profileSyncSections'
 
 const VIEW_MODE_KEY = 'nc-view-mode'
 const GROUP_MODE_KEY = 'nc-group-mode'
 const SORT_MODE_KEY = 'nc-sort-mode'
+const SECTIONS_MODE_KEY = 'nc-sections-mode'
 
 type ViewMode = 'grid' | 'list'
+// Visibilidade do fingerprint de sections no grid: escondido, só no hover do
+// card, ou sempre visível.
+type SectionsMode = 'off' | 'hover' | 'on'
 
 // Virtualização da lista de perfis (padrão do ProfileViewPage): grupos são
 // achatados em linhas virtuais — header, fileiras de grid ou linhas de lista.
@@ -82,6 +87,12 @@ function getStoredSortMode(): SortMode {
   return 'name-asc'
 }
 
+function getStoredSectionsMode(): SectionsMode {
+  const stored = localStorage.getItem(SECTIONS_MODE_KEY)
+  if (stored === 'hover' || stored === 'on') return stored
+  return 'off'
+}
+
 export interface SourceSelectionOptions {
   append?: boolean
   range?: boolean
@@ -124,6 +135,7 @@ export function ProfileWorkspace({
   const [viewMode, setViewModeState] = useState<ViewMode>(getStoredViewMode)
   const [groupMode, setGroupModeState] = useState<GroupMode>(getStoredGroupMode)
   const [sortMode, setSortModeState] = useState<SortMode>(getStoredSortMode)
+  const [sectionsMode, setSectionsModeState] = useState<SectionsMode>(getStoredSectionsMode)
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set())
   // Reference time for last-sync freshness badges, captured once on mount.
   // Freshness tiers are coarse (24h / 7d / 30d), so a fixed reference is fine;
@@ -356,6 +368,11 @@ export function ProfileWorkspace({
     setSortModeState(next)
   }
 
+  function changeSectionsMode(next: SectionsMode) {
+    localStorage.setItem(SECTIONS_MODE_KEY, next)
+    setSectionsModeState(next)
+  }
+
   function toggleGroupCollapse(groupKey: string) {
     setCollapsedGroups((prev) => {
       const next = new Set(prev)
@@ -523,6 +540,19 @@ export function ProfileWorkspace({
             <option value="date-added">Date added</option>
             <option value="last-synced">Last synced</option>
           </select>
+          {viewMode === 'grid' ? (
+            <select
+              aria-label="Sync sections overlay"
+              className="workspace-toolbar-select"
+              onChange={(e) => changeSectionsMode(e.target.value as SectionsMode)}
+              title="Show which sync sections are enabled on each card"
+              value={sectionsMode}
+            >
+              <option value="off">Sections: off</option>
+              <option value="hover">Sections: on hover</option>
+              <option value="on">Sections: always</option>
+            </select>
+          ) : null}
           <div className="view-toggle-group">
             <button
               aria-label="Grid view"
@@ -650,6 +680,7 @@ export function ProfileWorkspace({
                             onEditSource={onEditSource}
                             previewSrc={previewSrcBySource.get(source.id)}
                             providerLabel={providerLabels.get(source.provider) ?? source.provider}
+                            sectionsMode={sectionsMode}
                             selected={selectedSourceSet.has(source.id)}
                             source={source}
                           />
@@ -711,6 +742,8 @@ interface CardProps {
   now: number
   previewSrc: string | undefined
   providerLabel: string
+  // Só o GridCard consome; o ListRow ignora.
+  sectionsMode?: SectionsMode
   onCardClick: (id: string, event: React.MouseEvent) => void
   onEditSource: (id: string) => void
   onCardContextMenu: (event: React.MouseEvent, sourceId: string, deleting: boolean) => void
@@ -728,6 +761,7 @@ const GridCard = memo(function GridCard({
   now,
   previewSrc,
   providerLabel,
+  sectionsMode = 'off',
   onCardClick,
   onEditSource,
   onCardContextMenu,
@@ -737,6 +771,13 @@ const GridCard = memo(function GridCard({
   const syncIssueLabel = source.syncProblemMessage ?? source.syncProblemCode
   const syncIssueBadge = syncProblemBadgeLabel(source.syncProblemCode)
   const freshness = computeSyncFreshness(source.lastSyncedAt, now)
+  // Perfil pausado (não Ready for Download) recua no grid. Um problema de sync
+  // já traz o próprio badge de aviso, então o pill "paused" só aparece na pausa
+  // manual — sem empilhar dois avisos no mesmo card.
+  const paused = !source.readyForDownload
+  const showPausedBadge = paused && !syncIssueLabel
+  // Fingerprint de sections: só computa quando o overlay não está desligado.
+  const sectionChips = sectionsMode === 'off' ? [] : resolveSyncSectionChips(source)
 
   return (
     <button
@@ -746,6 +787,8 @@ const GridCard = memo(function GridCard({
         'profile-card',
         selected ? 'profile-card-selected' : '',
         source.syncProblemCode ? 'profile-card-has-sync-issue' : '',
+        paused ? 'profile-card-paused' : '',
+        sectionsMode === 'hover' ? 'profile-card-sections-hover' : '',
       ].filter(Boolean).join(' ')}
       data-source-id={source.id}
       onClick={(event) => onCardClick(source.id, event)}
@@ -764,11 +807,16 @@ const GridCard = memo(function GridCard({
           </div>
         )}
         <span className={`profile-provider-badge provider-${source.provider}`}>{providerLabel}</span>
-        {syncIssueLabel || freshness ? (
+        {syncIssueLabel || freshness || showPausedBadge ? (
           <div className="profile-badge-stack">
             {syncIssueLabel ? (
               <span className="profile-sync-issue-badge" title={syncIssueLabel}>
                 {syncIssueBadge}
+              </span>
+            ) : null}
+            {showPausedBadge ? (
+              <span className="profile-paused-badge" title="Not ready for download — automatic downloads paused">
+                Paused
               </span>
             ) : null}
             {freshness ? (
@@ -782,6 +830,19 @@ const GridCard = memo(function GridCard({
           </div>
         ) : null}
         {selected ? <span aria-hidden className="profile-selection-indicator" /> : null}
+        {sectionChips.length > 0 ? (
+          <div className="profile-sections-strip" data-provider={source.provider} title={summarizeEnabledSections(sectionChips)}>
+            {sectionChips.map((chip) => (
+              <span
+                className={`profile-section-chip${chip.enabled ? ' profile-section-chip-on' : ' profile-section-chip-off'}`}
+                key={chip.code}
+                title={`${chip.label}: ${chip.enabled ? 'on' : 'off'}`}
+              >
+                {chip.code}
+              </span>
+            ))}
+          </div>
+        ) : null}
       </div>
       <span className="profile-name" title={displayHandle}>
         {displayHandle}

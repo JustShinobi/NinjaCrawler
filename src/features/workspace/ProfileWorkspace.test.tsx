@@ -49,7 +49,7 @@ describe('ProfileWorkspace', () => {
     delete (window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__
   })
 
-  function buildSnapshot(options?: { withSyncIssue?: boolean }): WorkspaceSnapshot {
+  function buildSnapshot(options?: { withSyncIssue?: boolean; paused?: boolean }): WorkspaceSnapshot {
     return {
       ...createEmptyWorkspaceSnapshot(),
       sources: [
@@ -61,7 +61,7 @@ describe('ProfileWorkspace', () => {
           displayName: 'visual_lab',
           accountId: 'account-1',
           labels: ['priority'],
-          readyForDownload: true,
+          readyForDownload: !options?.paused,
           remoteState: 'exists' as const,
           isSubscription: false,
           profileImageCustom: false,
@@ -105,6 +105,146 @@ describe('ProfileWorkspace', () => {
     expect(screen.queryByText('@visual_lab')).toBeNull()
     expect(onSelectSource).toHaveBeenCalledWith('source-1')
     expect(onOpenSourceContextMenu).toHaveBeenCalledWith('source-1', 164, 212, false)
+  })
+
+  it('marks paused profiles (not ready for download) with a badge and card class', () => {
+    render(
+      <ProfileWorkspace
+        onClearSelection={vi.fn()}
+        onEditSource={vi.fn()}
+        onOpenSourceContextMenu={vi.fn()}
+        onSelectSource={vi.fn()}
+        onServiceTabChange={vi.fn()}
+        onSavePathFilterChange={vi.fn()}
+        savePathFilter=""
+        searchText=""
+        selectedSourceIds={[]}
+        serviceTab="all"
+        snapshot={buildSnapshot({ paused: true })}
+      />,
+    )
+
+    expect(screen.getByText('Paused')).toBeTruthy()
+    expect(screen.getByRole('listitem').className).toContain('profile-card-paused')
+  })
+
+  it('does not render a ready profile as paused', () => {
+    render(
+      <ProfileWorkspace
+        onClearSelection={vi.fn()}
+        onEditSource={vi.fn()}
+        onOpenSourceContextMenu={vi.fn()}
+        onSelectSource={vi.fn()}
+        onServiceTabChange={vi.fn()}
+        onSavePathFilterChange={vi.fn()}
+        savePathFilter=""
+        searchText=""
+        selectedSourceIds={[]}
+        serviceTab="all"
+        snapshot={buildSnapshot()}
+      />,
+    )
+
+    expect(screen.queryByText('Paused')).toBeNull()
+    expect(screen.getByRole('listitem').className).not.toContain('profile-card-paused')
+  })
+
+  it('does not stack a paused badge on top of a sync issue badge', () => {
+    render(
+      <ProfileWorkspace
+        onClearSelection={vi.fn()}
+        onEditSource={vi.fn()}
+        onOpenSourceContextMenu={vi.fn()}
+        onSelectSource={vi.fn()}
+        onServiceTabChange={vi.fn()}
+        onSavePathFilterChange={vi.fn()}
+        savePathFilter=""
+        searchText=""
+        selectedSourceIds={[]}
+        serviceTab="all"
+        snapshot={buildSnapshot({ withSyncIssue: true, paused: true })}
+      />,
+    )
+
+    // O card recua (classe de pausa) mas o pill "Paused" não empilha com o
+    // badge de sync issue — só o aviso de sync aparece.
+    expect(screen.getByRole('listitem').className).toContain('profile-card-paused')
+    expect(screen.queryByText('Paused')).toBeNull()
+    expect(screen.getByText('Auth required')).toBeTruthy()
+  })
+
+  it('hides the sync sections fingerprint by default (sections mode off)', () => {
+    render(
+      <ProfileWorkspace
+        onClearSelection={vi.fn()}
+        onEditSource={vi.fn()}
+        onOpenSourceContextMenu={vi.fn()}
+        onSelectSource={vi.fn()}
+        onServiceTabChange={vi.fn()}
+        onSavePathFilterChange={vi.fn()}
+        savePathFilter=""
+        searchText=""
+        selectedSourceIds={[]}
+        serviceTab="all"
+        snapshot={buildSnapshot()}
+      />,
+    )
+
+    // Sem chips e o card não recebe a classe de hover.
+    expect(screen.queryByText('TL')).toBeNull()
+    expect(screen.getByRole('listitem').className).not.toContain('profile-card-sections-hover')
+  })
+
+  it('renders the sync sections fingerprint when the overlay is set to always on', () => {
+    localStorage.setItem('nc-sections-mode', 'on')
+
+    render(
+      <ProfileWorkspace
+        onClearSelection={vi.fn()}
+        onEditSource={vi.fn()}
+        onOpenSourceContextMenu={vi.fn()}
+        onSelectSource={vi.fn()}
+        onServiceTabChange={vi.fn()}
+        onSavePathFilterChange={vi.fn()}
+        savePathFilter=""
+        searchText=""
+        selectedSourceIds={[]}
+        serviceTab="all"
+        snapshot={buildSnapshot()}
+      />,
+    )
+
+    // Instagram: 5 slots, Timeline ligada por padrão.
+    expect(screen.getByText('TL')).toBeTruthy()
+    expect(screen.getByText('RE')).toBeTruthy()
+    expect(screen.getByText('TG')).toBeTruthy()
+    const timelineChip = screen.getByText('TL')
+    expect(timelineChip.className).toContain('profile-section-chip-on')
+    const reelsChip = screen.getByText('RE')
+    expect(reelsChip.className).toContain('profile-section-chip-off')
+  })
+
+  it('adds the hover class to cards when the overlay is set to on-hover', () => {
+    localStorage.setItem('nc-sections-mode', 'hover')
+
+    render(
+      <ProfileWorkspace
+        onClearSelection={vi.fn()}
+        onEditSource={vi.fn()}
+        onOpenSourceContextMenu={vi.fn()}
+        onSelectSource={vi.fn()}
+        onServiceTabChange={vi.fn()}
+        onSavePathFilterChange={vi.fn()}
+        savePathFilter=""
+        searchText=""
+        selectedSourceIds={[]}
+        serviceTab="all"
+        snapshot={buildSnapshot()}
+      />,
+    )
+
+    expect(screen.getByRole('listitem').className).toContain('profile-card-sections-hover')
+    expect(screen.getByText('TL')).toBeTruthy()
   })
 
   it('filters profiles from different providers by their save path', () => {
