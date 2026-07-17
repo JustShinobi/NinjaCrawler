@@ -456,6 +456,20 @@ if ($companionReleaseWorkflow.Contains("'release', 'edit'")) {
 }
 
 foreach ($requiredFragment in @(
+    'Mirror Companion asset into latest NinjaCrawler release',
+    'repos/$env:GH_REPO/releases/latest',
+    "'^v\d+\.\d+\.\d+$'",
+    '$latest.immutable',
+    'Update-NinjaCrawlerReleaseCompanionMetadata.ps1',
+    'gh release upload $latest.tag_name @mirrorAssets',
+    'gh release delete-asset $latest.tag_name $staleAsset'
+)) {
+    if (-not $companionReleaseWorkflow.Contains($requiredFragment)) {
+        throw "Companion release workflow is missing latest app asset mirroring: $requiredFragment"
+    }
+}
+
+foreach ($requiredFragment in @(
     "EVENT_PR_NUMBER: `${{ github.event.pull_request.number || '' }}",
     'if [ "$EVENT_NAME" = "pull_request" ]; then',
     'pr="$EVENT_PR_NUMBER"',
