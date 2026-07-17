@@ -303,7 +303,7 @@ jobs:
             throw "Companion README update PR is missing required checks: $($missingChecks -join ', ')."
           }
 
-          gh pr merge $pr --repo ${{ github.repository }} --squash --delete-branch `
+          gh pr merge $pr --repo ${{ github.repository }} --merge --delete-branch `
             --subject "docs(readme): update Companion download links for $env:RELEASE_TAG" `
             --body "[skip ci]"
           if ($LASTEXITCODE -ne 0) {

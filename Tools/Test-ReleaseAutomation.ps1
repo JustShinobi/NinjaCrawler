@@ -504,6 +504,12 @@ if ($appReleaseWorkflow.Contains('gh pr merge $pr --repo ${{ github.repository }
 if (-not $appReleaseWorkflow.Contains('gh pr merge $pr --repo ${{ github.repository }} --merge')) {
     throw "App README automation must use gh pr merge --merge."
 }
+if ($companionReleaseWorkflow.Contains('gh pr merge $pr --repo ${{ github.repository }} --squash')) {
+    throw "Companion README automation must not use gh pr merge --squash (main ruleset is merge-only)."
+}
+if (-not $companionReleaseWorkflow.Contains('gh pr merge $pr --repo ${{ github.repository }} --merge')) {
+    throw "Companion README automation must use gh pr merge --merge."
+}
 
 foreach ($requiredFragment in @(
     'Do not squash',
