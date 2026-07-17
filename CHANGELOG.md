@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.25.0](https://github.com/JustShinobi/NinjaCrawler/compare/v0.24.1...v0.25.0) (2026-07-17)
+
+
+### Features
+
+* **companion:** support automated updates and improve story detection ([#66](https://github.com/JustShinobi/NinjaCrawler/issues/66)) ([30cbbc7](https://github.com/JustShinobi/NinjaCrawler/commit/30cbbc73306394982918fdb81e70c780c73ad448))
+* **workspace:** show ready-for-download and sync sections status on profile cards ([#72](https://github.com/JustShinobi/NinjaCrawler/issues/72)) ([22f4c69](https://github.com/JustShinobi/NinjaCrawler/commit/22f4c697e799f62b4ddbec1b988758a31a26e26c))
+
+
+### Bug Fixes
+
+* **release:** merge companion readme updates on main ([fa0a368](https://github.com/JustShinobi/NinjaCrawler/commit/fa0a368fbd580066305818c7bc876cddf1b12f22))
+* **release:** recover Companion draft publication ([c3eed49](https://github.com/JustShinobi/NinjaCrawler/commit/c3eed49a109b89a97f2691ad24d6ae72f4cee80b))
+* **release:** resolve companion drafts by database id ([0199093](https://github.com/JustShinobi/NinjaCrawler/commit/01990930a24d3cd8c12a466d13d33c34db83688b))
+
 ## [0.24.1](https://github.com/JustShinobi/NinjaCrawler/compare/v0.24.0...v0.24.1) (2026-07-16)
 
 
