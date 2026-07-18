@@ -153,6 +153,92 @@ powershell -ExecutionPolicy Bypass -File Tools\Publish-NinjaCrawler.ps1 -Configu
 5. Validate at least one provider-account health check and one manual source sync from the published build.
 6. Smoke-test `bundle\nsis\*-setup.exe` when an installer is part of the release.
 
+## Auto-Update (tauri-plugin-updater)
+
+The desktop app ships with `tauri-plugin-updater` v2 wired end to end:
+
+- `src-tauri/tauri.conf.json` declares the updater endpoint
+  `https://github.com/JustShinobi/NinjaCrawler/releases/latest/download/latest.json`
+  and declares `bundle.createUpdaterArtifacts` (shipped as `false` until signing
+  is configured, so releases keep working out of the box).
+- The **About** panel shows an **Install update** button when a newer release is
+  detected. It downloads the signed installer with a live progress indicator and
+  relaunches the app.
+- The lightweight "update available" check (`check_app_update`) still queries the
+  GitHub API directly and is independent of the signed updater flow.
+
+The repository ships a **placeholder** public key
+(`"TAURI_UPDATER_PUBKEY_PLACEHOLDER"`). While the placeholder is in place the
+app still runs and the "update available" banner still works; only the **Install
+update** action fails gracefully with a clear "auto-update is not configured"
+message. Nothing panics.
+
+### Operator setup (one-time manual steps)
+
+Auto-update requires a minisign key pair. These steps are **not** automated
+because the private key must never be committed.
+
+1. **Generate the key pair** (needs the Tauri CLI, `cargo install tauri-cli` or
+   `npm run tauri`):
+
+   ```powershell
+   cargo tauri signer generate -w %USERPROFILE%\.tauri\ninjacrawler-updater.key
+   ```
+
+   This prints a **public key** and writes a password-protected **private key**.
+
+2. **Store the private key safely.** Keep the `.key` file (and its password) in a
+   secret manager. Losing it means you cannot ship updates that existing installs
+   will accept.
+
+3. **Publish the public key.** Replace the `"TAURI_UPDATER_PUBKEY_PLACEHOLDER"`
+   value of `plugins.updater.pubkey` in `src-tauri/tauri.conf.json` with the
+   generated public key, then commit that change.
+
+4. **Add the CI secrets.** In the GitHub repository settings add:
+   - `TAURI_SIGNING_PRIVATE_KEY` — the contents of the generated `.key` file.
+   - `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` — the password chosen in step 1.
+
+   The **Build Release** step of `.github/workflows/release.yml` already consumes
+   both secrets.
+
+5. **Enable updater artifacts.** Flip `bundle.createUpdaterArtifacts` to `true`
+   in `src-tauri/tauri.conf.json` (it ships as `false` so releases do not fail
+   while signing is unconfigured) and commit together with the pubkey change.
+   With it enabled but the secrets missing, the bundling step **fails** — so do
+   steps 3–5 as one change.
+
+### `latest.json` (release pipeline follow-up)
+
+The release is packaged by `Tools/Package-NinjaCrawlerRelease.ps1` and published
+by the `publish` job, not by `tauri-action`, so the updater manifest is **not**
+generated automatically. Once signing is configured, the signed bundle produces
+`*-setup.exe` plus a matching `*-setup.exe.sig`. To complete the auto-update
+loop, the packaging/publish flow must additionally:
+
+- include the `*-setup.exe.sig` file alongside the installer in the release
+  assets (and in `SHA256SUMS.txt` / `BUILD-PROVENANCE.json` expectations), and
+- generate a `latest.json` manifest and attach it to the GitHub release so the
+  endpoint URL above resolves. Minimal shape:
+
+  ```json
+  {
+    "version": "0.24.1",
+    "notes": "See the release changelog.",
+    "pub_date": "2026-07-18T00:00:00Z",
+    "platforms": {
+      "windows-x86_64": {
+        "signature": "<contents of the .sig file>",
+        "url": "https://github.com/JustShinobi/NinjaCrawler/releases/download/v0.24.1/NinjaCrawler-0.24.1-windows-x64-setup.exe"
+      }
+    }
+  }
+  ```
+
+Until `latest.json` is attached to releases, the **Install update** button will
+report that no update manifest was found; the GitHub "update available" banner
+and manual download links continue to work.
+
 ## Provider Extensibility Boundary
 
 The current V1 provider boundary is intentionally narrow:

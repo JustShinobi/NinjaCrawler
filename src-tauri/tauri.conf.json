@@ -35,8 +35,17 @@
       }
     }
   },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://github.com/JustShinobi/NinjaCrawler/releases/latest/download/latest.json"
+      ],
+      "pubkey": "TAURI_UPDATER_PUBKEY_PLACEHOLDER"
+    }
+  },
   "bundle": {
     "active": true,
+    "createUpdaterArtifacts": false,
     "targets": [
       "nsis"
     ],

@@ -11,6 +11,7 @@ pub fn run() {
         .plugin(infrastructure::desktop_runtime::window_state_plugin())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             infrastructure::desktop_runtime::setup(app.handle())
                 .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;
@@ -47,6 +48,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             application::commands::get_app_build_info,
             application::commands::check_app_update,
+            application::commands::install_app_update,
             application::commands::bootstrap_workspace,
             application::commands::prepare_connector_runtimes,
             application::commands::check_connector_updates,

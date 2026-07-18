@@ -305,6 +305,14 @@ jobs:
           NINJACRAWLER_RELEASE_BUILD: "true"
           NINJACRAWLER_RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
           NINJACRAWLER_BUILD_SHA: ${{ needs.prepare.outputs.sha }}
+          # Required by `bundle.createUpdaterArtifacts` in tauri.conf.json: the
+          # NSIS installer is signed and a matching `.sig` is emitted so the
+          # auto-updater can verify downloads. Generate the key pair once with
+          # `cargo tauri signer generate` and store both halves as repository
+          # secrets (see docs/windows-distribution.md). Until the secret exists
+          # the bundling step fails, because updater artifacts cannot be signed.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: >
           pwsh -File Tools/Build-NinjaCrawler.ps1
           -Configuration Release

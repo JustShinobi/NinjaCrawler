@@ -39,6 +39,11 @@ pub async fn check_app_update() -> Result<AppUpdateStatus, String> {
 }
 
 #[tauri::command]
+pub async fn install_app_update(app: tauri::AppHandle) -> Result<(), String> {
+    app_update::install_update(app).await
+}
+
+#[tauri::command]
 pub fn bootstrap_workspace(app: tauri::AppHandle) -> Result<WorkspaceSnapshot, String> {
     connector_runtime::register_app_handle(&app);
     let snapshot = publish_snapshot(&app, workspace_repository::bootstrap_workspace()?)?;

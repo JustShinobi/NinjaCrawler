@@ -3,6 +3,8 @@ import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow'
 import {
   enqueueSourceMediaPathMigration,
   checkAppUpdate,
+  installAppUpdate,
+  onAppUpdateProgress,
   checkSourceAvailability,
   enqueueSourceDelete,
   loadSourceDeleteQueueStatus,
@@ -32,6 +34,7 @@ import {
 import type {
   AccountsWindowIntent,
   AppBuildInfo,
+  AppUpdateProgress,
   AppUpdateStatus,
   ConnectorRuntimeStatus,
   InstagramPresetSlot,
@@ -155,6 +158,9 @@ function App() {
   const [appUpdateStatus, setAppUpdateStatus] = useState<AppUpdateStatus>()
   const [appUpdateChecking, setAppUpdateChecking] = useState(false)
   const [appUpdateError, setAppUpdateError] = useState<string>()
+  const [appUpdateInstalling, setAppUpdateInstalling] = useState(false)
+  const [appUpdateProgress, setAppUpdateProgress] = useState<AppUpdateProgress>()
+  const [appUpdateInstallError, setAppUpdateInstallError] = useState<string>()
   const [availabilityCheckDialog, setAvailabilityCheckDialog] = useState<AvailabilityCheckDialogState>()
   const [availabilityAccountPrompt, setAvailabilityAccountPrompt] = useState<AvailabilityAccountPromptState>()
   const [openMenu, setOpenMenu] = useState<string | null>(null)
@@ -204,6 +210,25 @@ function App() {
       setAppUpdateError(updateError instanceof Error ? updateError.message : String(updateError))
     } finally {
       setAppUpdateChecking(false)
+    }
+  }, [])
+
+  const runAppUpdateInstall = useCallback(async () => {
+    setAppUpdateInstalling(true)
+    setAppUpdateInstallError(undefined)
+    setAppUpdateProgress(undefined)
+    let unlisten: (() => void) | undefined
+    try {
+      unlisten = await onAppUpdateProgress((progress) => setAppUpdateProgress(progress))
+      // On success the backend relaunches the app, so this never resolves.
+      await installAppUpdate()
+    } catch (installError) {
+      setAppUpdateInstallError(
+        installError instanceof Error ? installError.message : String(installError),
+      )
+      setAppUpdateInstalling(false)
+    } finally {
+      unlisten?.()
     }
   }, [])
 
@@ -1836,7 +1861,11 @@ function App() {
             databasePath={workspaceSnapshot.dbPath}
             mediaRoot={workspaceSnapshot.mediaRoot}
             onCheckUpdate={() => void runAppUpdateCheck()}
+            onInstallUpdate={() => void runAppUpdateInstall()}
             onOpenRelease={(url) => void openExternalTarget(url)}
+            updateInstalling={appUpdateInstalling}
+            updateProgress={appUpdateProgress}
+            updateInstallError={appUpdateInstallError}
             planCount={workspaceSnapshot.schedulerSets.reduce((count, schedulerSet) => count + schedulerSet.plans.length, 0)}
             profileCount={workspaceSnapshot.sources.length}
             updateChecking={appUpdateChecking}

@@ -16,6 +16,7 @@ import type {
   AppSetting,
   AppSettingUpsert,
   AppBuildInfo,
+  AppUpdateProgress,
   AppUpdateStatus,
   AuthMode,
   AuthState,
@@ -2118,6 +2119,35 @@ export async function getAppBuildInfo(): Promise<AppBuildInfo> {
 
 export async function checkAppUpdate(): Promise<AppUpdateStatus> {
   return normalizeAppUpdateStatus(await invoke<unknown>('check_app_update'))
+}
+
+const APP_UPDATE_PROGRESS_EVENT_NAME = 'runtime://app-update-progress'
+
+function normalizeAppUpdateProgress(raw: unknown): AppUpdateProgress {
+  const value = isRecord(raw) ? raw : {}
+  const phase = enumValue(
+    pick(value, 'phase'),
+    ['downloading', 'installing', 'done'] as const,
+    'downloading',
+  )
+  return {
+    phase,
+    downloaded: numberValue(value, ['downloaded'], 0),
+    total: optionalNumberValue(value, ['total']),
+    percent: optionalNumberValue(value, ['percent']),
+  }
+}
+
+export async function installAppUpdate(): Promise<void> {
+  await invoke('install_app_update')
+}
+
+export function onAppUpdateProgress(
+  handler: (progress: AppUpdateProgress) => void,
+): Promise<() => void> {
+  return listen(APP_UPDATE_PROGRESS_EVENT_NAME, (event) => {
+    handler(normalizeAppUpdateProgress(event.payload))
+  })
 }
 
 export async function loadSystemShortDatePattern(): Promise<string> {

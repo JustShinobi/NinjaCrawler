@@ -7,8 +7,18 @@ use serde::Deserialize;
 use crate::domain::models::{AppBuildChannel, AppBuildInfo, AppUpdateStatus};
 
 const LATEST_RELEASE_URL: &str =
-    "https://api.github.com/repos/MetalDevOps/NinjaCrawler/releases/latest";
+    "https://api.github.com/repos/JustShinobi/NinjaCrawler/releases/latest";
+const RELEASE_URL_PREFIX: &str = "https://github.com/JustShinobi/NinjaCrawler/releases/";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Placeholder that ships in `tauri.conf.json` until the operator generates a
+/// real minisign key pair with `cargo tauri signer generate`. When the pubkey
+/// is still this placeholder the install flow fails gracefully instead of
+/// panicking, and the lightweight GitHub check keeps working unchanged.
+const UPDATER_PUBKEY_PLACEHOLDER: &str = "TAURI_UPDATER_PUBKEY_PLACEHOLDER";
+
+/// Event emitted to the frontend while an update download/install is running.
+pub const APP_UPDATE_PROGRESS_EVENT: &str = "runtime://app-update-progress";
 
 #[derive(Deserialize)]
 struct GitHubRelease {
@@ -84,10 +94,7 @@ fn status_from_release(
     release: GitHubRelease,
 ) -> Result<AppUpdateStatus, String> {
     let latest = strict_release_version(&release.tag_name)?;
-    if !release
-        .html_url
-        .starts_with("https://github.com/MetalDevOps/NinjaCrawler/releases/")
-    {
+    if !release.html_url.starts_with(RELEASE_URL_PREFIX) {
         return Err("GitHub returned an unexpected release URL.".to_string());
     }
     let current = Version::parse(&build.version).map_err(|error| {
@@ -107,6 +114,124 @@ fn status_from_release(
     })
 }
 
+/// Progress payload emitted while an update is downloaded and installed.
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AppUpdateProgress {
+    /// One of `downloading`, `installing`, `done`.
+    phase: &'static str,
+    downloaded: u64,
+    total: Option<u64>,
+    percent: Option<u32>,
+}
+
+/// Downloads and installs the latest release via `tauri-plugin-updater`, then
+/// relaunches the app. Progress is streamed to the frontend through the
+/// [`APP_UPDATE_PROGRESS_EVENT`] event.
+///
+/// The lightweight [`check_app_update`] flow above stays independent: it talks
+/// to the GitHub API directly for the "update available" banner. This function
+/// is the heavier "Install update" path that requires a configured signing
+/// public key. If the key is still the placeholder (or the updater is otherwise
+/// not configured) it fails gracefully with a clear message and never panics.
+pub async fn install_update(app: tauri::AppHandle) -> Result<(), String> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Arc;
+
+    use tauri::Emitter;
+    use tauri_plugin_updater::UpdaterExt;
+
+    ensure_updater_configured(&app)?;
+
+    let updater = app
+        .updater()
+        .map_err(|error| format!("The auto-updater is not configured: {error}"))?;
+
+    let update = updater
+        .check()
+        .await
+        .map_err(|error| format!("Could not check for updates: {error}"))?
+        .ok_or_else(|| "No update is available to install.".to_string())?;
+
+    let downloaded = Arc::new(AtomicU64::new(0));
+    let progress_app = app.clone();
+    let progress_downloaded = Arc::clone(&downloaded);
+
+    update
+        .download_and_install(
+            move |chunk_length, content_length| {
+                let total = progress_downloaded
+                    .fetch_add(chunk_length as u64, Ordering::Relaxed)
+                    + chunk_length as u64;
+                let percent = content_length
+                    .filter(|len| *len > 0)
+                    .map(|len| ((total.min(len) * 100) / len) as u32);
+                let _ = progress_app.emit(
+                    APP_UPDATE_PROGRESS_EVENT,
+                    AppUpdateProgress {
+                        phase: "downloading",
+                        downloaded: total,
+                        total: content_length,
+                        percent,
+                    },
+                );
+            },
+            {
+                let finish_app = app.clone();
+                move || {
+                    let _ = finish_app.emit(
+                        APP_UPDATE_PROGRESS_EVENT,
+                        AppUpdateProgress {
+                            phase: "installing",
+                            downloaded: 0,
+                            total: None,
+                            percent: Some(100),
+                        },
+                    );
+                }
+            },
+        )
+        .await
+        .map_err(|error| format!("Failed to install the update: {error}"))?;
+
+    let _ = app.emit(
+        APP_UPDATE_PROGRESS_EVENT,
+        AppUpdateProgress {
+            phase: "done",
+            downloaded: 0,
+            total: None,
+            percent: Some(100),
+        },
+    );
+
+    // On success the new version is staged; relaunching swaps it in.
+    app.restart();
+}
+
+/// Rejects the install flow early when the updater public key was never
+/// replaced, so the user gets a clear message instead of an opaque signature
+/// error deep inside the plugin.
+fn ensure_updater_configured(app: &tauri::AppHandle) -> Result<(), String> {
+    let pubkey = app
+        .config()
+        .plugins
+        .0
+        .get("updater")
+        .and_then(|updater| updater.get("pubkey"))
+        .and_then(|pubkey| pubkey.as_str())
+        .unwrap_or("");
+
+    if pubkey.trim().is_empty() || pubkey.trim() == UPDATER_PUBKEY_PLACEHOLDER {
+        return Err(
+            "Auto-update is not configured yet: replace the updater public key placeholder in \
+             tauri.conf.json with a key generated by `cargo tauri signer generate`."
+                .to_string(),
+        );
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -124,7 +249,7 @@ mod tests {
     fn release(tag: &str) -> GitHubRelease {
         GitHubRelease {
             tag_name: tag.to_string(),
-            html_url: "https://github.com/MetalDevOps/NinjaCrawler/releases/tag/test".to_string(),
+            html_url: "https://github.com/JustShinobi/NinjaCrawler/releases/tag/test".to_string(),
             published_at: Some("2026-07-13T00:00:00Z".to_string()),
         }
     }
