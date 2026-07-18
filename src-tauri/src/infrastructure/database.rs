@@ -159,6 +159,10 @@ const MIGRATIONS: &[(i64, &str)] = &[
         41,
         include_str!("../../migrations/0041_connector_runtime_asset_digest.sql"),
     ),
+    (
+        42,
+        include_str!("../../migrations/0042_source_profile_stats.sql"),
+    ),
 ];
 
 const PROVIDER_SYNC_RESUME_SCHEMA: &str =
@@ -268,6 +272,25 @@ fn ensure_migrations(connection: &mut Connection, path: &Path) -> rusqlite::Resu
          );",
     )?;
 
+    // Rede de segurança: antes de aplicar QUALQUER migration pendente num banco
+    // que já tem schema, grava um snapshot consistente. Migrations não têm
+    // "down" e podem ser destrutivas (DROP/rebuild), então um snapshot por salto
+    // de versão dá um ponto de restauração manual. Bancos novos (nenhuma
+    // migration aplicada) não têm dados a proteger e são pulados.
+    let applied_versions: HashSet<i64> = {
+        let mut statement = connection.prepare("SELECT version FROM schema_migrations")?;
+        let rows = statement.query_map([], |row| row.get::<_, i64>(0))?;
+        rows.collect::<rusqlite::Result<HashSet<i64>>>()?
+    };
+    let has_pending = MIGRATIONS
+        .iter()
+        .any(|(version, _)| !applied_versions.contains(version));
+    if has_pending {
+        if let Some(applied_max) = applied_versions.iter().copied().max() {
+            backup_database_before_migrations(connection, path, applied_max)?;
+        }
+    }
+
     for (version, sql) in MIGRATIONS {
         let already_applied = connection
             .query_row(
@@ -295,6 +318,281 @@ fn ensure_migrations(connection: &mut Connection, path: &Path) -> rusqlite::Resu
     Ok(())
 }
 
+/// Quantos snapshots pré-migration manter (os mais antigos são podados).
+const MIGRATION_BACKUP_RETENTION: usize = 3;
+
+/// Erro genérico de backup como `rusqlite::Error`, para propagar via `?` e
+/// abortar a abertura do banco quando o snapshot não pôde ser gravado.
+fn backup_error(message: String) -> rusqlite::Error {
+    rusqlite::Error::SqliteFailure(
+        rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CANTOPEN),
+        Some(message),
+    )
+}
+
+/// Grava um snapshot consistente do banco (`VACUUM INTO`, que consolida o WAL)
+/// em `<data_dir>/backups/<stem>.pre-v<N>.<timestamp>.db` e mantém só os últimos
+/// [`MIGRATION_BACKUP_RETENTION`]. Um erro aqui é fatal de propósito: sem o
+/// backup, as migrations não devem rodar.
+fn backup_database_before_migrations(
+    connection: &Connection,
+    db_path: &Path,
+    applied_max: i64,
+) -> rusqlite::Result<()> {
+    let parent = db_path.parent().unwrap_or_else(|| Path::new("."));
+    let backups_dir = parent.join("backups");
+    std::fs::create_dir_all(&backups_dir).map_err(|error| {
+        backup_error(format!(
+            "failed to create migration backups directory '{}': {error}",
+            backups_dir.display()
+        ))
+    })?;
+
+    let stem = db_path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("database");
+    let timestamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
+    let backup_path = backups_dir.join(format!("{stem}.pre-v{applied_max}.{timestamp}.db"));
+    // `VACUUM INTO` exige que o destino ainda não exista.
+    if backup_path.exists() {
+        let _ = std::fs::remove_file(&backup_path);
+    }
+    // O caminho vai como literal SQL; aspas simples precisam ser dobradas.
+    let target = backup_path.to_string_lossy().replace('\'', "''");
+    connection
+        .execute(&format!("VACUUM INTO '{target}'"), [])
+        .map_err(|error| {
+            backup_error(format!(
+                "failed to snapshot database into '{}': {error}",
+                backup_path.display()
+            ))
+        })?;
+
+    prune_migration_backups(&backups_dir, stem);
+    Ok(())
+}
+
+/// Mantém só os [`MIGRATION_BACKUP_RETENTION`] snapshots mais recentes de um
+/// mesmo banco, apagando os mais antigos (best-effort — erros são ignorados).
+fn prune_migration_backups(backups_dir: &Path, stem: &str) {
+    let prefix = format!("{stem}.pre-v");
+    let Ok(entries) = std::fs::read_dir(backups_dir) else {
+        return;
+    };
+    let mut backups: Vec<(std::time::SystemTime, PathBuf)> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            let name = path.file_name()?.to_str()?;
+            if !name.starts_with(&prefix) || !name.ends_with(".db") {
+                return None;
+            }
+            let modified = entry.metadata().and_then(|meta| meta.modified()).ok()?;
+            Some((modified, path))
+        })
+        .collect();
+    if backups.len() <= MIGRATION_BACKUP_RETENTION {
+        return;
+    }
+    // Mais novo primeiro (desempate por nome, que embute a versão/timestamp);
+    // tudo além dos N mais recentes é podado.
+    backups.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.cmp(&a.1)));
+    for (_, path) in backups.into_iter().skip(MIGRATION_BACKUP_RETENTION) {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+/// Abre uma conexão SEM rodar migrations (as pragmas espelham `open_connection`).
+/// Usada pela pré-checagem e pelo runner com progresso — que controlam o momento
+/// das migrations explicitamente, fora do caminho automático.
+fn open_connection_raw(path: &Path) -> Result<Connection, String> {
+    let connection = Connection::open(path).map_err(|error| error.to_string())?;
+    let _ = connection.pragma_update(None, "foreign_keys", "ON");
+    connection
+        .busy_timeout(std::time::Duration::from_secs(15))
+        .map_err(|error| error.to_string())?;
+    let _ = connection.pragma_update(None, "journal_mode", "WAL");
+    let _ = connection.pragma_update(None, "synchronous", "NORMAL");
+    Ok(connection)
+}
+
+/// Pré-checagem read-only: há migrations pendentes num banco que JÁ tem schema?
+/// Não roda nada. `None` para banco novo/sem schema ou já atualizado — nesses
+/// casos o boot segue direto (migrations de banco novo são triviais/rápidas).
+pub fn migration_precheck(
+    db_path: &Path,
+) -> Result<Option<crate::domain::models::MigrationStatus>, String> {
+    if !db_path.exists() {
+        return Ok(None);
+    }
+    let connection = Connection::open(db_path).map_err(|error| error.to_string())?;
+    let has_ledger = connection
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_migrations' LIMIT 1",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?
+        .is_some();
+    if !has_ledger {
+        return Ok(None);
+    }
+    let applied = load_applied_versions(&connection)?;
+    let applied_max = applied.iter().copied().max().unwrap_or(0);
+    if applied_max == 0 {
+        return Ok(None);
+    }
+    let pending_count = MIGRATIONS
+        .iter()
+        .filter(|(version, _)| !applied.contains(version))
+        .count();
+    if pending_count == 0 {
+        return Ok(None);
+    }
+    let to_version = MIGRATIONS
+        .iter()
+        .map(|(version, _)| *version)
+        .max()
+        .unwrap_or(applied_max);
+    let db_size_bytes = std::fs::metadata(db_path).map(|meta| meta.len()).unwrap_or(0);
+    Ok(Some(crate::domain::models::MigrationStatus {
+        from_version: applied_max,
+        to_version,
+        pending_count,
+        db_size_bytes,
+    }))
+}
+
+fn load_applied_versions(connection: &Connection) -> Result<HashSet<i64>, String> {
+    let mut statement = connection
+        .prepare("SELECT version FROM schema_migrations")
+        .map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map([], |row| row.get::<_, i64>(0))
+        .map_err(|error| error.to_string())?;
+    rows.collect::<rusqlite::Result<HashSet<i64>>>()
+        .map_err(|error| error.to_string())
+}
+
+/// Aplica as migrations pendentes com backup prévio (snapshot online do rusqlite,
+/// que reporta progresso por página) e emite progresso via `on_progress`
+/// (fase `backup` e depois `migrate` X/N). É o caminho usado pela tela de
+/// migração da janela principal.
+pub fn run_pending_migrations_with_progress<F>(
+    db_path: &Path,
+    mut on_progress: F,
+) -> Result<(), String>
+where
+    F: FnMut(crate::domain::models::MigrationProgress),
+{
+    let mut connection = open_connection_raw(db_path)?;
+    connection
+        .execute_batch(
+            "CREATE TABLE IF NOT EXISTS schema_migrations (
+                version INTEGER PRIMARY KEY,
+                applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+             );",
+        )
+        .map_err(|error| error.to_string())?;
+
+    let applied = load_applied_versions(&connection)?;
+    let pending: Vec<&(i64, &str)> = MIGRATIONS
+        .iter()
+        .filter(|(version, _)| !applied.contains(version))
+        .collect();
+    if pending.is_empty() {
+        return Ok(());
+    }
+
+    let applied_max = applied.iter().copied().max().unwrap_or(0);
+    if applied_max > 0 {
+        backup_with_progress(&connection, db_path, applied_max, &mut on_progress)?;
+    }
+
+    let total = pending.len() as u64;
+    for (index, (version, sql)) in pending.iter().enumerate() {
+        on_progress(crate::domain::models::MigrationProgress {
+            phase: "migrate".to_string(),
+            current: index as u64,
+            total,
+            label: format!("Applying update {version}"),
+        });
+        let transaction = connection.transaction().map_err(|error| error.to_string())?;
+        transaction
+            .execute_batch(sql)
+            .map_err(|error| error.to_string())?;
+        transaction
+            .execute("INSERT INTO schema_migrations (version) VALUES (?1)", [version])
+            .map_err(|error| error.to_string())?;
+        transaction.commit().map_err(|error| error.to_string())?;
+    }
+    on_progress(crate::domain::models::MigrationProgress {
+        phase: "migrate".to_string(),
+        current: total,
+        total,
+        label: "Finishing up".to_string(),
+    });
+    Ok(())
+}
+
+/// Snapshot consistente do banco via a API de backup online do SQLite, copiando
+/// em passos de páginas para reportar progresso (diferente do `VACUUM INTO`, que
+/// é atômico mas sem progresso). Mesma nomenclatura/retentção do backup silencioso.
+fn backup_with_progress<F>(
+    source: &Connection,
+    db_path: &Path,
+    applied_max: i64,
+    on_progress: &mut F,
+) -> Result<(), String>
+where
+    F: FnMut(crate::domain::models::MigrationProgress),
+{
+    let parent = db_path.parent().unwrap_or_else(|| Path::new("."));
+    let backups_dir = parent.join("backups");
+    std::fs::create_dir_all(&backups_dir)
+        .map_err(|error| format!("failed to create migration backups directory: {error}"))?;
+    let stem = db_path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("database");
+    let timestamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
+    let backup_path = backups_dir.join(format!("{stem}.pre-v{applied_max}.{timestamp}.db"));
+    if backup_path.exists() {
+        let _ = std::fs::remove_file(&backup_path);
+    }
+
+    let mut destination = Connection::open(&backup_path).map_err(|error| error.to_string())?;
+    {
+        let backup = rusqlite::backup::Backup::new(source, &mut destination)
+            .map_err(|error| error.to_string())?;
+        // ~512 páginas por passo: progresso suave mesmo num banco de ~1GB.
+        loop {
+            let result = backup.step(512).map_err(|error| error.to_string())?;
+            let progress = backup.progress();
+            let total = progress.pagecount.max(0) as u64;
+            let done = (progress.pagecount - progress.remaining).max(0) as u64;
+            on_progress(crate::domain::models::MigrationProgress {
+                phase: "backup".to_string(),
+                current: done,
+                total,
+                label: "Backing up your database".to_string(),
+            });
+            match result {
+                rusqlite::backup::StepResult::Done => break,
+                rusqlite::backup::StepResult::Busy | rusqlite::backup::StepResult::Locked => {
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+                // `More` e quaisquer variantes futuras: continua copiando.
+                _ => {}
+            }
+        }
+    }
+    prune_migration_backups(&backups_dir, stem);
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -312,7 +610,12 @@ mod tests {
              );",
         )
         .expect("migration ledger");
-        for version in 1..=38 {
+        // Registra TODAS as migrações como aplicadas (sem rodá-las): o teste
+        // simula um ledger cheio com as tabelas de runtime ausentes. Iterar a
+        // constante em vez de um número fixo mantém o teste válido conforme
+        // novas migrações são adicionadas (algumas alteram tabelas antigas e
+        // falhariam contra este DB esqueleto se fossem re-executadas).
+        for &(version, _) in MIGRATIONS {
             raw.execute(
                 "INSERT INTO schema_migrations(version) VALUES (?1)",
                 [version],
@@ -327,6 +630,116 @@ mod tests {
         assert!(resume.contains("scope"));
         assert!(resume.contains("state"));
         assert!(holds.contains("hold_until"));
+    }
+
+    #[test]
+    fn migration_precheck_and_progress_runner_backup_and_apply() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("ninjacrawler.db");
+        let max_version = MIGRATIONS.iter().map(|(v, _)| *v).max().expect("migrations");
+        {
+            let connection = Connection::open(&path).expect("open");
+            connection
+                .execute_batch(
+                    "CREATE TABLE schema_migrations (
+                        version INTEGER PRIMARY KEY,
+                        applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                     );
+                     CREATE TABLE source_profiles (id TEXT PRIMARY KEY);
+                     INSERT INTO source_profiles(id) VALUES ('seed');",
+                )
+                .expect("seed schema");
+            // Marca todas menos a ÚLTIMA como aplicadas → só a última fica pendente.
+            for (version, _) in MIGRATIONS.iter().filter(|(v, _)| *v < max_version) {
+                connection
+                    .execute("INSERT INTO schema_migrations(version) VALUES (?1)", [version])
+                    .expect("seed version");
+            }
+        }
+
+        // Pré-checagem detecta a pendência (sem rodar nada).
+        let status = migration_precheck(&path)
+            .expect("precheck ok")
+            .expect("should be pending");
+        assert_eq!(status.pending_count, 1);
+        assert_eq!(status.to_version, max_version);
+        assert!(status.db_size_bytes > 0);
+
+        // Aplica com progresso (backup online + migrations).
+        let mut phases: Vec<String> = Vec::new();
+        run_pending_migrations_with_progress(&path, |progress| phases.push(progress.phase))
+            .expect("migrate ok");
+        assert!(phases.iter().any(|p| p == "backup"), "reports backup progress");
+        assert!(phases.iter().any(|p| p == "migrate"), "reports migrate progress");
+
+        // A última migration foi registrada e um snapshot foi gravado.
+        let connection = Connection::open(&path).expect("reopen");
+        let applied_last: Option<i64> = connection
+            .query_row(
+                "SELECT 1 FROM schema_migrations WHERE version = ?1",
+                [max_version],
+                |row| row.get(0),
+            )
+            .optional()
+            .expect("query");
+        assert!(applied_last.is_some(), "last migration should be applied");
+        let backups = std::fs::read_dir(temp.path().join("backups"))
+            .expect("backups dir")
+            .flatten()
+            .count();
+        assert!(backups >= 1, "a backup snapshot should exist");
+
+        // Já atualizado: a pré-checagem não acusa mais pendência.
+        assert!(migration_precheck(&path).expect("precheck2").is_none());
+    }
+
+    #[test]
+    fn migration_precheck_is_none_for_fresh_or_updated_db() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        // Banco novo (sem arquivo) → None.
+        let missing = temp.path().join("missing.db");
+        assert!(migration_precheck(&missing).expect("precheck").is_none());
+        // Banco totalmente migrado (open_connection aplica tudo) → None.
+        let path = temp.path().join("fresh.db");
+        let _ = open_connection(&path).expect("open");
+        assert!(migration_precheck(&path).expect("precheck").is_none());
+    }
+
+    #[test]
+    fn migration_backup_snapshots_db_and_retains_last_three() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("ninjacrawler.db");
+        let connection = Connection::open(&path).expect("open");
+        connection
+            .execute_batch("CREATE TABLE t (v INTEGER); INSERT INTO t(v) VALUES (7);")
+            .expect("seed data");
+
+        // Quatro "saltos de versão" → 4 snapshots, mas a retenção mantém 3.
+        for version in 1..=4 {
+            backup_database_before_migrations(&connection, &path, version).expect("backup ok");
+        }
+
+        let backups_dir = temp.path().join("backups");
+        let mut files: Vec<String> = std::fs::read_dir(&backups_dir)
+            .expect("backups dir exists")
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().to_string())
+            .filter(|name| name.starts_with("ninjacrawler.pre-v") && name.ends_with(".db"))
+            .collect();
+        files.sort();
+        assert_eq!(files.len(), 3, "keeps only the newest three backups: {files:?}");
+        assert!(
+            !files.iter().any(|name| name.contains(".pre-v1.")),
+            "the oldest backup (v1) should have been pruned: {files:?}"
+        );
+
+        // O snapshot é uma cópia consistente e legível, com os dados originais.
+        let newest = backups_dir.join(files.last().expect("a backup file"));
+        let restored = Connection::open(&newest).expect("open backup");
+        let value: i64 = restored
+            .query_row("SELECT v FROM t", [], |row| row.get(0))
+            .expect("data present in snapshot");
+        assert_eq!(value, 7);
     }
 
     #[test]
@@ -384,7 +797,7 @@ mod tests {
              );",
         )
         .expect("draft schema");
-        for version in 1..=39 {
+        for &(version, _) in MIGRATIONS {
             raw.execute(
                 "INSERT INTO schema_migrations(version) VALUES (?1)",
                 [version],

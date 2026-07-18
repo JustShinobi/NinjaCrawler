@@ -464,6 +464,28 @@ pub struct MediaGalleryPost {
     pub files: Vec<MediaGalleryFile>,
 }
 
+/// Resultado da pré-checagem de migrations no boot: presente só quando há
+/// migrations pendentes num banco que já tem schema (dispara a tela de migração).
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MigrationStatus {
+    pub from_version: i64,
+    pub to_version: i64,
+    pub pending_count: usize,
+    pub db_size_bytes: u64,
+}
+
+/// Progresso emitido durante a migração (backup + aplicação das migrations).
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MigrationProgress {
+    /// `backup` (snapshot do banco) ou `migrate` (aplicando as migrations).
+    pub phase: String,
+    pub current: u64,
+    pub total: u64,
+    pub label: String,
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SourceMediaGallery {
@@ -472,6 +494,21 @@ pub struct SourceMediaGallery {
     pub handle: String,
     pub profile_url: String,
     pub posts: Vec<MediaGalleryPost>,
+    /// Metadados de perfil da última sincronização (Instagram hoje), para o
+    /// cabeçalho enriquecido. Todos opcionais — perfis importados/sem sync ainda
+    /// não os têm.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub biography: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub follower_count: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub following_count: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub media_count: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub is_verified: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stats_updated_at: Option<String>,
 }
 
 /// Lote de thumbnails de vídeo gerados sob demanda (ffmpeg) para o grid do

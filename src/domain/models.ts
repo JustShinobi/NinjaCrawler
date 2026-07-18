@@ -566,12 +566,35 @@ export interface MediaGalleryPost {
   files: MediaGalleryFile[]
 }
 
+export interface MigrationStatus {
+  fromVersion: number
+  toVersion: number
+  pendingCount: number
+  dbSizeBytes: number
+}
+
+export interface MigrationProgress {
+  /** 'backup' (snapshot do banco) ou 'migrate' (aplicando as migrations). */
+  phase: 'backup' | 'migrate'
+  current: number
+  total: number
+  label: string
+}
+
 export interface SourceMediaGallery {
     sourceId: string
     provider: ProviderKey
     handle: string
     profileUrl: string
     posts: MediaGalleryPost[]
+    /** Última bio sincronizada (bio + links). Ausente em perfis sem sync. */
+    biography?: string
+    followerCount?: number
+    followingCount?: number
+    mediaCount?: number
+    isVerified?: boolean
+    /** ISO da última atualização dos contadores acima. */
+    statsUpdatedAt?: string
 }
 
 export interface MediaThumbnailQueueItem {

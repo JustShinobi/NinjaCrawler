@@ -4138,6 +4138,36 @@ pub(super) fn execute_instagram_source_sync_with_connection(
                 );
             }
 
+            // Contadores estruturados do perfil (independem da nota de bio acima):
+            // complementares, então um erro aqui nunca derruba o sync.
+            if let Err(error) = update_source_profile_stats(
+                connection,
+                &context.source.id,
+                result.profile_description.as_deref(),
+                result.profile_counts.follower_count,
+                result.profile_counts.following_count,
+                result.profile_counts.media_count,
+                result.profile_counts.is_verified,
+                &finished_at,
+            ) {
+                log_runtime_event(
+                    layout,
+                    "sync.profile",
+                    "warning",
+                    RuntimeLogAnchor {
+                        account_id: Some(&context.account.id),
+                        provider: Some(&context.source.provider),
+                        source_id: Some(&context.source.id),
+                        source_handle: Some(&context.source.handle),
+                    },
+                    format!(
+                        "Failed to persist Instagram profile stats for '{}'.",
+                        context.source.handle
+                    ),
+                    Some(error),
+                );
+            }
+
             source_sync_runtime::report_source_sync_progress(
                 &context.source.id,
                 Some(100),

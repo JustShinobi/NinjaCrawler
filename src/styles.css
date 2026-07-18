@@ -12144,6 +12144,311 @@ textarea.accounts-field-mono {
   justify-content: center;
 }
 
+/* Sync now — ação primária do header (preenchida). Em fila/rodando vira neutra
+   e desabilitada, com o ícone girando enquanto sincroniza. */
+.profile-view-sync-now.profile-view-header-action {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-contrast);
+  font-weight: 600;
+}
+
+.profile-view-sync-now.profile-view-header-action:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent) 86%, #000);
+  border-color: color-mix(in srgb, var(--accent) 86%, #000);
+  color: var(--accent-contrast);
+}
+
+.profile-view-sync-now.is-running,
+.profile-view-sync-now.is-queued {
+  background: var(--surface-control);
+  border-color: var(--line);
+  color: var(--muted-strong, var(--muted));
+}
+
+.profile-view-sync-now:disabled {
+  cursor: default;
+}
+
+.profile-view-sync-spin {
+  animation: profile-view-sync-spin 0.9s linear infinite;
+  transform-origin: 50% 50%;
+}
+
+@keyframes profile-view-sync-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .profile-view-sync-spin {
+    animation: none;
+  }
+}
+
+/* --- Toolbar action buttons: unify with the left-side segments/chips and the
+   approved mockup — UI font, sentence case (no UPPERCASE), consistent radius —
+   instead of the global .ghost-button (display font + UPPERCASE + tracking). --- */
+.profile-view-filters-toggle,
+.profile-view-sort-toggle,
+.profile-view-select-toggle {
+  font-family: inherit;
+  font-size: 0.74rem;
+  font-weight: 550;
+  letter-spacing: 0.01em;
+  text-transform: none;
+  border-radius: 8px;
+  border-color: var(--line);
+}
+
+.profile-view-sort-label {
+  text-transform: none;
+  letter-spacing: 0.01em;
+}
+
+/* Density + Select grouped into one cohesive pill on the far right. */
+.profile-view-actions-cluster {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.1rem;
+  padding: 2px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--surface-input);
+}
+
+.profile-view-actions-cluster .profile-view-density {
+  gap: 0;
+}
+
+.profile-view-actions-cluster .queue-icon-button,
+.profile-view-actions-cluster .profile-view-select-toggle {
+  background: transparent;
+  border-color: transparent;
+  border-radius: 7px;
+  min-height: 1.7rem;
+}
+
+.profile-view-actions-cluster .queue-icon-button:hover:not(:disabled),
+.profile-view-actions-cluster .profile-view-select-toggle:hover {
+  background: var(--surface-control-hover);
+  border-color: transparent;
+}
+
+/* Hairline divider between the density stepper and Select inside the cluster. */
+.profile-view-actions-cluster .profile-view-select-toggle {
+  border-radius: 0 7px 7px 0;
+  border-left: 1px solid var(--line);
+  margin-left: 0.15rem;
+  padding: 0.28rem 0.6rem;
+}
+
+/* --- Boot migration screen (main window "migration mode") --- */
+.migration-screen {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  display: grid;
+  place-items: center;
+  padding: 2rem;
+  background: var(--bg-window-shell, var(--bg-main));
+}
+
+.migration-card {
+  width: min(520px, 100%);
+  text-align: center;
+  background: var(--panel);
+  border: 1px solid var(--line-strong, var(--line));
+  border-radius: 16px;
+  padding: 2rem 2rem 1.6rem;
+  box-shadow: var(--shadow);
+}
+
+.migration-logo {
+  width: 44px;
+  height: 44px;
+  margin: 0 auto 1rem;
+  border-radius: 12px;
+  background: linear-gradient(160deg, var(--accent), #7a4416);
+  color: #fff;
+  font-weight: 800;
+  font-size: 20px;
+  display: grid;
+  place-items: center;
+}
+
+.migration-title {
+  margin: 0 0 0.5rem;
+  font-family: var(--font-display);
+  font-size: 1.25rem;
+}
+
+.migration-title-error {
+  color: var(--danger);
+}
+
+.migration-body {
+  margin: 0 0 1rem;
+  color: var(--muted-strong, var(--muted));
+  font-size: 0.9rem;
+  line-height: 1.5;
+}
+
+.migration-muted {
+  margin: 0.5rem 0 0;
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.migration-hint {
+  margin: 0.9rem 0 0;
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.migration-hint code {
+  font-family: var(--font-data);
+  background: var(--surface-input);
+  padding: 0 0.25rem;
+  border-radius: 4px;
+}
+
+.migration-facts {
+  display: flex;
+  gap: 0.6rem;
+  justify-content: center;
+  margin: 0 0 0.4rem;
+}
+
+.migration-facts > div {
+  flex: 1;
+  background: var(--surface-input);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 0.6rem;
+}
+
+.migration-facts dt {
+  margin: 0 0 0.2rem;
+  color: var(--muted);
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.migration-facts dd {
+  margin: 0;
+  font-family: var(--font-data);
+  font-size: 0.95rem;
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+
+.migration-actions {
+  display: flex;
+  gap: 0.5rem;
+  justify-content: center;
+  margin-top: 1.2rem;
+  flex-wrap: wrap;
+}
+
+.migration-primary,
+.migration-secondary {
+  border-radius: 10px;
+  padding: 0.6rem 1.2rem;
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+
+.migration-primary {
+  background: var(--accent);
+  color: var(--accent-contrast);
+  border: 1px solid var(--accent);
+  font-weight: 600;
+}
+
+.migration-primary:hover {
+  background: color-mix(in srgb, var(--accent) 88%, #000);
+}
+
+.migration-secondary {
+  background: var(--surface-control);
+  color: var(--text);
+  border: 1px solid var(--line);
+}
+
+.migration-secondary:hover {
+  background: var(--surface-control-hover);
+}
+
+.migration-progress {
+  height: 8px;
+  margin: 0.4rem 0 0;
+  border-radius: 999px;
+  background: var(--surface-input);
+  border: 1px solid var(--line);
+  overflow: hidden;
+}
+
+.migration-progress-fill {
+  height: 100%;
+  background: var(--accent);
+  border-radius: 999px;
+  transition: width 0.2s ease;
+}
+
+.migration-progress-fill.is-indeterminate {
+  width: 40%;
+  animation: migration-indeterminate 1.1s ease-in-out infinite;
+}
+
+.migration-spinner {
+  width: 28px;
+  height: 28px;
+  margin: 0 auto 0.6rem;
+  border-radius: 50%;
+  border: 3px solid var(--line);
+  border-top-color: var(--accent);
+  animation: migration-spin 0.8s linear infinite;
+}
+
+.migration-error {
+  margin: 0.4rem 0 0;
+  text-align: left;
+  background: var(--surface-input);
+  border: 1px solid var(--danger-border-soft, var(--line));
+  border-radius: 8px;
+  padding: 0.6rem;
+  font-size: 0.72rem;
+  color: var(--danger);
+  max-height: 8rem;
+  overflow: auto;
+  white-space: pre-wrap;
+}
+
+@keyframes migration-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes migration-indeterminate {
+  0% {
+    margin-left: -40%;
+  }
+  100% {
+    margin-left: 100%;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .migration-spinner,
+  .migration-progress-fill.is-indeterminate {
+    animation: none;
+  }
+}
+
 @media (max-width: 1100px) {
   .profile-view-header-action-label {
     position: absolute;
@@ -12381,6 +12686,390 @@ textarea.accounts-field-mono {
   font-feature-settings: "zero" 1, "tnum" 1;
   font-variant-numeric: tabular-nums slashed-zero;
   user-select: none;
+}
+
+/* ---- Header: display name, sync health chip, labels (Phase 1) ---- */
+.profile-view-display-name {
+  margin: 0;
+  font-size: 0.78rem;
+  color: var(--muted-strong, var(--muted));
+  line-height: 1.2;
+}
+
+/* ---- Header: verified badge, counts, bio (Phase 3) ---- */
+.profile-view-handle-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.profile-view-verified {
+  display: inline-flex;
+  color: var(--accent);
+}
+
+.profile-view-stats {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 0.2rem 0.85rem;
+  margin: 0.2rem 0 0;
+  font-size: 0.76rem;
+  color: var(--muted);
+}
+
+.profile-view-stat b {
+  color: var(--ink);
+  font-weight: 650;
+  font-feature-settings: "tnum" 1;
+  font-variant-numeric: tabular-nums;
+}
+
+.profile-view-bio-wrap {
+  margin: 0.28rem 0 0;
+  max-width: 60ch;
+}
+
+.profile-view-bio {
+  font-size: 0.78rem;
+  line-height: 1.5;
+  color: var(--muted-strong, var(--muted));
+  white-space: pre-line;
+}
+
+.profile-view-bio.is-clamped {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  white-space: normal;
+}
+
+.profile-view-bio-toggle {
+  appearance: none;
+  border: none;
+  background: none;
+  padding: 0.1rem 0 0;
+  color: var(--accent);
+  font: inherit;
+  font-size: 0.76rem;
+  font-weight: 600;
+  cursor: pointer;
+  display: block;
+}
+
+.profile-view-bio-toggle:hover {
+  text-decoration: underline;
+}
+
+.profile-view-identity-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem 0.55rem;
+  flex-wrap: wrap;
+  margin-top: 0.15rem;
+}
+
+.profile-view-sync-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.14rem 0.5rem;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--surface-input);
+  color: var(--muted);
+  font-size: 0.7rem;
+  max-width: 22rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.profile-view-sync-led {
+  width: 0.44rem;
+  height: 0.44rem;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: var(--success);
+  box-shadow: 0 0 0 0.14rem color-mix(in srgb, var(--success) 22%, transparent);
+}
+
+.profile-view-sync-chip.has-problem {
+  border-color: var(--danger-border-soft, color-mix(in srgb, var(--danger) 40%, transparent));
+  color: var(--danger);
+}
+
+.profile-view-sync-chip.has-problem .profile-view-sync-led {
+  background: var(--danger);
+  box-shadow: 0 0 0 0.14rem color-mix(in srgb, var(--danger) 22%, transparent);
+}
+
+.profile-view-identity-labels {
+  display: inline-flex;
+  gap: 0.28rem;
+  flex-wrap: wrap;
+}
+
+.profile-view-identity-label {
+  font-size: 0.66rem;
+  letter-spacing: 0.02em;
+  padding: 0.1rem 0.42rem;
+  border-radius: 5px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+}
+
+/* ---- Media-type filter segment (Phase 1) ---- */
+.profile-view-mediatype {
+  display: inline-flex;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  overflow: hidden;
+  background: var(--surface-input);
+}
+
+.profile-view-mediatype button {
+  appearance: none;
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 0.74rem;
+  letter-spacing: 0.02em;
+  padding: 0.3rem 0.68rem;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.34rem;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+
+.profile-view-mediatype button:hover:not(:disabled) {
+  color: var(--text);
+}
+
+.profile-view-mediatype button.is-active {
+  background: color-mix(in srgb, var(--accent) 18%, var(--surface-input));
+  color: var(--ink);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 55%, transparent);
+}
+
+.profile-view-mediatype button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.profile-view-mediatype button svg {
+  flex-shrink: 0;
+}
+
+.profile-view-mediatype-count {
+  font-family: var(--font-data);
+  font-size: 0.66rem;
+  opacity: 0.8;
+  font-feature-settings: "zero" 1, "tnum" 1;
+  font-variant-numeric: tabular-nums slashed-zero;
+}
+
+/* ---- Advanced filters popover (Phase 2) ---- */
+.profile-view-filters {
+  position: relative;
+  display: inline-flex;
+}
+
+.profile-view-filters-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.35rem;
+  min-width: 1.9rem;
+  padding: 0.32rem 0.65rem;
+  font-size: 0.74rem;
+}
+
+.profile-view-filters-toggle.has-active {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--line));
+  color: var(--accent);
+}
+
+.profile-view-filters-toggle[aria-expanded='true'] {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-contrast);
+}
+
+.profile-view-filters-badge {
+  min-width: 1rem;
+  height: 1rem;
+  padding: 0 0.24rem;
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--accent-contrast);
+  font-family: var(--font-data);
+  font-size: 0.62rem;
+  line-height: 1rem;
+  text-align: center;
+}
+
+.profile-view-filters-toggle[aria-expanded='true'] .profile-view-filters-badge {
+  background: var(--accent-contrast);
+  color: var(--accent);
+}
+
+.profile-view-filters-menu {
+  position: absolute;
+  top: calc(100% + 0.4rem);
+  right: 0;
+  z-index: 50;
+  width: 274px;
+  display: flex;
+  flex-direction: column;
+  gap: 0.7rem;
+  padding: 0.75rem;
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  background: var(--surface-popover);
+  box-shadow: var(--shadow);
+}
+
+.profile-view-filters-group {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.profile-view-filters-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  color: var(--muted);
+  font-size: 0.66rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.profile-view-filters-heading-value {
+  color: var(--text);
+  text-transform: none;
+  letter-spacing: 0;
+  font-family: var(--font-data);
+  font-feature-settings: "tnum" 1;
+  font-variant-numeric: tabular-nums;
+}
+
+.profile-view-filters-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.28rem;
+}
+
+.profile-view-filters-chips button {
+  appearance: none;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--surface-input);
+  color: var(--muted);
+  font: inherit;
+  font-size: 0.72rem;
+  padding: 0.24rem 0.5rem;
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease, border-color 0.12s ease;
+}
+
+.profile-view-filters-chips button:hover {
+  color: var(--text);
+}
+
+.profile-view-filters-chips button.is-active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-contrast);
+}
+
+.profile-view-filters-range {
+  width: 100%;
+  accent-color: var(--accent);
+}
+
+.profile-view-filters-check {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  font-size: 0.76rem;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.profile-view-filters-check input {
+  accent-color: var(--accent);
+  width: 0.95rem;
+  height: 0.95rem;
+}
+
+.profile-view-filters-presets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+}
+
+.profile-view-filters-preset {
+  display: inline-flex;
+  align-items: stretch;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  overflow: hidden;
+  background: var(--surface-input);
+}
+
+.profile-view-filters-preset-apply {
+  appearance: none;
+  border: none;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 0.72rem;
+  padding: 0.24rem 0.5rem;
+  cursor: pointer;
+  max-width: 11rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.profile-view-filters-preset-apply:hover {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+
+.profile-view-filters-preset-remove {
+  appearance: none;
+  border: none;
+  border-left: 1px solid var(--line);
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 0.85rem;
+  line-height: 1;
+  padding: 0 0.4rem;
+  cursor: pointer;
+}
+
+.profile-view-filters-preset-remove:hover {
+  color: var(--danger);
+}
+
+.profile-view-filters-footer {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.4rem;
+  padding-top: 0.6rem;
+  border-top: 1px solid var(--line);
+}
+
+@media (max-width: 1100px) {
+  .profile-view-filters-label {
+    display: none;
+  }
 }
 
 .profile-view-sort {

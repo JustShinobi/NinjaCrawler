@@ -253,7 +253,10 @@ pub fn load_source_media_gallery(source_id: String) -> Result<SourceMediaGallery
     with_workspace(|connection, layout| {
         let row = connection
             .query_row(
-                "SELECT provider, handle, account_id, sync_options_json FROM source_profiles
+                "SELECT provider, handle, account_id, sync_options_json,
+                        profile_biography, profile_follower_count, profile_following_count,
+                        profile_media_count, profile_is_verified, profile_stats_updated_at
+                 FROM source_profiles
                  WHERE id = ?1 AND deleted_at IS NULL LIMIT 1",
                 params![&source_id],
                 |row| {
@@ -262,13 +265,30 @@ pub fn load_source_media_gallery(source_id: String) -> Result<SourceMediaGallery
                         row.get::<_, String>(1)?,
                         row.get::<_, Option<String>>(2)?,
                         row.get::<_, String>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                        row.get::<_, Option<i64>>(5)?,
+                        row.get::<_, Option<i64>>(6)?,
+                        row.get::<_, Option<i64>>(7)?,
+                        row.get::<_, Option<i64>>(8)?,
+                        row.get::<_, Option<String>>(9)?,
                     ))
                 },
             )
             .optional()
             .map_err(|error| error.to_string())?
             .ok_or_else(|| format!("Source '{}' does not exist.", source_id))?;
-        let (provider, handle, account_id, sync_options_json) = row;
+        let (
+            provider,
+            handle,
+            account_id,
+            sync_options_json,
+            profile_biography,
+            profile_follower_count,
+            profile_following_count,
+            profile_media_count,
+            profile_is_verified,
+            profile_stats_updated_at,
+        ) = row;
 
         // SourceProfile mínimo, mas COM sync_options (TikTok lê specialPath dele).
         let source_profile = SourceProfile {
@@ -604,6 +624,14 @@ pub fn load_source_media_gallery(source_id: String) -> Result<SourceMediaGallery
             handle: handle.clone(),
             profile_url: source_target_url(&provider, &handle),
             posts,
+            biography: profile_biography
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty()),
+            follower_count: profile_follower_count,
+            following_count: profile_following_count,
+            media_count: profile_media_count,
+            is_verified: profile_is_verified.map(|value| value != 0),
+            stats_updated_at: profile_stats_updated_at,
         })
     })
 }

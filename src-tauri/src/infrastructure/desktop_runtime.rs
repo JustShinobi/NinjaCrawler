@@ -18,7 +18,10 @@ use crate::domain::models::{
 pub struct BatchEditorIntent {
     pub source_ids: Vec<String>,
 }
-use crate::infrastructure::{connector_debug, runtime_log, workspace_repository};
+use crate::infrastructure::{
+    companion_api, connector_debug, database, media_path_migration_runtime, runtime_log,
+    scheduler_runtime, source_sync_runtime, storage, workspace_repository,
+};
 #[cfg(windows)]
 use winreg::enums::HKEY_CURRENT_USER;
 #[cfg(windows)]
@@ -117,9 +120,37 @@ struct RuntimeLogWindowFailedEvent {
     message: String,
 }
 
-pub fn setup(app: &tauri::AppHandle) -> Result<(), String> {
+/// Handles usados por logging/debug — registrados sempre, inclusive no boot em
+/// modo migração (para a tela de migração conseguir logar).
+pub fn register_runtime_handles(app: &tauri::AppHandle) {
     runtime_log::register_app_handle(app);
     connector_debug::register_app_handle(app);
+}
+
+/// Há migrations pendentes num banco existente? Quando `true`, o boot NÃO inicia
+/// os serviços de runtime: a janela principal abre em "modo migração" e só após
+/// o `run_pending_migrations` concluir é que `start_runtime_services` roda.
+pub fn migration_pending() -> Result<bool, String> {
+    let layout = storage::ensure_workspace_layout().map_err(|error| error.to_string())?;
+    Ok(database::migration_precheck(&layout.db_path)?.is_some())
+}
+
+/// Bootstrap do workspace + serviços de runtime. Chamado no boot normal e, no
+/// boot em modo migração, após as migrations concluírem.
+pub fn start_runtime_services(app: tauri::AppHandle) -> Result<(), String> {
+    finalize_workspace_setup(&app)?;
+    scheduler_runtime::start(app.clone())?;
+    companion_api::start(app.clone());
+    let app_handle = app.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(2000));
+        media_path_migration_runtime::restore_persisted_queue(&app_handle);
+        source_sync_runtime::restore_persisted_queue(&app_handle);
+    });
+    Ok(())
+}
+
+fn finalize_workspace_setup(app: &tauri::AppHandle) -> Result<(), String> {
     let snapshot = workspace_repository::bootstrap_workspace()?;
     apply_asset_scope(app)?;
     let controller = DesktopRuntimeController::new(app, &snapshot)?;
@@ -149,7 +180,18 @@ pub fn window_state_plugin<R: Runtime>() -> tauri::plugin::TauriPlugin<R> {
     // (skip_initial_state), enquanto a principal restaura no boot.
     let mut builder = tauri_plugin_window_state::Builder::new()
         .with_filter(is_state_managed_window_label)
-        .with_state_flags(managed_window_state_flags());
+        .with_state_flags(managed_window_state_flags())
+        // Cada janela de perfil tem um label único por source, mas todas
+        // compartilham UMA chave de estado — assim o tamanho/posição lembrado é
+        // global (redimensionar num perfil vale para o próximo), em vez de
+        // por-perfil. Os demais labels são preservados.
+        .map_label(|label| {
+            if label.starts_with(PROFILE_VIEW_WINDOW_LABEL_PREFIX) {
+                "profile-view"
+            } else {
+                label
+            }
+        });
 
     for label in MANAGED_STANDALONE_WINDOW_LABELS {
         builder = builder.skip_initial_state(label);
@@ -726,7 +768,9 @@ fn create_profile_view_window(
     )
     .title("Profile View")
     .inner_size(1280.0, 860.0)
-    .min_inner_size(940.0, 600.0)
+    // A toolbar cresceu (filtro de mídia + popover de filtros); abaixo disto a
+    // barra estoura o breakpoint compacto (max-width:1100px do CSS) e a UI quebra.
+    .min_inner_size(1120.0, 640.0)
     .resizable(true)
     .decorations(false)
     .closable(true)
@@ -1069,7 +1113,11 @@ fn is_managed_standalone_window_label(label: &str) -> bool {
 /// Janelas cujo tamanho/posição o plugin de window-state persiste: a principal
 /// e as auxiliares gerenciadas.
 fn is_state_managed_window_label(label: &str) -> bool {
-    label == MAIN_WINDOW_LABEL || is_managed_standalone_window_label(label)
+    label == MAIN_WINDOW_LABEL
+        || is_managed_standalone_window_label(label)
+        // Janelas de perfil (label dinâmico por source) também têm tamanho/posição
+        // lembrados — via a chave única mapeada em `window_state_plugin`.
+        || label.starts_with(PROFILE_VIEW_WINDOW_LABEL_PREFIX)
 }
 
 fn show_new_standalone_window<F>(
@@ -1884,7 +1932,9 @@ mod tests {
         for label in super::MANAGED_STANDALONE_WINDOW_LABELS {
             assert!(super::is_state_managed_window_label(label));
         }
-        assert!(!super::is_state_managed_window_label(
+        // Janelas de perfil (label dinâmico) agora são gerenciadas: o plugin
+        // lembra tamanho/posição via a chave única `profile-view` (map_label).
+        assert!(super::is_state_managed_window_label(
             "profile-view-dea6448e-62e7-4f4d-9cec-9b49b15f3f66"
         ));
         assert!(!super::is_state_managed_window_label("unknown-window"));
