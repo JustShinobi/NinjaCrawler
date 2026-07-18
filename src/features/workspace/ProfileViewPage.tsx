@@ -15,7 +15,12 @@ import {
   subscribeToSourceSyncQueue,
 } from '../../bridge/desktop'
 import { DEFAULT_PROVIDER_CATALOG } from '../../domain/defaults'
-import type { MediaGalleryPost, ProviderKey, SourceMediaGallery } from '../../domain/models'
+import type {
+  MediaGalleryPost,
+  ProviderKey,
+  SourceMediaGallery,
+  SourceProfile,
+} from '../../domain/models'
 import { WindowShell } from '../brand/WindowShell'
 import { WindowTitlebar } from '../brand/WindowTitlebar'
 import { MediaCard } from './MediaCard'
@@ -38,6 +43,10 @@ type EffectiveMode = 'album' | 'day' | 'grid' | 'user'
  */
 type SortField = 'creation' | 'download' | 'popularity'
 type SortDir = 'newest' | 'oldest'
+/** Filtro de tipo de mídia, ortogonal à seção. `photo` inclui slideshows. */
+type MediaTypeFilter = 'all' | 'photo' | 'video'
+/** Janela de datas dos filtros avançados (aplicada sobre o eixo de ordenação). */
+type DateRangeFilter = 'all' | '7d' | '30d' | '90d' | 'year'
 
 const VIEW_MODE_STORAGE_KEY = 'profileView.mode'
 const HIGHLIGHTS_MODE_STORAGE_KEY = 'profileView.highlightsMode'
@@ -45,6 +54,50 @@ const LIKES_MODE_STORAGE_KEY = 'profileView.likesMode'
 const DENSITY_STORAGE_KEY = 'profileView.density'
 const SORT_FIELD_STORAGE_KEY = 'profileView.sortField'
 const SORT_DIR_STORAGE_KEY = 'profileView.sortDir'
+const MEDIA_TYPE_STORAGE_KEY = 'profileView.mediaType'
+const PRESETS_STORAGE_KEY = 'profileView.filterPresets'
+
+/** Janelas de data (em segundos) para o filtro de período. `all`/`year` à parte. */
+const DATE_RANGE_SECONDS: Record<Exclude<DateRangeFilter, 'all' | 'year'>, number> = {
+  '7d': 7 * 86_400,
+  '30d': 30 * 86_400,
+  '90d': 90 * 86_400,
+}
+
+/** Degraus do slider de engajamento mínimo (0 = qualquer). */
+const ENGAGEMENT_STEPS = [
+  0, 100, 500, 1_000, 5_000, 10_000, 50_000, 100_000, 500_000, 1_000_000,
+] as const
+
+/** Índice do degrau atual (para o slider) a partir do valor de engajamento. */
+function engagementToSlider(value: number): number {
+  const index = ENGAGEMENT_STEPS.findIndex((step) => step >= value)
+  return index === -1 ? ENGAGEMENT_STEPS.length - 1 : index
+}
+
+/** Valor de engajamento a partir do índice do slider. */
+function sliderToEngagement(index: number): number {
+  return ENGAGEMENT_STEPS[Math.max(0, Math.min(ENGAGEMENT_STEPS.length - 1, index))] ?? 0
+}
+
+const DATE_RANGE_LABEL: Record<DateRangeFilter, string> = {
+  all: 'Any date',
+  '7d': 'Last 7 days',
+  '30d': 'Last 30 days',
+  '90d': 'Last 90 days',
+  year: 'This year',
+}
+
+/** Preset de filtros salvo pelo operador (persistido em localStorage). */
+interface FilterPreset {
+  id: string
+  name: string
+  mediaType: MediaTypeFilter
+  section: string
+  dateRange: DateRangeFilter
+  minEngagement: number
+  carouselOnly: boolean
+}
 
 /** Seção dos Highlights do Instagram (ver isEphemeralStorySection). */
 const HIGHLIGHTS_SECTION = 'stories'
@@ -110,6 +163,59 @@ function readStoredSortDir(): SortDir {
   } catch {
     return 'newest'
   }
+}
+
+function readStoredMediaType(): MediaTypeFilter {
+  try {
+    const stored = localStorage.getItem(MEDIA_TYPE_STORAGE_KEY)
+    if (stored === 'photo' || stored === 'video') return stored
+  } catch {
+    /* ignore */
+  }
+  return 'all'
+}
+
+function readStoredPresets(): FilterPreset[] {
+  try {
+    const raw = localStorage.getItem(PRESETS_STORAGE_KEY)
+    if (!raw) return []
+    const parsed = JSON.parse(raw)
+    if (!Array.isArray(parsed)) return []
+    return parsed.filter(
+      (entry): entry is FilterPreset =>
+        typeof entry?.id === 'string' && typeof entry?.name === 'string',
+    )
+  } catch {
+    return []
+  }
+}
+
+/** Um post é "foto" para o filtro quando NÃO é vídeo (imagem ou slideshow). */
+function isPhotoPost(post: MediaGalleryPost): boolean {
+  return post.mediaType !== 'video'
+}
+
+/** Maior contagem de engajamento do post (views ou likes), para o filtro de faixa. */
+function postEngagement(post: MediaGalleryPost): number {
+  return Math.max(post.viewCount ?? 0, post.likeCount ?? 0)
+}
+
+/** "há 2 h", "há 3 d"… a partir de um ISO. Vazio quando não parseável. */
+function formatSyncedAgo(iso?: string): string {
+  if (!iso) return ''
+  const then = Date.parse(iso)
+  if (Number.isNaN(then)) return ''
+  const seconds = Math.max(0, Math.round((Date.now() - then) / 1000))
+  if (seconds < 60) return 'just now'
+  const minutes = Math.round(seconds / 60)
+  if (minutes < 60) return `${minutes} min ago`
+  const hours = Math.round(minutes / 60)
+  if (hours < 24) return `${hours} h ago`
+  const days = Math.round(hours / 24)
+  if (days < 30) return `${days} d ago`
+  const months = Math.round(days / 30)
+  if (months < 12) return `${months} mo ago`
+  return `${Math.round(months / 12)} y ago`
 }
 
 /**
@@ -298,7 +404,12 @@ type VirtualRow =
 export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
   const [sourceId] = useState<string | undefined>(initialSourceId)
   const [gallery, setGallery] = useState<SourceMediaGallery>()
-  const [avatarPath, setAvatarPath] = useState<string>()
+  const [sourceProfile, setSourceProfile] = useState<SourceProfile>()
+  const avatarPath = sourceProfile?.profileImagePath
+  // Fase 3 — bio longa recolhida por padrão (expande sob demanda).
+  const [bioExpanded, setBioExpanded] = useState(false)
+  // Estado ao vivo deste perfil na fila de sync (dirige o botão "Sync now").
+  const [syncActivity, setSyncActivity] = useState<'idle' | 'queued' | 'running'>('idle')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string>()
   const [lightboxIndex, setLightboxIndex] = useState<number>()
@@ -323,6 +434,16 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
   const [likesQuery, setLikesQuery] = useState('')
   const likesSearchInputRef = useRef<HTMLInputElement>(null)
   const [sectionFilter, setSectionFilter] = useState<string>(SECTION_FILTER_ALL)
+  // Fase 1 — filtro de tipo de mídia (ortogonal à seção), persistido.
+  const [mediaTypeFilter, setMediaTypeFilter] = useState<MediaTypeFilter>(readStoredMediaType)
+  // Fase 2 — filtros avançados (popover). Nenhum persiste sozinho: o operador
+  // salva o conjunto atual como um preset quando quiser reaproveitá-lo.
+  const [filtersOpen, setFiltersOpen] = useState(false)
+  const [dateRange, setDateRange] = useState<DateRangeFilter>('all')
+  const [minEngagement, setMinEngagement] = useState(0)
+  const [carouselOnly, setCarouselOnly] = useState(false)
+  const [presets, setPresets] = useState<FilterPreset[]>(readStoredPresets)
+  const filtersMenuRef = useRef<HTMLDivElement>(null)
   // Largura útil do container de rolagem (medida), base do cálculo de colunas.
   const [containerWidth, setContainerWidth] = useState(0)
   const [selectMode, setSelectMode] = useState(false)
@@ -376,6 +497,20 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
       /* ignore */
     }
   }, [sortDir])
+  useEffect(() => {
+    try {
+      localStorage.setItem(MEDIA_TYPE_STORAGE_KEY, mediaTypeFilter)
+    } catch {
+      /* ignore */
+    }
+  }, [mediaTypeFilter])
+  useEffect(() => {
+    try {
+      localStorage.setItem(PRESETS_STORAGE_KEY, JSON.stringify(presets))
+    } catch {
+      /* ignore */
+    }
+  }, [presets])
 
   // Fecha o menu de ordenação ao clicar fora (mesmo padrão do date picker).
   useEffect(() => {
@@ -387,6 +522,17 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
     window.addEventListener('pointerdown', handlePointerDown)
     return () => window.removeEventListener('pointerdown', handlePointerDown)
   }, [sortMenuOpen])
+
+  // Fecha o popover de filtros ao clicar fora (idem menu de ordenação).
+  useEffect(() => {
+    if (!filtersOpen) return undefined
+    const handlePointerDown = (event: PointerEvent) => {
+      if (filtersMenuRef.current?.contains(event.target as Node)) return
+      setFiltersOpen(false)
+    }
+    window.addEventListener('pointerdown', handlePointerDown)
+    return () => window.removeEventListener('pointerdown', handlePointerDown)
+  }, [filtersOpen])
 
   // Foca o campo de busca dos Likes assim que a lupa é expandida.
   useEffect(() => {
@@ -414,8 +560,7 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
         loadWorkspaceSnapshot().catch(() => undefined),
       ])
       setGallery(nextGallery)
-      const source = snapshot?.sources.find((entry) => entry.id === id)
-      setAvatarPath(source?.profileImagePath)
+      setSourceProfile(snapshot?.sources.find((entry) => entry.id === id))
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : 'Failed to load profile media.')
       setGallery(undefined)
@@ -431,21 +576,29 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
   }, [sourceId, load])
 
   // Auto-refresh: quando um sync deste perfil termina (fila do backend), recarrega
-  // a galeria em silêncio (sem spinner, preservando a rolagem). O sourceId corrente
-  // fica num ref para o listener não reassinar a cada troca de perfil.
+  // a galeria E o snapshot em silêncio (sem spinner, preservando a rolagem) — assim
+  // posts, bio/contadores e o "Synced X ago" atualizam sem reabrir a janela. O
+  // sourceId corrente fica num ref para o listener não reassinar a cada troca.
   const sourceIdRef = useRef(sourceId)
   sourceIdRef.current = sourceId
   const lastSyncSignatureRef = useRef<string | undefined>(undefined)
-  const reloadGallerySilently = useCallback(async (id: string) => {
+  const reloadSilently = useCallback(async (id: string) => {
     try {
-      setGallery(await loadSourceMediaGallery(id))
+      const [nextGallery, snapshot] = await Promise.all([
+        loadSourceMediaGallery(id),
+        loadWorkspaceSnapshot().catch(() => undefined),
+      ])
+      setGallery(nextGallery)
+      const source = snapshot?.sources.find((entry) => entry.id === id)
+      if (source) setSourceProfile(source)
     } catch {
       /* refresh em segundo plano: ignora erros transitórios */
     }
   }, [])
   useEffect(() => {
-    // Ao trocar de perfil, zera a assinatura para não herdar o resultado do anterior.
+    // Ao trocar de perfil, zera a assinatura e o estado de sync do anterior.
     lastSyncSignatureRef.current = undefined
+    setSyncActivity('idle')
   }, [sourceId])
   useEffect(() => {
     let unlisten: (() => void) | undefined
@@ -453,11 +606,17 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
     void subscribeToSourceSyncQueue((status) => {
       const id = sourceIdRef.current
       if (!id) return
+      // Estado ao vivo deste perfil na fila, para o botão refletir "Syncing…".
+      const running =
+        status.activeSourceId === id || status.runningItems.some((item) => item.sourceId === id)
+      const queued = !running && status.queuedItems.some((item) => item.sourceId === id)
+      setSyncActivity(running ? 'running' : queued ? 'queued' : 'idle')
+      // Conclusão: recarrega galeria + snapshot uma vez por resultado novo.
       const latest = status.recentResults.find((result) => result.sourceId === id)
       const signature = latest ? `${latest.finishedAt}:${latest.status}` : undefined
       if (signature && signature !== lastSyncSignatureRef.current) {
         lastSyncSignatureRef.current = signature
-        void reloadGallerySilently(id)
+        void reloadSilently(id)
       }
     })
       .then((dispose) => {
@@ -469,7 +628,7 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
       active = false
       unlisten?.()
     }
-  }, [reloadGallerySilently])
+  }, [reloadSilently])
 
   // Seções presentes (feed/reels/stories/…), em ordem estável. O chip de
   // Highlights aparece se qualquer post pertence a um álbum, mesmo que o arquivo
@@ -519,12 +678,63 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
     return gallery.posts.filter((post) => (post.section || 'timeline') === sectionFilter)
   }, [gallery, sectionFilter])
 
-  // Conjunto exibido: filtro de seção → busca por autor (só nos Likes) →
-  // ordenação pelo eixo escolhido. Posts sem valor no eixo (ex.: like sem
-  // download registrado, ou vídeo sem views) vão sempre ao fim, independentemente
-  // da direção.
+  // Contagens do filtro de tipo de mídia — sobre o recorte de seção corrente,
+  // para "Fotos/Vídeos" refletirem o que está sendo olhado (ex.: Feed + Vídeos).
+  const mediaTypeCounts = useMemo(() => {
+    let photo = 0
+    let video = 0
+    for (const post of visiblePosts) {
+      if (isPhotoPost(post)) photo += 1
+      else video += 1
+    }
+    return { all: visiblePosts.length, photo, video }
+  }, [visiblePosts])
+
+  // Se o tipo escolhido não existe na seção atual (ex.: preferência persistida
+  // "Fotos" ao abrir um perfil só de vídeos), volta a "All" para não mostrar
+  // uma grade vazia sem motivo aparente.
+  useEffect(() => {
+    if (mediaTypeCounts.all === 0) return
+    if (mediaTypeFilter === 'photo' && mediaTypeCounts.photo === 0) setMediaTypeFilter('all')
+    else if (mediaTypeFilter === 'video' && mediaTypeCounts.video === 0) setMediaTypeFilter('all')
+  }, [mediaTypeFilter, mediaTypeCounts])
+
+  // Quantos filtros avançados (popover) estão ativos — dirige o badge do botão.
+  const activeAdvancedFilters =
+    (dateRange !== 'all' ? 1 : 0) + (minEngagement > 0 ? 1 : 0) + (carouselOnly ? 1 : 0)
+
+  // Conjunto exibido: seção → tipo de mídia → filtros avançados → busca por autor
+  // (só nos Likes) → ordenação pelo eixo escolhido. Posts sem valor no eixo (ex.:
+  // like sem download registrado, ou vídeo sem views) vão sempre ao fim,
+  // independentemente da direção.
   const sortedPosts = useMemo<MediaGalleryPost[]>(() => {
     let base = visiblePosts
+    if (mediaTypeFilter !== 'all') {
+      const wantVideo = mediaTypeFilter === 'video'
+      base = base.filter((post) => isPhotoPost(post) !== wantVideo)
+    }
+    if (carouselOnly) {
+      base = base.filter((post) => post.mediaType === 'slideshow' || post.files.length > 1)
+    }
+    if (minEngagement > 0) {
+      base = base.filter((post) => postEngagement(post) >= minEngagement)
+    }
+    if (dateRange !== 'all') {
+      const now = Date.now() / 1000
+      if (dateRange === 'year') {
+        const yearStart = new Date(new Date().getFullYear(), 0, 1).getTime() / 1000
+        base = base.filter((post) => {
+          const ts = orderTimestamp(post, effectiveSortField)
+          return ts != null && ts >= yearStart
+        })
+      } else {
+        const floor = now - DATE_RANGE_SECONDS[dateRange]
+        base = base.filter((post) => {
+          const ts = orderTimestamp(post, effectiveSortField)
+          return ts != null && ts >= floor
+        })
+      }
+    }
     const query = normalizeForSearch(likesQuery)
     if (isAuthorSection(sectionFilter) && query) {
       base = base.filter((post) => normalizeForSearch(postAuthorSearchText(post)).includes(query))
@@ -541,7 +751,17 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
       if (effectiveSortField === 'popularity') return (b.capturedAt ?? 0) - (a.capturedAt ?? 0)
       return 0
     })
-  }, [visiblePosts, effectiveSortField, sortDir, sectionFilter, likesQuery])
+  }, [
+    visiblePosts,
+    effectiveSortField,
+    sortDir,
+    sectionFilter,
+    likesQuery,
+    mediaTypeFilter,
+    carouselOnly,
+    minEngagement,
+    dateRange,
+  ])
 
   // Agrupa por dia usando Map (não sequencial): quando a ordem não é por data
   // — ex.: ordenação por popularidade — posts do mesmo dia podem não ser
@@ -881,6 +1101,19 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
     void revealMediaInFolder(path).catch((actionError) => handleActionError('Reveal in folder', actionError))
   }, [handleActionError])
 
+  // Enfileira um sync normal deste perfil. O estado ao vivo (queued/running) e o
+  // refresh ao terminar vêm da assinatura da fila; aqui só marcamos otimista para
+  // o botão reagir na hora, sem esperar o primeiro tick da fila.
+  const handleSyncNow = useCallback(() => {
+    if (!sourceId || syncActivity !== 'idle') return
+    setSyncActivity('queued')
+    runSourceSync(sourceId, { trigger: 'manual' }).catch((syncError) => {
+      setSyncActivity('idle')
+      const message = syncError instanceof Error ? syncError.message : String(syncError)
+      window.alert(`Failed to start the sync.\n${message}`)
+    })
+  }, [sourceId, syncActivity])
+
   const handleRefreshMediaStats = useCallback(() => {
     if (!sourceId || statsRefreshState === 'queueing') return
     setStatsRefreshState('queueing')
@@ -908,6 +1141,62 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
     setLikesSearchOpen(false)
     setLikesQuery('')
   }, [sourceId, sectionFilter])
+
+  // Filtros avançados são efêmeros por perfil: trocar de perfil zera período,
+  // engajamento e "só carrosséis" (mediaType persiste como preferência do
+  // operador). Assim um recorte agressivo não some com a mídia do próximo perfil.
+  useEffect(() => {
+    setDateRange('all')
+    setMinEngagement(0)
+    setCarouselOnly(false)
+    setFiltersOpen(false)
+    setBioExpanded(false)
+  }, [sourceId])
+
+  const clearAdvancedFilters = useCallback(() => {
+    setDateRange('all')
+    setMinEngagement(0)
+    setCarouselOnly(false)
+  }, [])
+
+  const clearAllFilters = useCallback(() => {
+    clearAdvancedFilters()
+    setMediaTypeFilter('all')
+  }, [clearAdvancedFilters])
+
+  const applyPreset = useCallback(
+    (preset: FilterPreset) => {
+      setMediaTypeFilter(preset.mediaType)
+      setDateRange(preset.dateRange)
+      setMinEngagement(preset.minEngagement)
+      setCarouselOnly(preset.carouselOnly)
+      // Só aplica a seção do preset se ela existir neste perfil.
+      if (preset.section === SECTION_FILTER_ALL || sections.includes(preset.section)) {
+        setSectionFilter(preset.section)
+      }
+      setFiltersOpen(false)
+    },
+    [sections],
+  )
+
+  const saveCurrentPreset = useCallback(() => {
+    const name = window.prompt('Name this filter preset:')?.trim()
+    if (!name) return
+    const preset: FilterPreset = {
+      id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+      name,
+      mediaType: mediaTypeFilter,
+      section: sectionFilter,
+      dateRange,
+      minEngagement,
+      carouselOnly,
+    }
+    setPresets((current) => [...current, preset])
+  }, [mediaTypeFilter, sectionFilter, dateRange, minEngagement, carouselOnly])
+
+  const deletePreset = useCallback((id: string) => {
+    setPresets((current) => current.filter((preset) => preset.id !== id))
+  }, [])
 
   // Índice de cada post visível (na ordem exibida) para o range do shift+clique.
   const indexByKey = useMemo(() => {
@@ -982,6 +1271,12 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
         setSortMenuOpen(false)
         return
       }
+      if (filtersOpen) {
+        event.preventDefault()
+        event.stopImmediatePropagation()
+        setFiltersOpen(false)
+        return
+      }
       if (likesSearchOpen) {
         event.preventDefault()
         event.stopImmediatePropagation()
@@ -991,7 +1286,7 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
     }
     document.addEventListener('keydown', handler, true)
     return () => document.removeEventListener('keydown', handler, true)
-  }, [confirmPosts, deleting, selectMode, sortMenuOpen, likesSearchOpen, exitSelectMode])
+  }, [confirmPosts, deleting, selectMode, sortMenuOpen, filtersOpen, likesSearchOpen, exitSelectMode])
 
   // Atalhos de operador: S = select mode (fora de campos editáveis / overlays).
   useEffect(() => {
@@ -1075,6 +1370,35 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
       : sectionLabel(gallery.provider, sectionFilter)
   const filteredEmpty =
     !!gallery && gallery.posts.length > 0 && sortedPosts.length === 0
+  // Filtros ativos além da seção (para o empty state oferecer "limpar").
+  const hasActiveContentFilters = mediaTypeFilter !== 'all' || activeAdvancedFilters > 0
+
+  // Header enriquecido (Fase 1) — tudo já vem do SourceProfile do snapshot.
+  const rawDisplayName = sourceProfile?.displayName?.trim() ?? ''
+  const displayName =
+    rawDisplayName && rawDisplayName.replace(/^@/, '').toLowerCase() !== handleDisplay.toLowerCase()
+      ? rawDisplayName
+      : ''
+  // Fase 3 — metadados de perfil da última sync (vêm da galeria).
+  const bioText = gallery?.biography?.trim() ?? ''
+  const bioIsLong = bioText.length > 170 || bioText.includes('\n')
+  const isVerified = gallery?.isVerified === true
+  // A contagem local de posts já aparece na linha de meta; o `mediaCount` remoto
+  // é redundante e, em alguns endpoints do Instagram, vem inconsistente — então
+  // o header mostra só seguidores/seguindo (valores confiáveis do provider).
+  const profileStats: Array<{ key: string; label: string; value: number }> = []
+  if (gallery?.followerCount != null)
+    profileStats.push({ key: 'followers', label: 'followers', value: gallery.followerCount })
+  if (gallery?.followingCount != null)
+    profileStats.push({ key: 'following', label: 'following', value: gallery.followingCount })
+  const syncedAgo = formatSyncedAgo(sourceProfile?.lastSyncedAt)
+  const hasSyncProblem = Boolean(sourceProfile?.syncProblemCode)
+  const syncHealthLabel = hasSyncProblem
+    ? sourceProfile?.syncProblemMessage?.trim() || 'Last sync had a problem'
+    : syncedAgo
+      ? `Synced ${syncedAgo} · no errors`
+      : 'Synced · no errors'
+  const profileLabels = sourceProfile?.labels ?? []
 
   // Sticky group header for virtualized day/user modes (absolute rows can't sticky natively).
   const stickyGroupHeader = useMemo(() => {
@@ -1193,7 +1517,46 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
           )}
         </span>
         <div className="profile-view-identity">
-          <h1>{gallery?.handle ?? '…'}</h1>
+          <h1 className="profile-view-handle-row">
+            <span className="profile-view-handle-text">{gallery?.handle ?? '…'}</span>
+            {isVerified ? (
+              <span className="profile-view-verified" title="Verified account" aria-label="Verified account">
+                <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true" focusable="false">
+                  <path
+                    d="M12 2l2.35 1.76 2.94-.27 1.02 2.77 2.55 1.5-.82 2.84.82 2.84-2.55 1.5-1.02 2.77-2.94-.27L12 22l-2.35-1.76-2.94.27-1.02-2.77-2.55-1.5.82-2.84L3.14 8.53l2.55-1.5 1.02-2.77 2.94.27z"
+                    fill="currentColor"
+                  />
+                  <path d="M8.6 12.2l2.3 2.3 4.5-4.7" fill="none" stroke="var(--bg-window-shell)" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+              </span>
+            ) : null}
+          </h1>
+          {displayName ? <p className="profile-view-display-name">{displayName}</p> : null}
+          {profileStats.length > 0 ? (
+            <p className="profile-view-stats" aria-label="Profile counts">
+              {profileStats.map((stat) => (
+                <span key={stat.key} className="profile-view-stat">
+                  <b>{compactCount(stat.value)}</b> {stat.label}
+                </span>
+              ))}
+            </p>
+          ) : null}
+          {bioText ? (
+            <div className="profile-view-bio-wrap">
+              <span className={`profile-view-bio${bioIsLong && !bioExpanded ? ' is-clamped' : ''}`}>
+                {bioText}
+              </span>
+              {bioIsLong ? (
+                <button
+                  className="profile-view-bio-toggle"
+                  onClick={() => setBioExpanded((open) => !open)}
+                  type="button"
+                >
+                  {bioExpanded ? 'show less' : 'show more'}
+                </button>
+              ) : null}
+            </div>
+          ) : null}
           <p className="profile-view-meta">
             {gallery ? (
               <>
@@ -1209,8 +1572,69 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
               </>
             ) : null}
           </p>
+          {gallery ? (
+            <div className="profile-view-identity-meta">
+              <span
+                className={`profile-view-sync-chip${hasSyncProblem ? ' has-problem' : ''}`}
+                title={syncHealthLabel}
+              >
+                <span className="profile-view-sync-led" aria-hidden="true" />
+                {syncHealthLabel}
+              </span>
+              {profileLabels.length > 0 ? (
+                <span className="profile-view-identity-labels">
+                  {profileLabels.map((label) => (
+                    <span key={label} className="profile-view-identity-label">
+                      {label}
+                    </span>
+                  ))}
+                </span>
+              ) : null}
+            </div>
+          ) : null}
         </div>
         <div className="profile-view-header-actions">
+          {sourceId ? (
+            <button
+              className={`ghost-button profile-view-header-action profile-view-sync-now is-${syncActivity}`}
+              onClick={handleSyncNow}
+              disabled={syncActivity !== 'idle'}
+              type="button"
+              aria-label="Sync now"
+              title={
+                syncActivity === 'running'
+                  ? 'Sync in progress'
+                  : syncActivity === 'queued'
+                    ? 'Sync queued'
+                    : 'Sync this profile now'
+              }
+            >
+              <svg
+                className={syncActivity === 'running' ? 'profile-view-sync-spin' : ''}
+                viewBox="0 0 24 24"
+                width="15"
+                height="15"
+                aria-hidden="true"
+                focusable="false"
+              >
+                <path
+                  d="M20 11a8 8 0 1 0-2.34 5.66M20 4v7h-7"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="1.8"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+              </svg>
+              <span className="profile-view-header-action-label">
+                {syncActivity === 'running'
+                  ? 'Syncing…'
+                  : syncActivity === 'queued'
+                    ? 'Queued'
+                    : 'Sync now'}
+              </span>
+            </button>
+          ) : null}
           {popularitySortAvailable && sourceId ? (
             <button
               className={`ghost-button profile-view-header-action profile-view-stats-refresh is-${statsRefreshState}`}
@@ -1430,6 +1854,54 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
                     })}
                   </div>
                 ) : null}
+                {mediaTypeCounts.all > 0 ? (
+                  <div
+                    className="profile-view-mediatype"
+                    role="group"
+                    aria-label="Media type filter"
+                  >
+                    <button
+                      className={mediaTypeFilter === 'all' ? 'is-active' : ''}
+                      onClick={() => setMediaTypeFilter('all')}
+                      type="button"
+                      aria-pressed={mediaTypeFilter === 'all'}
+                    >
+                      All
+                      <span className="profile-view-mediatype-count">{mediaTypeCounts.all}</span>
+                    </button>
+                    <button
+                      className={mediaTypeFilter === 'photo' ? 'is-active' : ''}
+                      onClick={() => setMediaTypeFilter('photo')}
+                      type="button"
+                      aria-pressed={mediaTypeFilter === 'photo'}
+                      disabled={mediaTypeCounts.photo === 0}
+                      title="Photos and slideshows"
+                    >
+                      <svg viewBox="0 0 24 24" width="13" height="13" aria-hidden="true" focusable="false">
+                        <rect x="3" y="5" width="18" height="14" rx="2" fill="none" stroke="currentColor" strokeWidth="1.9" />
+                        <circle cx="8.5" cy="10" r="1.6" fill="currentColor" />
+                        <path d="M21 16l-5-5-9 8" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinejoin="round" />
+                      </svg>
+                      Photos
+                      <span className="profile-view-mediatype-count">{mediaTypeCounts.photo}</span>
+                    </button>
+                    <button
+                      className={mediaTypeFilter === 'video' ? 'is-active' : ''}
+                      onClick={() => setMediaTypeFilter('video')}
+                      type="button"
+                      aria-pressed={mediaTypeFilter === 'video'}
+                      disabled={mediaTypeCounts.video === 0}
+                      title="Videos and reels"
+                    >
+                      <svg viewBox="0 0 24 24" width="13" height="13" aria-hidden="true" focusable="false">
+                        <rect x="3" y="5" width="14" height="14" rx="2" fill="none" stroke="currentColor" strokeWidth="1.9" />
+                        <path d="M17 9l4-2v10l-4-2" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinejoin="round" />
+                      </svg>
+                      Videos
+                      <span className="profile-view-mediatype-count">{mediaTypeCounts.video}</span>
+                    </button>
+                  </div>
+                ) : null}
               </div>
               <div className="profile-view-toolbar-actions">
               {isAuthorSection(sectionFilter) ? (
@@ -1491,6 +1963,122 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
                   )}
                 </div>
               ) : null}
+              <div className="profile-view-filters" ref={filtersMenuRef}>
+                <button
+                  className={`ghost-button profile-view-filters-toggle${activeAdvancedFilters > 0 ? ' has-active' : ''}`}
+                  onClick={() => setFiltersOpen((open) => !open)}
+                  type="button"
+                  aria-haspopup="dialog"
+                  aria-expanded={filtersOpen}
+                  aria-label="Advanced filters"
+                  title="Advanced filters"
+                >
+                  <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" focusable="false">
+                    <path d="M4 6h16M7 12h10M10 18h4" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" />
+                  </svg>
+                  <span className="profile-view-filters-label">Filters</span>
+                  {activeAdvancedFilters > 0 ? (
+                    <span className="profile-view-filters-badge" aria-hidden="true">
+                      {activeAdvancedFilters}
+                    </span>
+                  ) : null}
+                </button>
+                {filtersOpen ? (
+                  <div className="profile-view-filters-menu" role="dialog" aria-label="Advanced filters">
+                    <div className="profile-view-filters-group">
+                      <span className="profile-view-filters-heading">Period</span>
+                      <div className="profile-view-filters-chips">
+                        {(['all', '7d', '30d', '90d', 'year'] as DateRangeFilter[]).map((range) => (
+                          <button
+                            key={range}
+                            className={dateRange === range ? 'is-active' : ''}
+                            onClick={() => setDateRange(range)}
+                            type="button"
+                            aria-pressed={dateRange === range}
+                          >
+                            {DATE_RANGE_LABEL[range]}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                    <div className="profile-view-filters-group">
+                      <span className="profile-view-filters-heading">
+                        Minimum engagement
+                        <span className="profile-view-filters-heading-value">
+                          {minEngagement > 0 ? `${compactCount(minEngagement)}+` : 'any'}
+                        </span>
+                      </span>
+                      <input
+                        className="profile-view-filters-range"
+                        type="range"
+                        min={0}
+                        max={ENGAGEMENT_STEPS.length - 1}
+                        step={1}
+                        value={engagementToSlider(minEngagement)}
+                        onChange={(event) => setMinEngagement(sliderToEngagement(Number(event.target.value)))}
+                        aria-label="Minimum views or likes"
+                      />
+                    </div>
+                    <div className="profile-view-filters-group">
+                      <span className="profile-view-filters-heading">Format</span>
+                      <label className="profile-view-filters-check">
+                        <input
+                          type="checkbox"
+                          checked={carouselOnly}
+                          onChange={(event) => setCarouselOnly(event.target.checked)}
+                        />
+                        Carousels / slideshows only
+                      </label>
+                    </div>
+                    {presets.length > 0 ? (
+                      <div className="profile-view-filters-group">
+                        <span className="profile-view-filters-heading">Saved presets</span>
+                        <div className="profile-view-filters-presets">
+                          {presets.map((preset) => (
+                            <span key={preset.id} className="profile-view-filters-preset">
+                              <button
+                                className="profile-view-filters-preset-apply"
+                                onClick={() => applyPreset(preset)}
+                                type="button"
+                                title={`Apply "${preset.name}"`}
+                              >
+                                {preset.name}
+                              </button>
+                              <button
+                                className="profile-view-filters-preset-remove"
+                                onClick={() => deletePreset(preset.id)}
+                                type="button"
+                                aria-label={`Delete preset ${preset.name}`}
+                                title="Delete preset"
+                              >
+                                ×
+                              </button>
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                    ) : null}
+                    <div className="profile-view-filters-footer">
+                      <button
+                        className="ghost-button"
+                        onClick={clearAdvancedFilters}
+                        type="button"
+                        disabled={activeAdvancedFilters === 0}
+                      >
+                        Clear
+                      </button>
+                      <button
+                        className="ghost-button"
+                        onClick={saveCurrentPreset}
+                        type="button"
+                        title="Save the current filters as a preset"
+                      >
+                        Save preset
+                      </button>
+                    </div>
+                  </div>
+                ) : null}
+              </div>
               <div className="profile-view-sort" ref={sortMenuRef}>
                 <button
                   className="ghost-button profile-view-sort-toggle"
@@ -1582,44 +2170,46 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
                   </div>
                 ) : null}
               </div>
-              <div className="profile-view-density" role="group" aria-label="Thumbnail size">
+              <div className="profile-view-actions-cluster">
+                <div className="profile-view-density" role="group" aria-label="Thumbnail size">
+                  <button
+                    className="ghost-button queue-icon-button"
+                    onClick={() => setDensityIndex((index) => Math.max(0, index - 1))}
+                    disabled={densityIndex <= 0}
+                    type="button"
+                    aria-label="Smaller thumbnails"
+                    title="Smaller thumbnails (more per row)"
+                  >
+                    −
+                  </button>
+                  <span
+                    className="profile-view-density-level"
+                    title={`Thumbnail size ${densityLevelLabel}`}
+                    aria-label={`Thumbnail size ${densityLevelLabel}`}
+                  >
+                    {densityLevelLabel}
+                  </span>
+                  <button
+                    className="ghost-button queue-icon-button"
+                    onClick={() => setDensityIndex((index) => Math.min(DENSITY_STEPS.length - 1, index + 1))}
+                    disabled={densityIndex >= DENSITY_STEPS.length - 1}
+                    type="button"
+                    aria-label="Larger thumbnails"
+                    title="Larger thumbnails (fewer per row)"
+                  >
+                    +
+                  </button>
+                </div>
                 <button
-                  className="ghost-button queue-icon-button"
-                  onClick={() => setDensityIndex((index) => Math.max(0, index - 1))}
-                  disabled={densityIndex <= 0}
+                  className="ghost-button profile-view-select-toggle"
+                  onClick={() => setSelectMode(true)}
                   type="button"
-                  aria-label="Smaller thumbnails"
-                  title="Smaller thumbnails (more per row)"
+                  aria-pressed={false}
+                  title="Select media (S)"
                 >
-                  −
-                </button>
-                <span
-                  className="profile-view-density-level"
-                  title={`Thumbnail size ${densityLevelLabel}`}
-                  aria-label={`Thumbnail size ${densityLevelLabel}`}
-                >
-                  {densityLevelLabel}
-                </span>
-                <button
-                  className="ghost-button queue-icon-button"
-                  onClick={() => setDensityIndex((index) => Math.min(DENSITY_STEPS.length - 1, index + 1))}
-                  disabled={densityIndex >= DENSITY_STEPS.length - 1}
-                  type="button"
-                  aria-label="Larger thumbnails"
-                  title="Larger thumbnails (fewer per row)"
-                >
-                  +
+                  Select
                 </button>
               </div>
-              <button
-                className="ghost-button profile-view-select-toggle"
-                onClick={() => setSelectMode(true)}
-                type="button"
-                aria-pressed={false}
-                title="Select media (S)"
-              >
-                Select
-              </button>
               </div>
             </>
           )}
@@ -1650,10 +2240,17 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
           <span className="muted-text">
             {likesQuery.trim()
               ? 'Try another author or clear the search.'
-              : activeSectionLabel
-                ? `Nothing downloaded in ${activeSectionLabel} yet — switch to All or pick another section.`
-                : 'Adjust filters to see more media.'}
+              : hasActiveContentFilters
+                ? 'No media matches the active filters.'
+                : activeSectionLabel
+                  ? `Nothing downloaded in ${activeSectionLabel} yet — switch to All or pick another section.`
+                  : 'Adjust filters to see more media.'}
           </span>
+          {hasActiveContentFilters ? (
+            <button className="ghost-button" onClick={clearAllFilters} type="button">
+              Clear filters
+            </button>
+          ) : null}
         </div>
       ) : (
         <div className="profile-view-days" ref={scrollRef}>
