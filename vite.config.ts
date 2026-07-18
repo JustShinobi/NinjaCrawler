@@ -31,6 +31,7 @@ export default defineConfig(({ command }) => ({
         batchEditor: resolve(projectRoot, 'batch-editor.html'),
         profileView: resolve(projectRoot, 'profile-view.html'),
         singleVideos: resolve(projectRoot, 'single-videos.html'),
+        workspaceHealth: resolve(projectRoot, 'workspace-health.html'),
       },
     },
   },

@@ -9,6 +9,7 @@ const bridgeMocks = vi.hoisted(() => ({
   queryRuntimeLogs: vi.fn(),
   reportRuntimeLogWindowReady: vi.fn(),
   subscribeToDesktopRuntimeEvents: vi.fn(),
+  subscribeToRuntimeLogWindowIntent: vi.fn(),
 }))
 
 const runtimeLogContext = {
@@ -50,9 +51,11 @@ describe('RuntimeLogWindowPage', () => {
     bridgeMocks.queryRuntimeLogs.mockReset()
     bridgeMocks.reportRuntimeLogWindowReady.mockReset()
     bridgeMocks.subscribeToDesktopRuntimeEvents.mockReset()
+    bridgeMocks.subscribeToRuntimeLogWindowIntent.mockReset()
     bridgeMocks.reportRuntimeLogWindowReady.mockResolvedValue(undefined)
     bridgeMocks.loadRuntimeLogContext.mockResolvedValue(runtimeLogContext)
     bridgeMocks.subscribeToDesktopRuntimeEvents.mockResolvedValue(() => undefined)
+    bridgeMocks.subscribeToRuntimeLogWindowIntent.mockResolvedValue(() => undefined)
   })
 
   afterEach(() => {

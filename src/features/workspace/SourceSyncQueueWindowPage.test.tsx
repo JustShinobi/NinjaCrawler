@@ -18,8 +18,10 @@ const bridgeMocks = vi.hoisted(() => ({
   loadWorkspaceSnapshot: vi.fn(),
   loadMediaThumbnailQueueStatus: vi.fn(),
   loadMediaPathMigrationQueueStatus: vi.fn(),
+  loadMediaDedupeStatus: vi.fn(),
   enqueueMediaThumbnailGeneration: vi.fn(),
   openConnectorDebugWindow: vi.fn(),
+  openWorkspaceHealthWindow: vi.fn(),
   subscribeToDesktopRuntimeEvents: vi.fn(),
   loadSingleVideoQueueStatus: vi.fn(),
   subscribeToSingleVideoQueue: vi.fn(),
@@ -138,6 +140,10 @@ describe('SourceSyncQueueWindowPage', () => {
       recentResults: [],
       updatedAt: '',
     })
+    bridgeMocks.loadMediaDedupeStatus.mockResolvedValue({
+      state: 'idle', stage: 'idle', filesProcessed: 0, filesTotal: 0,
+      bytesProcessed: 0, bytesTotal: 0, cancellable: false, updatedAt: '',
+    })
     bridgeMocks.enqueueMediaThumbnailGeneration.mockResolvedValue({
       queuedCount: 0,
       runningCount: 0,
@@ -148,6 +154,7 @@ describe('SourceSyncQueueWindowPage', () => {
       updatedAt: '',
     })
     bridgeMocks.openConnectorDebugWindow.mockResolvedValue(undefined)
+    bridgeMocks.openWorkspaceHealthWindow.mockResolvedValue(undefined)
     bridgeMocks.subscribeToDesktopRuntimeEvents.mockResolvedValue(() => undefined)
     bridgeMocks.loadSingleVideoQueueStatus.mockResolvedValue({
       queuedCount: 0,

@@ -23,10 +23,12 @@ const bridgeMocks = vi.hoisted(() => ({
   getAppBuildInfo: vi.fn(),
   loadSourceDeleteQueueStatus: vi.fn(),
   loadSourceSyncQueueStatus: vi.fn(),
+  loadWorkspaceHealth: vi.fn(() => Promise.resolve(undefined)),
   openConnectorRuntimesWindow: vi.fn(),
   openExternalTarget: vi.fn(),
   openImportWindow: vi.fn(),
   openRuntimeLogWindow: vi.fn(),
+  openWorkspaceHealthWindow: vi.fn(),
   openSchedulerWindow: vi.fn(),
   openSourceSyncQueueWindow: vi.fn(),
   subscribeToDesktopRuntimeEvents: vi.fn(),
@@ -125,6 +127,7 @@ describe('App search shortcut', () => {
     bridgeMocks.loadSourceDeleteQueueStatus.mockReset()
     bridgeMocks.loadSourceSyncQueueStatus.mockReset()
     bridgeMocks.subscribeToDesktopRuntimeEvents.mockReset()
+    bridgeMocks.openWorkspaceHealthWindow.mockReset()
     bridgeMocks.loadSourceDeleteQueueStatus.mockResolvedValue({
       queuedCount: 0,
       runningCount: 0,
@@ -149,6 +152,7 @@ describe('App search shortcut', () => {
       updatedAt: new Date().toISOString(),
     })
     bridgeMocks.subscribeToDesktopRuntimeEvents.mockResolvedValue(() => undefined)
+    bridgeMocks.openWorkspaceHealthWindow.mockResolvedValue(undefined)
     bridgeMocks.getAppBuildInfo.mockResolvedValue({
       version: '0.15.0',
       commitSha: '44ed4e3a',
@@ -170,6 +174,14 @@ describe('App search shortcut', () => {
       updateAvailable: false,
     })
     window.history.replaceState({}, '', '/')
+  })
+
+  it('opens Workspace Health from the compact toolbar action', async () => {
+    render(<App />)
+
+    fireEvent.click(await screen.findByRole('button', { name: /^health$/i }))
+
+    await waitFor(() => expect(bridgeMocks.openWorkspaceHealthWindow).toHaveBeenCalledTimes(1))
   })
 
   afterEach(() => {

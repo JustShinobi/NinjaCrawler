@@ -7,10 +7,12 @@ import {
   enqueueMediaThumbnailGeneration,
   loadMediaThumbnailQueueStatus,
   loadMediaPathMigrationQueueStatus,
+  loadMediaDedupeStatus,
   loadSourceDeleteQueueStatus,
   loadSourceSyncQueueStatus,
   loadWorkspaceSnapshot,
   openConnectorDebugWindow,
+  openWorkspaceHealthWindow,
   pauseSourceSyncProvider,
   reorderSourceSyncProviderQueue,
   resumeSourceSyncProvider,
@@ -31,6 +33,7 @@ import type {
   SourceSyncQueueStatus,
   MediaThumbnailQueueStatus,
   MediaPathMigrationQueueStatus,
+  MediaDedupeJobStatus,
   SchedulerGroup,
   SingleVideoQueueRecentResult,
   SingleVideoQueueStatus,
@@ -339,6 +342,7 @@ export function SourceSyncQueueWindowPage() {
   const [thumbnailScopeValue, setThumbnailScopeValue] = useState('')
   const [thumbnailStatus, setThumbnailStatus] = useState<MediaThumbnailQueueStatus>()
   const [migrationStatus, setMigrationStatus] = useState<MediaPathMigrationQueueStatus>()
+  const [dedupeStatus, setDedupeStatus] = useState<MediaDedupeJobStatus>()
   const [queueingThumbnails, setQueueingThumbnails] = useState(false)
   const [maintenanceOpen, setMaintenanceOpen] = useState(false)
   const [maintenanceError, setMaintenanceError] = useState<string>()
@@ -389,6 +393,7 @@ export function SourceSyncQueueWindowPage() {
   useEffect(() => {
     const refresh = () => {
       void loadMediaThumbnailQueueStatus().then(setThumbnailStatus).catch(() => undefined)
+      void loadMediaDedupeStatus().then(setDedupeStatus).catch(() => undefined)
     }
     refresh()
     const timer = window.setInterval(refresh, 750)
@@ -733,8 +738,8 @@ export function SourceSyncQueueWindowPage() {
 
   const totals = useMemo(
     () => ({
-      queued: syncStatus.queuedCount + deleteStatus.queuedCount + (singleVideoStatus?.queuedCount ?? 0) + (migrationStatus?.queuedCount ?? 0) + (thumbnailStatus?.queuedCount ?? 0),
-      running: syncStatus.runningCount + deleteStatus.runningCount + (singleVideoStatus?.runningCount ?? 0) + (migrationStatus?.runningCount ?? 0) + (thumbnailStatus?.runningCount ?? 0),
+      queued: syncStatus.queuedCount + deleteStatus.queuedCount + (singleVideoStatus?.queuedCount ?? 0) + (migrationStatus?.queuedCount ?? 0) + (thumbnailStatus?.queuedCount ?? 0) + (dedupeStatus?.state === 'queued' ? 1 : 0),
+      running: syncStatus.runningCount + deleteStatus.runningCount + (singleVideoStatus?.runningCount ?? 0) + (migrationStatus?.runningCount ?? 0) + (thumbnailStatus?.runningCount ?? 0) + (['scanning', 'applying'].includes(dedupeStatus?.state ?? '') ? 1 : 0),
       completed: syncStatus.completedCount + deleteStatus.completedCount + (singleVideoStatus?.completedCount ?? 0) + (migrationStatus?.completedCount ?? 0) + (thumbnailStatus?.completedCount ?? 0),
       failed: syncStatus.failedCount + deleteStatus.failedCount + (singleVideoStatus?.failedCount ?? 0) + (migrationStatus?.failedCount ?? 0) + (thumbnailStatus?.failedCount ?? 0),
     }),
@@ -750,11 +755,14 @@ export function SourceSyncQueueWindowPage() {
       singleVideoStatus,
       migrationStatus,
       thumbnailStatus,
+      dedupeStatus,
     ],
   )
 
-  const maintenanceRunning = (migrationStatus?.runningCount ?? 0) + (thumbnailStatus?.runningCount ?? 0)
-  const maintenanceQueued = (migrationStatus?.queuedCount ?? 0) + (thumbnailStatus?.queuedCount ?? 0)
+  const dedupeRunning = ['scanning', 'applying'].includes(dedupeStatus?.state ?? '') ? 1 : 0
+  const dedupeQueued = dedupeStatus?.state === 'queued' ? 1 : 0
+  const maintenanceRunning = (migrationStatus?.runningCount ?? 0) + (thumbnailStatus?.runningCount ?? 0) + dedupeRunning
+  const maintenanceQueued = (migrationStatus?.queuedCount ?? 0) + (thumbnailStatus?.queuedCount ?? 0) + dedupeQueued
   const maintenanceActive = maintenanceRunning + maintenanceQueued > 0
   const globalState = totals.failed > 0 ? 'Needs attention' : totals.running > 0 ? `${totals.running} active` : totals.queued > 0 ? `${totals.queued} queued` : 'Idle'
 
@@ -1124,6 +1132,12 @@ export function SourceSyncQueueWindowPage() {
           <div aria-label={`${thumbnailStatus.active.handle} thumbnail generation`} aria-valuemax={100} aria-valuemin={0} aria-valuenow={thumbnailStatus.active.progressPercent ?? 0} className="queue-status-progress-track" role="progressbar"><div className="queue-status-progress-fill" style={{ width: `${thumbnailStatus.active.progressPercent ?? 0}%` }} /></div>
           <small title={thumbnailStatus.active.currentFile}>Generating missing thumbnails · {thumbnailStatus.active.generated} generated · {thumbnailStatus.active.skippedExisting} existing · {thumbnailStatus.active.failed} failed</small>
         </article> : null}
+        {dedupeRunning || dedupeQueued ? <article className="maintenance-job">
+          <div className="maintenance-job-heading"><span className="queue-tag">Media cleanup</span><strong>{dedupeStatus?.state === 'applying' ? 'Applying reviewed changes' : dedupeStatus?.stage === 'perceptual_scan' ? 'Comparing similar media' : 'Scanning library'}</strong><span className="queue-data">{dedupeStatus?.stage === 'perceptual_scan' ? `${dedupeStatus.perceptualSourcesProcessed}/${dedupeStatus.perceptualSourcesTotal} sources` : `${dedupeStatus?.filesProcessed.toLocaleString()}/${dedupeStatus?.filesTotal.toLocaleString()} files`}</span></div>
+          <div aria-label="Media cleanup progress" aria-valuemax={100} aria-valuemin={0} aria-valuenow={dedupeStatus?.filesTotal ? Math.round(dedupeStatus.filesProcessed * 100 / dedupeStatus.filesTotal) : 0} className="queue-status-progress-track" role="progressbar"><div className="queue-status-progress-fill" style={{ width: `${dedupeStatus?.filesTotal ? Math.round(dedupeStatus.filesProcessed * 100 / dedupeStatus.filesTotal) : 0}%` }} /></div>
+          <small title={dedupeStatus?.currentPath}>{dedupeStatus?.stage.replaceAll('_', ' ')}{dedupeStatus?.currentRoot ? ` · ${dedupeStatus.currentRoot}` : ''} · Review and cleanup controls are available in Workspace Health.</small>
+          {dedupeStatus?.sourceJobs.find((job) => job.status === 'running') ? <small className="maintenance-current-file" title={dedupeStatus.sourceJobs.find((job) => job.status === 'running')?.currentPath}>Current source · {dedupeStatus.sourceJobs.find((job) => job.status === 'running')?.sourcePath}{dedupeStatus.perceptualSourcesFailed ? ` · ${dedupeStatus.perceptualSourcesFailed} failed` : ''}</small> : null}
+        </article> : null}
       </section> : null}
 
       {maintenanceOpen ? <section className="maintenance-panel panel" id="queue-maintenance-panel" aria-label="Maintenance controls">
@@ -1132,6 +1146,10 @@ export function SourceSyncQueueWindowPage() {
           <button aria-label="Close maintenance" className="ghost-button queue-icon-button" onClick={() => { setMaintenanceOpen(false); maintenanceButtonRef.current?.focus() }} type="button">Close</button>
         </div>
         {maintenanceError ? <div className="maintenance-error" role="alert">{maintenanceError}</div> : null}
+        <article className="maintenance-cleanup-link">
+          <div><h2>Duplicate media</h2><p>Scan the library, consolidate exact copies with hardlinks, and review similar candidates.</p></div>
+          <button className="ghost-button" onClick={() => void openWorkspaceHealthWindow()} type="button">Open Workspace Health</button>
+        </article>
         <div className="thumbnail-queue-controls thumbnail-generation-controls">
           <label>
             <span>Scope</span>
