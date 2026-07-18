@@ -159,6 +159,10 @@ const MIGRATIONS: &[(i64, &str)] = &[
         41,
         include_str!("../../migrations/0041_connector_runtime_asset_digest.sql"),
     ),
+    (
+        42,
+        include_str!("../../migrations/0042_source_profile_stats.sql"),
+    ),
 ];
 
 const PROVIDER_SYNC_RESUME_SCHEMA: &str =
@@ -312,7 +316,12 @@ mod tests {
              );",
         )
         .expect("migration ledger");
-        for version in 1..=38 {
+        // Registra TODAS as migrações como aplicadas (sem rodá-las): o teste
+        // simula um ledger cheio com as tabelas de runtime ausentes. Iterar a
+        // constante em vez de um número fixo mantém o teste válido conforme
+        // novas migrações são adicionadas (algumas alteram tabelas antigas e
+        // falhariam contra este DB esqueleto se fossem re-executadas).
+        for &(version, _) in MIGRATIONS {
             raw.execute(
                 "INSERT INTO schema_migrations(version) VALUES (?1)",
                 [version],
@@ -384,7 +393,7 @@ mod tests {
              );",
         )
         .expect("draft schema");
-        for version in 1..=39 {
+        for &(version, _) in MIGRATIONS {
             raw.execute(
                 "INSERT INTO schema_migrations(version) VALUES (?1)",
                 [version],

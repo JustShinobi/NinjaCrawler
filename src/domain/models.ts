@@ -572,6 +572,14 @@ export interface SourceMediaGallery {
     handle: string
     profileUrl: string
     posts: MediaGalleryPost[]
+    /** Última bio sincronizada (bio + links). Ausente em perfis sem sync. */
+    biography?: string
+    followerCount?: number
+    followingCount?: number
+    mediaCount?: number
+    isVerified?: boolean
+    /** ISO da última atualização dos contadores acima. */
+    statsUpdatedAt?: string
 }
 
 export interface MediaThumbnailQueueItem {

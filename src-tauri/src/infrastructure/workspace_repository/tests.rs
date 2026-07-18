@@ -4081,6 +4081,97 @@ fn update_instagram_source_description_after_sync_populates_empty_profile_note()
 }
 
 #[test]
+fn update_source_profile_stats_persists_and_coalesces_partial_updates() {
+    let (_temp_dir, layout) = create_test_layout();
+
+    with_workspace_layout(layout, |connection, test_layout| {
+        upsert_provider_account_with_connection(
+            connection,
+            test_layout,
+            sample_account("account-1", "instagram"),
+        )?;
+        upsert_source_profile_with_connection(
+            connection,
+            test_layout,
+            sample_source("source-1", "instagram", Some("account-1")),
+        )?;
+
+        // Primeira captura grava todos os campos.
+        let changed = update_source_profile_stats(
+            connection,
+            "source-1",
+            Some("Pole & flexibility"),
+            Some(18_432),
+            Some(642),
+            Some(577),
+            Some(true),
+            "2026-07-17T00:00:00Z",
+        )?;
+        assert!(changed);
+
+        // Segunda captura só traz bio + seguidores; o resto é preservado (COALESCE).
+        update_source_profile_stats(
+            connection,
+            "source-1",
+            None,
+            Some(18_500),
+            None,
+            None,
+            None,
+            "2026-07-17T01:00:00Z",
+        )?;
+
+        let row: (
+            Option<String>,
+            Option<i64>,
+            Option<i64>,
+            Option<i64>,
+            Option<i64>,
+            Option<String>,
+        ) = connection
+            .query_row(
+                "SELECT profile_biography, profile_follower_count, profile_following_count,
+                        profile_media_count, profile_is_verified, profile_stats_updated_at
+                 FROM source_profiles WHERE id = ?1",
+                params!["source-1"],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                    ))
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        assert_eq!(row.0.as_deref(), Some("Pole & flexibility"));
+        assert_eq!(row.1, Some(18_500));
+        assert_eq!(row.2, Some(642));
+        assert_eq!(row.3, Some(577));
+        assert_eq!(row.4, Some(1));
+        assert_eq!(row.5.as_deref(), Some("2026-07-17T01:00:00Z"));
+
+        // Sem nenhum dado novo é no-op (não sobrescreve o timestamp).
+        let changed = update_source_profile_stats(
+            connection,
+            "source-1",
+            None,
+            None,
+            None,
+            None,
+            None,
+            "2026-07-17T02:00:00Z",
+        )?;
+        assert!(!changed);
+
+        Ok(())
+    })
+    .expect("profile stats should persist");
+}
+
+#[test]
 fn update_instagram_source_description_after_sync_preserves_existing_note_without_force() {
     let (_temp_dir, layout) = create_test_layout();
 

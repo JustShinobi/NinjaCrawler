@@ -2643,6 +2643,13 @@ function parseSourceMediaGallery(raw: unknown, sourceId: string): SourceMediaGal
     provider: stringValue(value, ['provider'], 'instagram') as SourceMediaGallery['provider'],
     handle: stringValue(value, ['handle'], ''),
     profileUrl: stringValue(value, ['profileUrl', 'profile_url'], ''),
+    // Metadados de perfil da última sync (Fase 3); ausentes em perfis sem sync.
+    biography: optionalStringValue(value, ['biography']),
+    followerCount: optionalNumberValue(value, ['followerCount', 'follower_count']),
+    followingCount: optionalNumberValue(value, ['followingCount', 'following_count']),
+    mediaCount: optionalNumberValue(value, ['mediaCount', 'media_count']),
+    isVerified: value.isVerified === true || value.is_verified === true,
+    statsUpdatedAt: optionalStringValue(value, ['statsUpdatedAt', 'stats_updated_at']),
     posts: posts.filter(isRecord).map((post) => ({
       postId: optionalStringValue(post, ['postId', 'post_id']),
       postUrl: optionalStringValue(post, ['postUrl', 'post_url']),

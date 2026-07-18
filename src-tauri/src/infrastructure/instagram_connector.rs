@@ -154,6 +154,9 @@ pub struct InstagramConnectorResult {
     pub resolved_username: Option<String>,
     pub profile_description: Option<String>,
     pub profile_description_error: Option<String>,
+    /// Contadores públicos do perfil (bio à parte) capturados no mesmo lookup da
+    /// descrição — alimentam o cabeçalho enriquecido do ProfileView.
+    pub profile_counts: InstagramProfileCounts,
     pub manifest_summary: Option<InstagramManifestSummary>,
     /// Associação post→álbum de highlight para TODOS os itens descobertos nos
     /// destaques (inclusive os já existentes no ledger, que não rebaixam bytes).
@@ -777,8 +780,8 @@ where
         request.pacing,
     )?;
     let profile = load_profile(&mut client, &request.username)?;
-    let (profile_description, profile_description_error) =
-        resolve_profile_description(&mut client, &profile);
+    let (profile_description, profile_counts, profile_description_error) =
+        resolve_profile_metadata(&mut client, &profile);
     let mut effective_request = request.clone();
     effective_request.username = profile.username.clone();
     let mut section_errors = Vec::new();
@@ -1229,6 +1232,7 @@ where
         resolved_username: Some(profile.username.clone()),
         profile_description,
         profile_description_error,
+        profile_counts,
         manifest_summary: Some(manifest_summary),
         highlight_memberships: collect_highlight_memberships(&manifest),
         updated_headers: client.headers.clone(),
@@ -1293,6 +1297,7 @@ where
             resolved_username: None,
             profile_description: None,
             profile_description_error: None,
+            profile_counts: InstagramProfileCounts::default(),
             manifest_summary: None,
             highlight_memberships: Vec::new(),
             updated_headers: request.headers.clone(),
@@ -1358,6 +1363,7 @@ where
         resolved_username: None,
         profile_description: None,
         profile_description_error: None,
+        profile_counts: InstagramProfileCounts::default(),
         manifest_summary: None,
         highlight_memberships: Vec::new(),
         updated_headers: client.headers.clone(),
@@ -2559,32 +2565,47 @@ fn instagram_user_info_url(user_id: &str) -> String {
     format!("{INSTAGRAM_WEB_ORIGIN}/api/v1/users/{user_id}/info/")
 }
 
-fn resolve_profile_description(
+/// Contadores públicos do perfil (bio à parte), usados no cabeçalho enriquecido
+/// do ProfileView. Todos opcionais: um endpoint pode trazer só parte deles.
+#[derive(Clone, Default)]
+pub struct InstagramProfileCounts {
+    pub follower_count: Option<i64>,
+    pub following_count: Option<i64>,
+    pub media_count: Option<i64>,
+    pub is_verified: Option<bool>,
+}
+
+/// Descrição (bio + links) e contadores, resolvidos de um mesmo payload.
+type ProfileMetadata = (Option<String>, InstagramProfileCounts);
+
+fn resolve_profile_metadata(
     client: &mut InstagramClient,
     profile: &UserProfile,
-) -> (Option<String>, Option<String>) {
+) -> (Option<String>, InstagramProfileCounts, Option<String>) {
     let mut errors = Vec::new();
 
-    match load_profile_description_by_user_id(client, &profile.username, &profile.user_id) {
-        Ok(description) => return (description, None),
+    match load_profile_metadata_by_user_id(client, &profile.username, &profile.user_id) {
+        Ok((description, counts)) => return (description, counts, None),
         Err(error) => errors.push(format!("user info: {error}")),
     }
 
     if let Some(description) = profile.description.clone() {
-        return (Some(description), None);
+        // Fallback só com a bio da rota de timeline: sem contadores confiáveis.
+        return (Some(description), InstagramProfileCounts::default(), None);
     }
 
-    match load_profile_description_gql(client, &profile.username, &profile.user_id) {
-        Ok(description) => return (description, None),
+    match load_profile_metadata_gql(client, &profile.username, &profile.user_id) {
+        Ok((description, counts)) => return (description, counts, None),
         Err(error) => errors.push(format!("GraphQL: {error}")),
     }
 
-    match load_profile_description(client, &profile.username) {
-        Ok(description) => (description, None),
+    match load_profile_metadata(client, &profile.username) {
+        Ok((description, counts)) => (description, counts, None),
         Err(error) => {
             errors.push(format!("web profile: {error}"));
             (
                 None,
+                InstagramProfileCounts::default(),
                 Some(format!(
                     "Instagram profile description lookup failed: {}",
                     errors.join(" | ")
@@ -2594,35 +2615,35 @@ fn resolve_profile_description(
     }
 }
 
-fn load_profile_description(
+fn load_profile_metadata(
     client: &mut InstagramClient,
     username: &str,
-) -> Result<Option<String>, String> {
+) -> Result<ProfileMetadata, String> {
     let referer = format!("https://www.instagram.com/{username}/");
     let payload = client.get_json(
         &format!("https://i.instagram.com/api/v1/users/web_profile_info/?username={username}"),
         Some(&referer),
     )?;
 
-    parse_profile_description_response(&payload)
+    parse_profile_metadata_response(&payload)
 }
 
-fn load_profile_description_by_user_id(
+fn load_profile_metadata_by_user_id(
     client: &mut InstagramClient,
     username: &str,
     user_id: &str,
-) -> Result<Option<String>, String> {
+) -> Result<ProfileMetadata, String> {
     let referer = format!("https://www.instagram.com/{username}/");
     let payload = client.get_json(&instagram_user_info_url(user_id), Some(&referer))?;
 
-    parse_profile_description_response(&payload)
+    parse_profile_metadata_response(&payload)
 }
 
-fn load_profile_description_gql(
+fn load_profile_metadata_gql(
     client: &mut InstagramClient,
     username: &str,
     user_id: &str,
-) -> Result<Option<String>, String> {
+) -> Result<ProfileMetadata, String> {
     let (lsd, dtsg) = gql_tokens(&client.headers)
         .ok_or_else(|| "Instagram GraphQL tokens are unavailable.".to_string())?;
     let friendly_name = "PolarisProfilePageContentQuery";
@@ -2640,20 +2661,45 @@ fn load_profile_description_gql(
         Some(&referer),
     )?;
 
-    parse_profile_description_response(&payload)
+    parse_profile_metadata_response(&payload)
 }
 
 #[cfg(test)]
 fn parse_profile_description(payload: &Value) -> Option<String> {
-    parse_profile_description_response(payload).ok().flatten()
+    parse_profile_metadata_response(payload).ok().and_then(|(description, _)| description)
 }
 
+#[cfg(test)]
 fn parse_profile_description_response(payload: &Value) -> Result<Option<String>, String> {
+    parse_profile_metadata_response(payload).map(|(description, _)| description)
+}
+
+fn parse_profile_metadata_response(payload: &Value) -> Result<ProfileMetadata, String> {
     let user = payload
         .pointer("/data/user")
         .or_else(|| payload.pointer("/user"))
         .ok_or_else(|| "Instagram profile response is missing user data.".to_string())?;
-    Ok(parse_profile_description_from_user(user))
+    Ok((
+        parse_profile_description_from_user(user),
+        parse_profile_counts_from_user(user),
+    ))
+}
+
+/// Extrai os contadores do objeto `user`, cobrindo o shape "flat" (`follower_count`,
+/// como no GraphQL/v1 user info) e o shape "edge" (`edge_followed_by.count`, como
+/// no web_profile_info). Campos ausentes ficam `None`.
+fn parse_profile_counts_from_user(user: &Value) -> InstagramProfileCounts {
+    let count = |flat: &str, edge: &str| -> Option<i64> {
+        user.get(flat)
+            .and_then(Value::as_i64)
+            .or_else(|| user.pointer(&format!("/{edge}/count")).and_then(Value::as_i64))
+    };
+    InstagramProfileCounts {
+        follower_count: count("follower_count", "edge_followed_by"),
+        following_count: count("following_count", "edge_follow"),
+        media_count: count("media_count", "edge_owner_to_timeline_media"),
+        is_verified: user.get("is_verified").and_then(Value::as_bool),
+    }
 }
 
 fn parse_profile_description_from_user(user: &Value) -> Option<String> {
@@ -4498,8 +4544,9 @@ mod tests {
         build_media_file_name, classify_section_error, collect_media_assets, compute_jazoest,
         cookie_value, execute_manifest_section, extract_reels_payload_items, interruptible_sleep,
         instagram_user_info_url, manifest_observed_posts, normalize_profile_sync_manifest,
-        parse_profile_description, parse_profile_description_from_user,
-        parse_profile_description_response, provider_media_identity_from_url,
+        parse_profile_counts_from_user, parse_profile_description,
+        parse_profile_description_from_user, parse_profile_description_response,
+        provider_media_identity_from_url,
         public_identity_headers, resolve_destination_path, should_ignore_media_download_error,
         DownloadedInstagramMedia, IncrementalDiscoveryStop, InstagramAuthHeaders, InstagramClient,
         InstagramConnectorRequest, InstagramManifestPost, InstagramMediaFileNamingMode,
@@ -4511,6 +4558,45 @@ mod tests {
     fn compute_jazoest_sums_token_bytes_with_prefix() {
         // '1'..'5' → 49+50+51+52+53 = 255.
         assert_eq!(compute_jazoest("12345"), "2255");
+    }
+
+    #[test]
+    fn parse_profile_counts_supports_flat_graphql_shape() {
+        let user = serde_json::json!({
+            "follower_count": 18432,
+            "following_count": 642,
+            "media_count": 577,
+            "is_verified": true,
+        });
+        let counts = parse_profile_counts_from_user(&user);
+        assert_eq!(counts.follower_count, Some(18432));
+        assert_eq!(counts.following_count, Some(642));
+        assert_eq!(counts.media_count, Some(577));
+        assert_eq!(counts.is_verified, Some(true));
+    }
+
+    #[test]
+    fn parse_profile_counts_supports_edge_web_profile_shape() {
+        let user = serde_json::json!({
+            "edge_followed_by": { "count": 18432 },
+            "edge_follow": { "count": 642 },
+            "edge_owner_to_timeline_media": { "count": 577 },
+            "is_verified": false,
+        });
+        let counts = parse_profile_counts_from_user(&user);
+        assert_eq!(counts.follower_count, Some(18432));
+        assert_eq!(counts.following_count, Some(642));
+        assert_eq!(counts.media_count, Some(577));
+        assert_eq!(counts.is_verified, Some(false));
+    }
+
+    #[test]
+    fn parse_profile_counts_defaults_to_none_when_absent() {
+        let counts = parse_profile_counts_from_user(&serde_json::json!({ "username": "x" }));
+        assert_eq!(counts.follower_count, None);
+        assert_eq!(counts.following_count, None);
+        assert_eq!(counts.media_count, None);
+        assert_eq!(counts.is_verified, None);
     }
 
     #[test]

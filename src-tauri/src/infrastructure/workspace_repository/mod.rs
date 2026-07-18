@@ -3623,6 +3623,57 @@ fn update_instagram_source_description_after_sync(
     Ok(true)
 }
 
+/// Persiste os contadores estruturados do perfil (bio + seguidores/seguindo/
+/// posts + verificado) capturados no sync, para o cabeçalho enriquecido do
+/// ProfileView. `COALESCE` preserva o último valor conhecido quando um campo
+/// vier ausente neste sync (endpoints variam no que retornam), e nada é gravado
+/// quando não há nenhum dado novo. Retorna `true` se alguma coluna mudou.
+#[allow(clippy::too_many_arguments)]
+fn update_source_profile_stats(
+    connection: &Connection,
+    source_id: &str,
+    biography: Option<&str>,
+    follower_count: Option<i64>,
+    following_count: Option<i64>,
+    media_count: Option<i64>,
+    is_verified: Option<bool>,
+    timestamp: &str,
+) -> Result<bool, String> {
+    let biography = biography.map(str::trim).filter(|value| !value.is_empty());
+    if biography.is_none()
+        && follower_count.is_none()
+        && following_count.is_none()
+        && media_count.is_none()
+        && is_verified.is_none()
+    {
+        return Ok(false);
+    }
+    let changed = connection
+        .execute(
+            "UPDATE source_profiles
+             SET profile_biography = COALESCE(?2, profile_biography),
+                 profile_follower_count = COALESCE(?3, profile_follower_count),
+                 profile_following_count = COALESCE(?4, profile_following_count),
+                 profile_media_count = COALESCE(?5, profile_media_count),
+                 profile_is_verified = COALESCE(?6, profile_is_verified),
+                 profile_stats_updated_at = ?7,
+                 updated_at = ?7
+             WHERE id = ?1
+               AND deleted_at IS NULL",
+            params![
+                source_id,
+                biography,
+                follower_count,
+                following_count,
+                media_count,
+                is_verified.map(|value| if value { 1_i64 } else { 0_i64 }),
+                timestamp,
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(changed > 0)
+}
+
 fn validate_instagram_manual_session_payload(
     connection: &Connection,
     account_id: &str,

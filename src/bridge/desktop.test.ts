@@ -955,3 +955,54 @@ describe('app version bridge', () => {
     })
   })
 })
+
+describe('loadSourceMediaGallery', () => {
+  beforeEach(() => {
+    invokeMock.mockReset()
+    vi.resetModules()
+  })
+
+  it('passes the synced profile metadata (bio/counts/verified) through the parser', async () => {
+    // Payload como o backend serializa (camelCase, serde rename_all).
+    invokeMock.mockResolvedValueOnce({
+      sourceId: 'ig-1',
+      provider: 'instagram',
+      handle: '@fernandaarjjz',
+      profileUrl: 'https://www.instagram.com/fernandaarjjz/',
+      biography: 'Pole & flexibility\nRio de Janeiro',
+      followerCount: 8135,
+      followingCount: 1192,
+      mediaCount: 208,
+      isVerified: false,
+      statsUpdatedAt: '2026-07-17T23:32:55Z',
+      posts: [],
+    })
+
+    const desktop = await import('./desktop')
+    const gallery = await desktop.loadSourceMediaGallery('ig-1')
+
+    expect(gallery.biography).toBe('Pole & flexibility\nRio de Janeiro')
+    expect(gallery.followerCount).toBe(8135)
+    expect(gallery.followingCount).toBe(1192)
+    expect(gallery.mediaCount).toBe(208)
+    expect(gallery.isVerified).toBe(false)
+    expect(gallery.statsUpdatedAt).toBe('2026-07-17T23:32:55Z')
+  })
+
+  it('omits profile metadata when the backend does not send it', async () => {
+    invokeMock.mockResolvedValueOnce({
+      sourceId: 'ig-2',
+      provider: 'instagram',
+      handle: '@nobio',
+      profileUrl: '',
+      posts: [],
+    })
+
+    const desktop = await import('./desktop')
+    const gallery = await desktop.loadSourceMediaGallery('ig-2')
+
+    expect(gallery.biography).toBeUndefined()
+    expect(gallery.followerCount).toBeUndefined()
+    expect(gallery.isVerified).toBe(false)
+  })
+})

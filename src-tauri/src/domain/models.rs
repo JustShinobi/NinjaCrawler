@@ -472,6 +472,21 @@ pub struct SourceMediaGallery {
     pub handle: String,
     pub profile_url: String,
     pub posts: Vec<MediaGalleryPost>,
+    /// Metadados de perfil da última sincronização (Instagram hoje), para o
+    /// cabeçalho enriquecido. Todos opcionais — perfis importados/sem sync ainda
+    /// não os têm.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub biography: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub follower_count: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub following_count: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub media_count: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub is_verified: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stats_updated_at: Option<String>,
 }
 
 /// Lote de thumbnails de vídeo gerados sob demanda (ffmpeg) para o grid do
