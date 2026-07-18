@@ -3,19 +3,21 @@ use crate::domain::models::{
     CheckSourceAvailabilityInput, CloneSyncPlanInput, ConnectorDebugEntry, ConnectorDebugQuery,
     DesktopRuntimeState, ImportMethodDescriptor, ImportPreview, ImportPreviewOptions,
     ImportProviderDescriptor, ImportQueueStatus, ImportRootDescriptor, ImportRunRequest,
-    ImportRunResult, MoveSyncPlanInput, PlanEditorWindowIntent, ProviderAccountCookie,
-    ProviderAccountCookieImport, ProviderAccountEditor, ProviderAccountSettingValue,
-    ProviderAccountUpsert, RunSourceSyncInput, RunSyncPlanNowInput, RuntimeLogContext,
-    RuntimeLogEntry, RuntimeLogQuery, RuntimeLogWindowStatus, SchedulerGroupUpsert,
-    SchedulerSetUpsert, SetSyncPlanPauseInput, SkipSyncPlanInput, SourceAvailabilityCheckResult,
+    ImportRunResult, MediaDedupeApplyInput, MediaDedupeJobStatus, MediaDedupeScanInput,
+    MoveSyncPlanInput,
+    PlanEditorWindowIntent, ProviderAccountCookie, ProviderAccountCookieImport,
+    ProviderAccountEditor, ProviderAccountSettingValue, ProviderAccountUpsert, RunSourceSyncInput,
+    RunSyncPlanNowInput, RuntimeLogContext, RuntimeLogEntry, RuntimeLogQuery,
+    RuntimeLogWindowIntent, RuntimeLogWindowStatus, SchedulerGroupUpsert, SchedulerSetUpsert,
+    SetSyncPlanPauseInput, SkipSyncPlanInput, SourceAvailabilityCheckResult,
     SourceDeleteQueueStatus, SourceEditorWindowIntent, SourceProfileDeleteInput,
     SourceProfileUpsert, SourceSyncQueueStatus, SyncPlanTargetPreview, SyncPlanTargetPreviewInput,
-    SyncPlanUpsert, WorkspaceSnapshot,
+    SyncPlanUpsert, WorkspaceHealthSnapshot, WorkspaceSnapshot,
 };
 use crate::infrastructure::{
     app_update, companion_install, connector_debug, connector_runtime, desktop_runtime,
-    import_runtime, media_path_migration_runtime, media_thumbnail_runtime, single_video_runtime,
-    source_delete_runtime, source_sync_runtime, workspace_repository,
+    import_runtime, media_dedupe_runtime, media_path_migration_runtime, media_thumbnail_runtime,
+    single_video_runtime, source_delete_runtime, source_sync_runtime, workspace_repository,
 };
 
 fn publish_snapshot(
@@ -64,6 +66,53 @@ pub fn bootstrap_workspace(app: tauri::AppHandle) -> Result<WorkspaceSnapshot, S
     });
 
     Ok(snapshot)
+}
+
+#[tauri::command]
+pub async fn load_workspace_health() -> Result<WorkspaceHealthSnapshot, String> {
+    tauri::async_runtime::spawn_blocking(workspace_repository::load_workspace_health)
+        .await
+        .map_err(|error| format!("Workspace health task failed: {error}"))?
+}
+
+#[tauri::command]
+pub fn media_dedupe_status() -> Result<MediaDedupeJobStatus, String> {
+    media_dedupe_runtime::media_dedupe_status()
+}
+
+#[tauri::command]
+pub fn install_media_dedupe_similarity_engine(
+    app: tauri::AppHandle,
+) -> Result<MediaDedupeJobStatus, String> {
+    media_dedupe_runtime::install_similarity_engine(&app)
+}
+
+#[tauri::command]
+pub fn install_media_tool_runtime(
+    app: tauri::AppHandle,
+) -> Result<MediaDedupeJobStatus, String> {
+    media_dedupe_runtime::install_ffmpeg_runtime(&app)
+}
+
+#[tauri::command]
+pub fn enqueue_media_dedupe_scan(
+    app: tauri::AppHandle,
+    input: MediaDedupeScanInput,
+) -> Result<MediaDedupeJobStatus, String> {
+    media_dedupe_runtime::enqueue_scan(&app, input)
+}
+
+#[tauri::command]
+pub fn cancel_media_dedupe(app: tauri::AppHandle) -> Result<MediaDedupeJobStatus, String> {
+    media_dedupe_runtime::cancel(&app)
+}
+
+#[tauri::command]
+pub fn apply_media_dedupe(
+    app: tauri::AppHandle,
+    input: MediaDedupeApplyInput,
+) -> Result<MediaDedupeJobStatus, String> {
+    media_dedupe_runtime::enqueue_apply(&app, input)
 }
 
 #[tauri::command]
@@ -298,6 +347,15 @@ pub fn enqueue_source_media_path_migration(
     source_ids: Vec<String>,
     target_base_path: String,
 ) -> Result<crate::domain::models::MediaPathMigrationQueueStatus, String> {
+    if source_ids
+        .iter()
+        .any(|source_id| media_dedupe_runtime::is_source_locked(source_id))
+    {
+        return Err(
+            "Media cleanup is currently applying changes to one or more selected profiles."
+                .to_string(),
+        );
+    }
     media_path_migration_runtime::enqueue(&app, source_ids, target_base_path)
 }
 
@@ -327,6 +385,11 @@ pub fn delete_source_profile(
     app: tauri::AppHandle,
     input: SourceProfileDeleteInput,
 ) -> Result<WorkspaceSnapshot, String> {
+    if media_dedupe_runtime::is_source_locked(&input.id) {
+        return Err(
+            "Cannot delete this profile while media cleanup is applying changes.".to_string(),
+        );
+    }
     if media_path_migration_runtime::is_source_migrating(&input.id) {
         return Err("This profile has a media-path migration queued or running.".to_string());
     }
@@ -354,6 +417,11 @@ pub fn enqueue_source_delete(
     app: tauri::AppHandle,
     input: SourceProfileDeleteInput,
 ) -> Result<SourceDeleteQueueStatus, String> {
+    if media_dedupe_runtime::is_source_locked(&input.id) {
+        return Err(
+            "Cannot delete this profile while media cleanup is applying changes.".to_string(),
+        );
+    }
     if media_path_migration_runtime::is_source_migrating(&input.id) {
         return Err("This profile has a media-path migration queued or running.".to_string());
     }
@@ -370,6 +438,11 @@ pub fn run_source_sync(
     app: tauri::AppHandle,
     input: RunSourceSyncInput,
 ) -> Result<WorkspaceSnapshot, String> {
+    if media_dedupe_runtime::is_source_locked(&input.id) {
+        return Err(
+            "Cannot sync this profile while media cleanup is applying changes.".to_string(),
+        );
+    }
     publish_snapshot(&app, source_sync_runtime::enqueue_source_sync(&app, input)?)
 }
 
@@ -783,8 +856,11 @@ pub fn set_silent_mode(app: tauri::AppHandle, enabled: bool) -> Result<Workspace
 }
 
 #[tauri::command]
-pub fn open_runtime_log_window(app: tauri::AppHandle) -> Result<(), String> {
-    desktop_runtime::open_runtime_log_window(&app)
+pub fn open_runtime_log_window(
+    app: tauri::AppHandle,
+    intent: Option<RuntimeLogWindowIntent>,
+) -> Result<(), String> {
+    desktop_runtime::open_runtime_log_window(&app, intent)
 }
 
 #[tauri::command]
@@ -808,6 +884,11 @@ pub fn open_plans_window(
 #[tauri::command]
 pub fn open_source_sync_queue_window(app: tauri::AppHandle) -> Result<(), String> {
     desktop_runtime::open_source_sync_queue_window(&app)
+}
+
+#[tauri::command]
+pub fn open_workspace_health_window(app: tauri::AppHandle) -> Result<(), String> {
+    desktop_runtime::open_workspace_health_window(&app)
 }
 
 #[tauri::command]

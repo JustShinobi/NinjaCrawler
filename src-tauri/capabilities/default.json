@@ -5,6 +5,7 @@
   "windows": [
     "main",
     "runtime-log",
+    "workspace-health",
     "source-sync-queue",
     "connector-debug",
     "connector-runtimes",

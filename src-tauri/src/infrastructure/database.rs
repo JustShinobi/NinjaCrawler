@@ -159,6 +159,26 @@ const MIGRATIONS: &[(i64, &str)] = &[
         41,
         include_str!("../../migrations/0041_connector_runtime_asset_digest.sql"),
     ),
+    (
+        42,
+        include_str!("../../migrations/0042_workspace_health_media_dedupe.sql"),
+    ),
+    (
+        43,
+        include_str!("../../migrations/0043_workspace_health_media_dedupe_schema_repair.sql"),
+    ),
+    (
+        44,
+        include_str!("../../migrations/0044_media_dedupe_incremental_vdf.sql"),
+    ),
+    (
+        45,
+        include_str!("../../migrations/0045_media_dedupe_provider_scope.sql"),
+    ),
+    (
+        46,
+        include_str!("../../migrations/0046_media_dedupe_performance.sql"),
+    ),
 ];
 
 const PROVIDER_SYNC_RESUME_SCHEMA: &str =
@@ -327,6 +347,56 @@ mod tests {
         assert!(resume.contains("scope"));
         assert!(resume.contains("state"));
         assert!(holds.contains("hold_until"));
+    }
+
+    #[test]
+    fn open_connection_repairs_registered_dedupe_migration_with_missing_tables() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("dedupe-repair.db");
+        let raw = Connection::open(&path).expect("raw connection");
+        raw.execute_batch(
+            "CREATE TABLE schema_migrations (
+                version INTEGER PRIMARY KEY,
+                applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+             );",
+        )
+        .expect("migration ledger");
+        for version in 1..=42 {
+            raw.execute(
+                "INSERT INTO schema_migrations(version) VALUES (?1)",
+                [version],
+            )
+            .expect("registered migration");
+        }
+        drop(raw);
+
+        let repaired = open_connection(&path).expect("repaired connection");
+        for table in [
+            "media_dedupe_scans",
+            "media_dedupe_files",
+            "media_dedupe_jobs",
+            "media_dedupe_actions",
+            "media_dedupe_catalog",
+            "media_dedupe_source_jobs",
+            "media_dedupe_vdf_candidates",
+        ] {
+            assert!(
+                !table_columns(&repaired, table)
+                    .expect("dedupe columns")
+                    .is_empty(),
+                "{table} should be repaired"
+            );
+        }
+        assert!(table_columns(&repaired, "media_dedupe_jobs")
+            .expect("job columns")
+            .contains("current_root"));
+        assert!(table_columns(&repaired, "media_dedupe_scans")
+            .expect("scan columns")
+            .contains("resource_profile"));
+        let source_job_columns =
+            table_columns(&repaired, "media_dedupe_source_jobs").expect("source job columns");
+        assert!(source_job_columns.contains("inventory_fingerprint"));
+        assert!(source_job_columns.contains("cached_from_scan_id"));
     }
 
     #[test]

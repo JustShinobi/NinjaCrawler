@@ -12,8 +12,8 @@ use crate::domain::models::{
 };
 use crate::infrastructure::runtime_log::RuntimeLogAnchor;
 use crate::infrastructure::{
-    desktop_runtime, media_path_migration_runtime, media_thumbnail_runtime, runtime_log,
-    workspace_repository,
+    desktop_runtime, media_dedupe_runtime, media_path_migration_runtime, media_thumbnail_runtime,
+    runtime_log, workspace_repository,
 };
 use crate::providers;
 
@@ -248,6 +248,11 @@ pub fn enqueue_source_sync(
     let source_id = input.id.trim().to_string();
     if source_id.is_empty() {
         return Err("Source id is required.".to_string());
+    }
+    if media_dedupe_runtime::is_source_locked(&source_id) {
+        return Err(
+            "Cannot sync this profile while media cleanup is applying changes.".to_string(),
+        );
     }
 
     let trigger = input
@@ -1357,8 +1362,8 @@ fn build_queue_status(state: &SourceSyncQueueState) -> SourceSyncQueueStatus {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_media_migration_hold, build_queue_status, enqueue_job, source_sync_job_key, SourceSyncQueueJob,
-        SourceSyncQueueJobResult, SourceSyncQueueState,
+        apply_media_migration_hold, build_queue_status, enqueue_job, source_sync_job_key,
+        SourceSyncQueueJob, SourceSyncQueueJobResult, SourceSyncQueueState,
     };
     use crate::domain::models::{
         InstagramSourceSyncOptions, SourceSyncOptions, TikTokSourceSyncOptions,
@@ -1431,7 +1436,10 @@ mod tests {
         assert!(apply_media_migration_hold(&mut job, true));
         assert_eq!(job.hold_until, None);
         assert_eq!(job.hold_reason.as_deref(), Some("media_path_migration"));
-        assert_eq!(job.progress_label.as_deref(), Some("Waiting for media move"));
+        assert_eq!(
+            job.progress_label.as_deref(),
+            Some("Waiting for media move")
+        );
 
         assert!(!apply_media_migration_hold(&mut job, false));
         assert_eq!(job.hold_reason, None);

@@ -1209,6 +1209,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "fs2"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9564fc758e15025b46aa6643b1b77d047d1a56a1aea6e01002ac0c7026876213"
+dependencies = [
+ "libc",
+ "winapi",
+]
+
+[[package]]
 name = "futf"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2411,15 +2421,17 @@ checksum = "650eef8c711430f1a879fdd01d4745a7deea475becfb90269c06775983bbf086"
 
 [[package]]
 name = "ninjacrawler"
-version = "0.25.0" # x-release-please-version
+version = "0.25.0"
 dependencies = [
  "base64 0.22.1",
  "chrono",
+ "fs2",
  "image",
  "reqwest 0.12.28",
  "rfd",
  "roxmltree",
  "rusqlite",
+ "same-file",
  "semver",
  "serde",
  "serde_json",

@@ -36,6 +36,8 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png",
 sha2 = "0.10"
 tempfile = "3"
 trash = "5"
+fs2 = "0.4"
+same-file = "1"
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.55"

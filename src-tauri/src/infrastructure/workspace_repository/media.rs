@@ -91,18 +91,9 @@ pub(super) fn load_gallery_media_ledger_links(
     }
     links
 }
-/// ffmpeg disponível? Checado uma vez por processo (`ffmpeg -version`).
+/// Resolves either the system tools or NinjaCrawler's private FFmpeg runtime.
 pub(super) fn ffmpeg_available() -> bool {
-    static FFMPEG_AVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *FFMPEG_AVAILABLE.get_or_init(|| {
-        let mut command = Command::new("ffmpeg");
-        configure_background_command(&mut command);
-        command
-            .arg("-version")
-            .output()
-            .map(|output| output.status.success())
-            .unwrap_or(false)
-    })
+    media_tool_runtime::resolve().is_some()
 }
 /// Gera (ou reaproveita) thumbnails jpg para os vídeos pedidos. O
 /// grid do Profile View usa `<img>` no lugar de `<video preload=metadata>` —
@@ -296,8 +287,9 @@ pub(crate) fn ensure_video_thumbnail(source: &Path) -> Option<String> {
     ));
     // -ss antes do -i (seek rápido); vídeos mais curtos que o seek não emitem
     // frame algum, então tenta 1s e cai para o 1º frame.
+    let ffmpeg = media_tool_runtime::ffmpeg_executable()?;
     for seek in ["1", "0"] {
-        let mut command = Command::new("ffmpeg");
+        let mut command = Command::new(&ffmpeg);
         configure_background_command(&mut command);
         let result = command
             .arg("-hide_banner")

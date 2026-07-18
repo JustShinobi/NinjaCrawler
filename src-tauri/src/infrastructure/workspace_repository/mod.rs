@@ -20,18 +20,17 @@ use crate::domain::models::{
 };
 use crate::domain::models::{
     AccountSyncRun, AppSetting, AppSettingUpsert, AvatarThumbnail, AvatarThumbnailBatch,
-    BatchSourceProfilePatch, CloneSyncPlanInput,
-    CompanionAccountCandidate, CompanionAccountCapture, CompanionAccountImportInput,
-    CompanionAccountImportResult, CompanionAccountPreview, DesktopRuntimeState,
-    ImportMethodDescriptor, ImportPreview, ImportPreviewOptions, ImportPreviewProfile,
-    ImportPreviewSummary, ImportProblem, ImportProviderDescriptor, ImportRootDescriptor,
-    ImportRunProfileResult, ImportRunRequest, ImportRunResult, InstagramNamingLedgerBackfillResult,
-    InstagramSourceSyncOptions, MediaGalleryFile, MediaGalleryPost,
-    MediaThumbnailBatch, MoveSyncPlanInput, ProviderAccount, ProviderAccountCookie,
-    ProviderAccountCookieImport, ProviderAccountEditor, ProviderAccountImportState,
-    ProviderAccountSession, ProviderAccountSettingValue, ProviderAccountSettingValueKind,
-    ProviderAccountUpsert, RunSyncPlanNowInput, RuntimeLogContext, RuntimeLogEntry,
-    RuntimeLogQuery, SchedulerGroup, SchedulerGroupUpsert, SchedulerPlanCriteria,
+    BatchSourceProfilePatch, CloneSyncPlanInput, CompanionAccountCandidate,
+    CompanionAccountCapture, CompanionAccountImportInput, CompanionAccountImportResult,
+    CompanionAccountPreview, DesktopRuntimeState, ImportMethodDescriptor, ImportPreview,
+    ImportPreviewOptions, ImportPreviewProfile, ImportPreviewSummary, ImportProblem,
+    ImportProviderDescriptor, ImportRootDescriptor, ImportRunProfileResult, ImportRunRequest,
+    ImportRunResult, InstagramNamingLedgerBackfillResult, InstagramSourceSyncOptions,
+    MediaGalleryFile, MediaGalleryPost, MediaThumbnailBatch, MoveSyncPlanInput, ProviderAccount,
+    ProviderAccountCookie, ProviderAccountCookieImport, ProviderAccountEditor,
+    ProviderAccountImportState, ProviderAccountSession, ProviderAccountSettingValue,
+    ProviderAccountSettingValueKind, ProviderAccountUpsert, RunSyncPlanNowInput, RuntimeLogContext,
+    RuntimeLogEntry, RuntimeLogQuery, SchedulerGroup, SchedulerGroupUpsert, SchedulerPlanCriteria,
     SchedulerPlanNotifications, SchedulerSet, SchedulerSetUpsert, SetSyncPlanPauseInput,
     SingleVideo, SingleVideoFile, SkipSyncPlanInput, SourceAvailabilityCheckItem,
     SourceAvailabilityCheckResult, SourceMediaGallery, SourceProfile, SourceProfileDeleteMode,
@@ -42,7 +41,7 @@ use crate::domain::models::{
 use crate::infrastructure::runtime_log::RuntimeLogAnchor;
 use crate::infrastructure::storage::StorageLayout;
 use crate::infrastructure::{
-    connector_debug, connector_runtime, database, instagram_connector, runtime_log,
+    connector_debug, connector_runtime, database, instagram_connector, media_tool_runtime, runtime_log,
     session_secret_store, source_sync_runtime, storage, tiktok_connector, tiktok_likes_runtime,
     twitter_connector,
 };
@@ -54,8 +53,10 @@ use crate::providers;
 mod accounts;
 mod avatar;
 mod gallery;
+mod health;
 mod import;
 mod media;
+mod media_dedupe;
 mod options;
 mod paths;
 mod scheduler;
@@ -65,8 +66,10 @@ mod sync;
 pub use accounts::*;
 pub use avatar::*;
 pub use gallery::*;
+pub use health::*;
 pub use import::*;
 pub use media::*;
+pub(crate) use media_dedupe::*;
 pub(crate) use options::*;
 use paths::*;
 pub use scheduler::*;
@@ -447,7 +450,10 @@ fn settings_bootstrap_paths() -> &'static Mutex<HashSet<PathBuf>> {
 /// roda uma vez por arquivo por processo (chave por path preserva o suite
 /// hermético). `resolve_effective_storage_layout` continua por chamada porque
 /// o media_root pode mudar em runtime.
-fn ensure_settings_bootstrap(connection: &Connection, layout: &StorageLayout) -> Result<(), String> {
+fn ensure_settings_bootstrap(
+    connection: &Connection,
+    layout: &StorageLayout,
+) -> Result<(), String> {
     let key = layout
         .db_path
         .canonicalize()

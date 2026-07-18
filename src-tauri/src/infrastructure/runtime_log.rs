@@ -138,6 +138,7 @@ pub fn tail(layout: &StorageLayout, limit: usize) -> Result<Vec<RuntimeLogEntry>
             scope: None,
             provider: None,
             account_id: None,
+            source_id: None,
         },
     )
 }
@@ -197,6 +198,14 @@ pub fn query(
                     .account_id
                     .as_deref()
                     .is_some_and(|account_id| account_id == value)
+            })
+        })
+        .filter(|entry| {
+            filter.source_id.as_deref().is_none_or(|value| {
+                entry
+                    .source_id
+                    .as_deref()
+                    .is_some_and(|source_id| source_id == value)
             })
         })
         .take(limit)
@@ -270,6 +279,7 @@ mod tests {
                 scope: None,
                 provider: None,
                 account_id: None,
+                source_id: None,
             },
         )
         .expect("query log");
