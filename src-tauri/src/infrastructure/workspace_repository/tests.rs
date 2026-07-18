@@ -938,10 +938,9 @@ fn reconcile_tiktok_provider_ledgers_from_disk_seeds_existing_files() {
 }
 
 fn create_test_layout() -> (TempDir, StorageLayout) {
-    // Layout montado na mão para o suite ser HERMÉTICO: workspace_layout_from_roots
-    // usa preferred_media_root, que aponta para F:\SCrawler\Data quando essa
-    // pasta existe na máquina — e os testes passariam a varrer (e escrever em!)
-    // o acervo real em vez do diretório temporário.
+    // Layout montado na mão para o suite ser HERMÉTICO: evita depender de
+    // ensure_workspace_layout()/preferred_media_root, que resolvem paths reais
+    // do usuário (LOCALAPPDATA/USERPROFILE) em vez do diretório temporário.
     let temp_dir = tempfile::tempdir().expect("temp dir");
     let root = temp_dir.path().join("localappdata").join("NinjaCrawler");
     let data_dir = root.join("data");
