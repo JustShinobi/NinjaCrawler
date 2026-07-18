@@ -17,6 +17,8 @@ import type {
   AppSettingUpsert,
   AppBuildInfo,
   AppUpdateStatus,
+  MigrationStatus,
+  MigrationProgress,
   AuthMode,
   AuthState,
   ConnectorRuntimeStatus,
@@ -2589,6 +2591,57 @@ export async function subscribeToSourceSyncQueue(
   return listen(DESKTOP_SOURCE_SYNC_QUEUE_CHANGED_EVENT_NAME, (event) => {
     onChange(normalizeSourceSyncQueueStatus(event.payload))
   })
+}
+
+// --- Migração de schema no boot (tela de migração da janela principal) ---
+
+export async function getMigrationStatus(): Promise<MigrationStatus | null> {
+  const raw = await invoke<unknown>('get_migration_status')
+  if (!isRecord(raw)) return null
+  return {
+    fromVersion: optionalNumberValue(raw, ['fromVersion', 'from_version']) ?? 0,
+    toVersion: optionalNumberValue(raw, ['toVersion', 'to_version']) ?? 0,
+    pendingCount: optionalNumberValue(raw, ['pendingCount', 'pending_count']) ?? 0,
+    dbSizeBytes: optionalNumberValue(raw, ['dbSizeBytes', 'db_size_bytes']) ?? 0,
+  }
+}
+
+export async function runPendingMigrations(): Promise<void> {
+  await invoke<void>('run_pending_migrations')
+}
+
+export async function subscribeToMigrationProgress(
+  onProgress: (progress: MigrationProgress) => void,
+): Promise<() => void> {
+  return listen('migration://progress', (event) => {
+    const raw = event.payload
+    if (!isRecord(raw)) return
+    onProgress({
+      phase: raw.phase === 'backup' ? 'backup' : 'migrate',
+      current: optionalNumberValue(raw, ['current']) ?? 0,
+      total: optionalNumberValue(raw, ['total']) ?? 0,
+      label: typeof raw.label === 'string' ? raw.label : '',
+    })
+  })
+}
+
+export async function subscribeToMigrationCompletion(
+  onDone: () => void,
+  onError: (message: string) => void,
+): Promise<() => void> {
+  const unlistenDone = await listen('migration://done', () => onDone())
+  const unlistenError = await listen('migration://error', (event) => {
+    onError(typeof event.payload === 'string' ? event.payload : 'Migration failed.')
+  })
+  return () => {
+    unlistenDone()
+    unlistenError()
+  }
+}
+
+export async function openBackupsFolder(): Promise<void> {
+  const path = await invoke<string>('backups_folder_path')
+  await openPath(path)
 }
 
 export async function loadSourceDeleteQueueStatus(): Promise<SourceDeleteQueueStatus> {

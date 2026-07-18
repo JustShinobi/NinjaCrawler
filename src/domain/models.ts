@@ -566,6 +566,21 @@ export interface MediaGalleryPost {
   files: MediaGalleryFile[]
 }
 
+export interface MigrationStatus {
+  fromVersion: number
+  toVersion: number
+  pendingCount: number
+  dbSizeBytes: number
+}
+
+export interface MigrationProgress {
+  /** 'backup' (snapshot do banco) ou 'migrate' (aplicando as migrations). */
+  phase: 'backup' | 'migrate'
+  current: number
+  total: number
+  label: string
+}
+
 export interface SourceMediaGallery {
     sourceId: string
     provider: ProviderKey

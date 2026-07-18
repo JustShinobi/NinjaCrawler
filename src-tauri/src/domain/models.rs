@@ -464,6 +464,28 @@ pub struct MediaGalleryPost {
     pub files: Vec<MediaGalleryFile>,
 }
 
+/// Resultado da pré-checagem de migrations no boot: presente só quando há
+/// migrations pendentes num banco que já tem schema (dispara a tela de migração).
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MigrationStatus {
+    pub from_version: i64,
+    pub to_version: i64,
+    pub pending_count: usize,
+    pub db_size_bytes: u64,
+}
+
+/// Progresso emitido durante a migração (backup + aplicação das migrations).
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MigrationProgress {
+    /// `backup` (snapshot do banco) ou `migrate` (aplicando as migrations).
+    pub phase: String,
+    pub current: u64,
+    pub total: u64,
+    pub label: String,
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SourceMediaGallery {

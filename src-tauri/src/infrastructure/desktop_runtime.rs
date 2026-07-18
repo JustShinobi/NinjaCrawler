@@ -18,7 +18,10 @@ use crate::domain::models::{
 pub struct BatchEditorIntent {
     pub source_ids: Vec<String>,
 }
-use crate::infrastructure::{connector_debug, runtime_log, workspace_repository};
+use crate::infrastructure::{
+    companion_api, connector_debug, database, media_path_migration_runtime, runtime_log,
+    scheduler_runtime, source_sync_runtime, storage, workspace_repository,
+};
 #[cfg(windows)]
 use winreg::enums::HKEY_CURRENT_USER;
 #[cfg(windows)]
@@ -117,9 +120,37 @@ struct RuntimeLogWindowFailedEvent {
     message: String,
 }
 
-pub fn setup(app: &tauri::AppHandle) -> Result<(), String> {
+/// Handles usados por logging/debug — registrados sempre, inclusive no boot em
+/// modo migração (para a tela de migração conseguir logar).
+pub fn register_runtime_handles(app: &tauri::AppHandle) {
     runtime_log::register_app_handle(app);
     connector_debug::register_app_handle(app);
+}
+
+/// Há migrations pendentes num banco existente? Quando `true`, o boot NÃO inicia
+/// os serviços de runtime: a janela principal abre em "modo migração" e só após
+/// o `run_pending_migrations` concluir é que `start_runtime_services` roda.
+pub fn migration_pending() -> Result<bool, String> {
+    let layout = storage::ensure_workspace_layout().map_err(|error| error.to_string())?;
+    Ok(database::migration_precheck(&layout.db_path)?.is_some())
+}
+
+/// Bootstrap do workspace + serviços de runtime. Chamado no boot normal e, no
+/// boot em modo migração, após as migrations concluírem.
+pub fn start_runtime_services(app: tauri::AppHandle) -> Result<(), String> {
+    finalize_workspace_setup(&app)?;
+    scheduler_runtime::start(app.clone())?;
+    companion_api::start(app.clone());
+    let app_handle = app.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(2000));
+        media_path_migration_runtime::restore_persisted_queue(&app_handle);
+        source_sync_runtime::restore_persisted_queue(&app_handle);
+    });
+    Ok(())
+}
+
+fn finalize_workspace_setup(app: &tauri::AppHandle) -> Result<(), String> {
     let snapshot = workspace_repository::bootstrap_workspace()?;
     apply_asset_scope(app)?;
     let controller = DesktopRuntimeController::new(app, &snapshot)?;
