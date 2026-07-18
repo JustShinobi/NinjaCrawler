@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.26.0](https://github.com/JustShinobi/NinjaCrawler/compare/v0.25.0...v0.26.0) (2026-07-18)
+
+
+### Features
+
+* **profile-view:** enrich profile view features and secure database migrations ([#81](https://github.com/JustShinobi/NinjaCrawler/issues/81)) ([852fa56](https://github.com/JustShinobi/NinjaCrawler/commit/852fa56d6292b6edd317adb361c5cd5278436b34))
+
 ## [0.25.0](https://github.com/JustShinobi/NinjaCrawler/compare/v0.24.1...v0.25.0) (2026-07-17)
 
 

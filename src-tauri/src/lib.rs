@@ -10,27 +10,24 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(infrastructure::desktop_runtime::window_state_plugin())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
-            infrastructure::desktop_runtime::setup(app.handle())
-                .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;
-            infrastructure::scheduler_runtime::start(app.handle().clone())
-                .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;
-            infrastructure::companion_api::start(app.handle().clone());
+            infrastructure::desktop_runtime::register_runtime_handles(app.handle());
 
-            // Restaura jobs de sync que ficaram na fila quando o app foi
-            // fechado. Fora do caminho crítico do boot (thread + atraso curto)
-            // para não competir com o bootstrap do workspace.
-            {
-                let app_handle = app.handle().clone();
-                thread::spawn(move || {
-                    thread::sleep(Duration::from_millis(2000));
-                    infrastructure::media_path_migration_runtime::restore_persisted_queue(
-                        &app_handle,
-                    );
-                    infrastructure::media_dedupe_runtime::recover_interrupted_jobs();
-                    infrastructure::source_sync_runtime::restore_persisted_queue(&app_handle);
-                });
+            // Boot em modo migração: se há migrations pendentes num banco
+            // existente, NÃO inicia os serviços (que tocariam o banco e migrariam
+            // em silêncio). A janela principal abre na tela de migração e, ao
+            // confirmar, o comando run_pending_migrations roda o backup+migrations
+            // com progresso e então chama start_runtime_services.
+            let migration_pending = infrastructure::desktop_runtime::migration_pending()
+                .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;
+            if migration_pending {
+                return Ok(());
             }
+
+            infrastructure::desktop_runtime::start_runtime_services(app.handle().clone())
+                .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;
 
             if env::var_os("NINJACRAWLER_DEBUG_OPEN_RUNTIME_LOG").is_some() {
                 let app_handle = app.handle().clone();
@@ -47,8 +44,12 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             application::commands::get_app_build_info,
             application::commands::check_app_update,
+            application::commands::install_app_update,
             application::commands::get_companion_install_status,
             application::commands::install_companion,
+            application::commands::get_migration_status,
+            application::commands::run_pending_migrations,
+            application::commands::backups_folder_path,
             application::commands::bootstrap_workspace,
             application::commands::load_workspace_health,
             application::commands::media_dedupe_status,
@@ -164,6 +165,9 @@ pub fn run() {
             application::commands::runtime_log_window_status,
             application::commands::activate_main_window,
             application::commands::hide_main_window,
+            application::commands::export_workspace_backup,
+            application::commands::inspect_workspace_backup,
+            application::commands::import_workspace_backup,
             application::commands::route_notification_action
         ])
         .run(tauri::generate_context!())

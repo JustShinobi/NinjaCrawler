@@ -175,6 +175,9 @@ jobs:
               "NinjaCrawler-$VERSION-windows-x64-setup.exe" \
               "NinjaCrawler-Companion-$COMPANION_VERSION.zip" \
               SHA256SUMS.txt | sort)"
+            # latest.json is NOT part of the build artifact: it is generated in
+            # the publish job after the installer is signed. Reuse validation only
+            # inspects the self-hosted build output, so it must not expect it.
             actual="$(find "$candidate" -maxdepth 1 -type f -printf '%f\n' | sort)"
             if [ "$actual" != "$expected" ]; then
               valid=false
@@ -440,6 +443,23 @@ jobs:
             Pop-Location
           }
           Remove-Item -LiteralPath $provenancePath
+
+      - name: Sign installer and generate updater manifest
+        shell: pwsh
+        env:
+          # The minisign key pair for tauri-plugin-updater. Signing runs here in
+          # the privileged publish job (never in the unprivileged self-hosted
+          # build), so the secrets stay out of the build runner. Both are read
+          # from the environment by `tauri signer sign`; they are never passed on
+          # the command line and never logged.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          pwsh -File Tools/New-UpdaterManifest.ps1 `
+            -Version "$env:RELEASE_VERSION" `
+            -ReleaseDir release `
+            -Repository "${{ github.repository }}"
 
       - name: Publish GitHub Release
         id: publish_release

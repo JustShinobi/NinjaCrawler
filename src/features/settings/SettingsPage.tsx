@@ -1,5 +1,10 @@
 import { useMemo, useState } from 'react'
 import type { AppSetting } from '../../domain/models'
+import {
+  exportWorkspaceBackup,
+  importWorkspaceBackup,
+  inspectWorkspaceBackup,
+} from '../../bridge/desktop'
 import { useAppStore } from '../../state/appStore'
 import { getStoredTheme, toggleTheme, type Theme } from '../../theme'
 import { HelpTip } from '../shared/HelpTip'
@@ -15,7 +20,7 @@ import { HelpTip } from '../shared/HelpTip'
  * - tool/runtime/instagram.sync internals → hidden
  */
 
-type PreferenceSectionId = 'appearance' | 'desktop' | 'media'
+type PreferenceSectionId = 'appearance' | 'desktop' | 'media' | 'backup'
 
 interface PreferenceSection {
   id: PreferenceSectionId
@@ -38,6 +43,11 @@ const SECTIONS: PreferenceSection[] = [
     id: 'media',
     title: 'Media naming',
     description: 'Instagram file naming defaults for downloads.',
+  },
+  {
+    id: 'backup',
+    title: 'Backup',
+    description: 'Export or restore the workspace metadata (no media files).',
   },
 ]
 
@@ -103,6 +113,7 @@ export function SettingsPage() {
       appearance: [],
       desktop: [],
       media: [],
+      backup: [],
     }
 
     for (const setting of snapshot?.appSettings ?? []) {
@@ -121,7 +132,10 @@ export function SettingsPage() {
   const visibleSections = useMemo(
     () =>
       SECTIONS.filter(
-        (section) => section.id === 'appearance' || settingsBySection[section.id].length > 0,
+        (section) =>
+          section.id === 'appearance' ||
+          section.id === 'backup' ||
+          settingsBySection[section.id].length > 0,
       ),
     [settingsBySection],
   )
@@ -197,6 +211,8 @@ export function SettingsPage() {
               />
             </article>
           ) : null}
+
+          {resolvedSection === 'backup' ? <BackupSection /> : null}
 
           {sectionSettings.map((setting) => {
             const currentValue = draftValues[setting.key] ?? setting.value
@@ -323,11 +339,206 @@ export function SettingsPage() {
             )
           })}
 
-          {resolvedSection !== 'appearance' && sectionSettings.length === 0 ? (
+          {resolvedSection !== 'appearance' &&
+          resolvedSection !== 'backup' &&
+          sectionSettings.length === 0 ? (
             <div className="preferences-empty muted-text">No preferences in this section.</div>
           ) : null}
         </div>
       </section>
+    </div>
+  )
+}
+
+type BackupStatus = { kind: 'idle' | 'busy' | 'ok' | 'error'; message: string }
+
+function BackupSection() {
+  const [includeSecrets, setIncludeSecrets] = useState(false)
+  const [password, setPassword] = useState('')
+  const [confirmPassword, setConfirmPassword] = useState('')
+  const [status, setStatus] = useState<BackupStatus>({ kind: 'idle', message: '' })
+
+  const busy = status.kind === 'busy'
+
+  function resetSecretFields() {
+    setPassword('')
+    setConfirmPassword('')
+  }
+
+  async function handleExport() {
+    if (includeSecrets) {
+      if (password.length === 0) {
+        setStatus({ kind: 'error', message: 'Enter a password to include account secrets.' })
+        return
+      }
+      if (password !== confirmPassword) {
+        setStatus({ kind: 'error', message: 'The passwords do not match.' })
+        return
+      }
+    }
+
+    setStatus({ kind: 'busy', message: 'Exporting backup…' })
+    try {
+      const result = await exportWorkspaceBackup(
+        includeSecrets,
+        includeSecrets ? password : undefined,
+      )
+      if (result.cancelled) {
+        setStatus({ kind: 'idle', message: '' })
+        return
+      }
+      resetSecretFields()
+      setStatus({
+        kind: 'ok',
+        message: result.includesSecrets
+          ? `Backup saved with encrypted secrets to ${result.path ?? 'the chosen file'}.`
+          : `Backup saved to ${result.path ?? 'the chosen file'}.`,
+      })
+    } catch (error) {
+      setStatus({ kind: 'error', message: String(error) })
+    }
+  }
+
+  async function handleImport() {
+    setStatus({ kind: 'busy', message: 'Opening backup…' })
+    try {
+      const inspection = await inspectWorkspaceBackup()
+      if (inspection.cancelled || !inspection.path) {
+        setStatus({ kind: 'idle', message: '' })
+        return
+      }
+
+      let restorePassword: string | undefined
+      if (inspection.includesSecrets) {
+        if (password.length === 0) {
+          setStatus({
+            kind: 'error',
+            message:
+              'This backup contains encrypted account secrets. Enter its password below, then Import again.',
+          })
+          return
+        }
+        restorePassword = password
+      }
+
+      setStatus({ kind: 'busy', message: 'Restoring backup…' })
+      const result = await importWorkspaceBackup(inspection.path, restorePassword)
+      resetSecretFields()
+      const secretsNote = result.includesSecrets
+        ? ` ${result.secretsRestored} account secret(s) restored.`
+        : ''
+      setStatus({
+        kind: 'ok',
+        message: `Backup restored.${secretsNote} Please restart NinjaCrawler to load the restored workspace.`,
+      })
+    } catch (error) {
+      setStatus({ kind: 'error', message: String(error) })
+    }
+  }
+
+  return (
+    <div className="preferences-entry-list">
+      <article className="preferences-entry preferences-entry-stack">
+        <div className="preferences-entry-copy">
+          <div className="preferences-entry-label-row">
+            <span className="preferences-entry-label">Include account secrets</span>
+            <HelpTip
+              label="Include account secrets"
+              tooltip="Session cookies are stored with Windows DPAPI, which is not portable. When included, they are re-encrypted with your password (Argon2id + AES-256-GCM) so the backup can be restored on another machine."
+            />
+          </div>
+          <p className="preferences-entry-hint">
+            Off by default. When enabled, secrets are encrypted with the password below and restored
+            on import. Downloaded media is never part of a backup.
+          </p>
+        </div>
+        <input
+          type="checkbox"
+          className="settings-toggle"
+          aria-label="Include account secrets"
+          checked={includeSecrets}
+          disabled={busy}
+          onChange={() => {
+            setIncludeSecrets((current) => !current)
+            resetSecretFields()
+            setStatus({ kind: 'idle', message: '' })
+          }}
+        />
+      </article>
+
+      {includeSecrets ? (
+        <>
+          <article className="preferences-entry preferences-entry-stack">
+            <div className="preferences-entry-copy">
+              <label className="preferences-entry-label" htmlFor="backup-password">
+                Backup password
+              </label>
+              <p className="preferences-entry-hint">
+                Required to encrypt (export) or decrypt (import) account secrets.
+              </p>
+            </div>
+            <div className="preferences-input-row">
+              <input
+                id="backup-password"
+                type="password"
+                className="preferences-input"
+                aria-label="Backup password"
+                autoComplete="new-password"
+                value={password}
+                disabled={busy}
+                onChange={(event) => setPassword(event.target.value)}
+              />
+            </div>
+          </article>
+          <article className="preferences-entry preferences-entry-stack">
+            <div className="preferences-entry-copy">
+              <label className="preferences-entry-label" htmlFor="backup-password-confirm">
+                Confirm password
+              </label>
+              <p className="preferences-entry-hint">Only used when exporting.</p>
+            </div>
+            <div className="preferences-input-row">
+              <input
+                id="backup-password-confirm"
+                type="password"
+                className="preferences-input"
+                aria-label="Confirm password"
+                autoComplete="new-password"
+                value={confirmPassword}
+                disabled={busy}
+                onChange={(event) => setConfirmPassword(event.target.value)}
+              />
+            </div>
+          </article>
+        </>
+      ) : null}
+
+      <article className="preferences-entry">
+        <div className="preferences-entry-copy">
+          <span className="preferences-entry-label">Export / Import</span>
+          <p className="preferences-entry-hint">
+            Export writes a single .zip. Import replaces the current workspace (the previous database
+            is kept as a .pre-restore copy) and requires a restart.
+          </p>
+        </div>
+        <div className="preferences-input-row">
+          <button className="ghost-button" type="button" disabled={busy} onClick={() => void handleExport()}>
+            Export…
+          </button>
+          <button className="ghost-button" type="button" disabled={busy} onClick={() => void handleImport()}>
+            Import…
+          </button>
+        </div>
+      </article>
+
+      {status.kind !== 'idle' && status.message ? (
+        <div
+          className={status.kind === 'error' ? 'preferences-empty' : 'preferences-empty muted-text'}
+          role={status.kind === 'error' ? 'alert' : 'status'}
+        >
+          {status.message}
+        </div>
+      ) : null}
     </div>
   )
 }

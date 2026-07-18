@@ -13,7 +13,7 @@ use crate::domain::models::{
 use crate::infrastructure::runtime_log::RuntimeLogAnchor;
 use crate::infrastructure::{
     desktop_runtime, media_dedupe_runtime, media_path_migration_runtime, media_thumbnail_runtime,
-    runtime_log, workspace_repository,
+    notification_runtime, runtime_log, workspace_repository,
 };
 use crate::providers;
 
@@ -453,6 +453,16 @@ pub fn restore_persisted_queue(app: &AppHandle) {
     }
 }
 
+fn active_downloaded_items(provider: &str, job_key: &str) -> Option<u32> {
+    queue_state().lock().ok().and_then(|state| {
+        state
+            .active_jobs
+            .get(provider)
+            .filter(|active| active.job_key == job_key)
+            .and_then(|active| active.downloaded_items)
+    })
+}
+
 fn provider_has_pending_jobs(provider: &str) -> bool {
     queue_state()
         .lock()
@@ -486,112 +496,137 @@ fn apply_media_migration_hold(job: &mut SourceSyncQueueJob, is_migrating: bool) 
 }
 
 fn spawn_worker(app: AppHandle, provider: String) {
-    thread::spawn(move || loop {
-        let job = match dequeue_next(&provider) {
-            Ok(DequeueOutcome::Job(job)) => job,
-            Ok(DequeueOutcome::WaitingForAccount) => {
-                publish_queue_status_event(&app);
-                thread::sleep(Duration::from_secs(ACCOUNT_HOLD_CHECK_INTERVAL_SECS));
-                continue;
-            }
-            Ok(DequeueOutcome::WaitingForMigration) => {
-                publish_queue_status_event(&app);
-                thread::sleep(Duration::from_secs(1));
-                continue;
-            }
-            Ok(DequeueOutcome::Finished) => {
-                publish_queue_status_event(&app);
-                break;
-            }
-            Err(error) => {
-                eprintln!("manual source-sync worker failed to dequeue: {error}");
-                publish_queue_status_event(&app);
-                break;
-            }
-        };
-        publish_queue_status_event(&app);
+    thread::spawn(move || {
+        // Accumulates the results of jobs from this worker until the provider queue
+        // drains, then emitting a single aggregated native notification (one
+        // per batch, never one per item). Jobs returning to account or
+        // migration hold don't enter the batch — only those that actually finish.
+        let mut batch = notification_runtime::SyncBatch::new(provider.clone());
+        loop {
+            let job = match dequeue_next(&provider) {
+                Ok(DequeueOutcome::Job(job)) => job,
+                Ok(DequeueOutcome::WaitingForAccount) => {
+                    publish_queue_status_event(&app);
+                    thread::sleep(Duration::from_secs(ACCOUNT_HOLD_CHECK_INTERVAL_SECS));
+                    continue;
+                }
+                Ok(DequeueOutcome::WaitingForMigration) => {
+                    publish_queue_status_event(&app);
+                    thread::sleep(Duration::from_secs(1));
+                    continue;
+                }
+                Ok(DequeueOutcome::Finished) => {
+                    publish_queue_status_event(&app);
+                    notification_runtime::notify_sync_batch(&app, &batch);
+                    break;
+                }
+                Err(error) => {
+                    eprintln!("manual source-sync worker failed to dequeue: {error}");
+                    publish_queue_status_event(&app);
+                    notification_runtime::notify_sync_batch(&app, &batch);
+                    break;
+                }
+            };
+            publish_queue_status_event(&app);
 
-        let sync_result = workspace_repository::run_source_sync(
-            job.source_id.clone(),
-            Some(job.trigger.clone()),
-            job.run_mode.clone(),
-            job.sync_options_override.clone(),
-        );
-        if sync_result.is_ok() {
-            let _ = media_thumbnail_runtime::enqueue(vec![job.source_id.clone()]);
-        }
-        let hold_until = job.account_id.as_deref().and_then(|account_id| {
-            workspace_repository::active_source_sync_account_hold_until(account_id, &job.provider)
+            let sync_result = workspace_repository::run_source_sync(
+                job.source_id.clone(),
+                Some(job.trigger.clone()),
+                job.run_mode.clone(),
+                job.sync_options_override.clone(),
+            );
+            if sync_result.is_ok() {
+                let _ = media_thumbnail_runtime::enqueue(vec![job.source_id.clone()]);
+            }
+            let hold_until = job.account_id.as_deref().and_then(|account_id| {
+                workspace_repository::active_source_sync_account_hold_until(
+                    account_id,
+                    &job.provider,
+                )
                 .ok()
                 .flatten()
-        });
-        if let Some(hold_until) = hold_until {
-            let (_, summary) = summarize_sync_result(&job.source_id, &sync_result);
-            requeue_active_on_account_hold(&job, &hold_until.to_rfc3339(), &summary);
+            });
+            if let Some(hold_until) = hold_until {
+                let (_, summary) = summarize_sync_result(&job.source_id, &sync_result);
+                requeue_active_on_account_hold(&job, &hold_until.to_rfc3339(), &summary);
+                publish_queue_status_event(&app);
+                match sync_result {
+                    Ok(snapshot) => emit_runtime_refresh(&app, &snapshot),
+                    Err(_) => {
+                        if let Ok(snapshot) = workspace_repository::bootstrap_workspace() {
+                            emit_runtime_refresh(&app, &snapshot);
+                        }
+                    }
+                }
+                continue;
+            }
+            let (final_status, final_summary) = summarize_sync_result(&job.source_id, &sync_result);
+            // Reads the downloaded total reported in the active job before finish_active
+            // removes it from the queue state.
+            let downloaded_items = active_downloaded_items(&job.provider, &job.job_key)
+                .or(job.downloaded_items)
+                .unwrap_or(0);
+            finish_active(&job, &final_status, &final_summary);
+            batch.push(notification_runtime::SyncBatchItem {
+                handle: job.handle.clone(),
+                status: final_status.clone(),
+                downloaded_items,
+                summary: final_summary.clone(),
+            });
             publish_queue_status_event(&app);
+
+            // Throttle configurável entre downloads. Cada conta/cookie tem seu
+            // próprio rate limit, então o delay é por conta
+            // (<provider>.account.delayBetweenDownloadsSecs) com fallback no padrão
+            // global (policy.sync.delayBetweenProfilesSecs). Só dorme se ainda
+            // houver job pendente DESTE provider, em passos de 1s.
+            let delay_secs = workspace_repository::sync_delay_for_account(
+                job.account_id.as_deref(),
+                &job.provider,
+            );
+            if delay_secs > 0 && provider_has_pending_jobs(&provider) {
+                log_source_sync_event(
+                    "sync.queue",
+                    "debug",
+                    RuntimeLogAnchor {
+                        source_id: Some(&job.source_id),
+                        provider: Some(&job.provider),
+                        source_handle: Some(&job.handle),
+                        account_id: job.account_id.as_deref(),
+                    },
+                    "Provider cooldown is delaying the next queued sync.",
+                    Some(format!(
+                        "Waiting {delay_secs} seconds before starting the next {} job.",
+                        job.provider
+                    )),
+                );
+                for _ in 0..delay_secs {
+                    thread::sleep(Duration::from_secs(1));
+                }
+                log_source_sync_event(
+                    "sync.queue",
+                    "debug",
+                    RuntimeLogAnchor {
+                        source_id: Some(&job.source_id),
+                        provider: Some(&job.provider),
+                        source_handle: Some(&job.handle),
+                        account_id: job.account_id.as_deref(),
+                    },
+                    "Provider cooldown finished.",
+                    Some(format!("The next {} job can now start.", job.provider)),
+                );
+            }
+
             match sync_result {
                 Ok(snapshot) => emit_runtime_refresh(&app, &snapshot),
-                Err(_) => {
+                Err(error) => {
+                    eprintln!(
+                        "manual source-sync worker failed for '{}': {error}",
+                        job.source_id
+                    );
                     if let Ok(snapshot) = workspace_repository::bootstrap_workspace() {
                         emit_runtime_refresh(&app, &snapshot);
                     }
-                }
-            }
-            continue;
-        }
-        let (final_status, final_summary) = summarize_sync_result(&job.source_id, &sync_result);
-        finish_active(&job, &final_status, &final_summary);
-        publish_queue_status_event(&app);
-
-        // Throttle configurável entre downloads. Cada conta/cookie tem seu
-        // próprio rate limit, então o delay é por conta
-        // (<provider>.account.delayBetweenDownloadsSecs) com fallback no padrão
-        // global (policy.sync.delayBetweenProfilesSecs). Só dorme se ainda
-        // houver job pendente DESTE provider, em passos de 1s.
-        let delay_secs =
-            workspace_repository::sync_delay_for_account(job.account_id.as_deref(), &job.provider);
-        if delay_secs > 0 && provider_has_pending_jobs(&provider) {
-            log_source_sync_event(
-                "sync.queue",
-                "debug",
-                RuntimeLogAnchor {
-                    source_id: Some(&job.source_id),
-                    provider: Some(&job.provider),
-                    source_handle: Some(&job.handle),
-                    account_id: job.account_id.as_deref(),
-                },
-                "Provider cooldown is delaying the next queued sync.",
-                Some(format!(
-                    "Waiting {delay_secs} seconds before starting the next {} job.",
-                    job.provider
-                )),
-            );
-            for _ in 0..delay_secs {
-                thread::sleep(Duration::from_secs(1));
-            }
-            log_source_sync_event(
-                "sync.queue",
-                "debug",
-                RuntimeLogAnchor {
-                    source_id: Some(&job.source_id),
-                    provider: Some(&job.provider),
-                    source_handle: Some(&job.handle),
-                    account_id: job.account_id.as_deref(),
-                },
-                "Provider cooldown finished.",
-                Some(format!("The next {} job can now start.", job.provider)),
-            );
-        }
-
-        match sync_result {
-            Ok(snapshot) => emit_runtime_refresh(&app, &snapshot),
-            Err(error) => {
-                eprintln!(
-                    "manual source-sync worker failed for '{}': {error}",
-                    job.source_id
-                );
-                if let Ok(snapshot) = workspace_repository::bootstrap_workspace() {
-                    emit_runtime_refresh(&app, &snapshot);
                 }
             }
         }

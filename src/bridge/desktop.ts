@@ -16,7 +16,10 @@ import type {
   AppSetting,
   AppSettingUpsert,
   AppBuildInfo,
+  AppUpdateProgress,
   AppUpdateStatus,
+  MigrationStatus,
+  MigrationProgress,
   AuthMode,
   AuthState,
   ConnectorRuntimeStatus,
@@ -2366,6 +2369,35 @@ export async function checkAppUpdate(): Promise<AppUpdateStatus> {
   return normalizeAppUpdateStatus(await invoke<unknown>('check_app_update'))
 }
 
+const APP_UPDATE_PROGRESS_EVENT_NAME = 'runtime://app-update-progress'
+
+function normalizeAppUpdateProgress(raw: unknown): AppUpdateProgress {
+  const value = isRecord(raw) ? raw : {}
+  const phase = enumValue(
+    pick(value, 'phase'),
+    ['downloading', 'installing', 'done'] as const,
+    'downloading',
+  )
+  return {
+    phase,
+    downloaded: numberValue(value, ['downloaded'], 0),
+    total: optionalNumberValue(value, ['total']),
+    percent: optionalNumberValue(value, ['percent']),
+  }
+}
+
+export async function installAppUpdate(): Promise<void> {
+  await invoke('install_app_update')
+}
+
+export function onAppUpdateProgress(
+  handler: (progress: AppUpdateProgress) => void,
+): Promise<() => void> {
+  return listen(APP_UPDATE_PROGRESS_EVENT_NAME, (event) => {
+    handler(normalizeAppUpdateProgress(event.payload))
+  })
+}
+
 export async function loadSystemShortDatePattern(): Promise<string> {
   const result = await invoke<unknown>('system_short_date_pattern')
   return typeof result === 'string' && result.trim().length > 0
@@ -2829,6 +2861,57 @@ export async function subscribeToSourceSyncQueue(
   })
 }
 
+// --- Migração de schema no boot (tela de migração da janela principal) ---
+
+export async function getMigrationStatus(): Promise<MigrationStatus | null> {
+  const raw = await invoke<unknown>('get_migration_status')
+  if (!isRecord(raw)) return null
+  return {
+    fromVersion: optionalNumberValue(raw, ['fromVersion', 'from_version']) ?? 0,
+    toVersion: optionalNumberValue(raw, ['toVersion', 'to_version']) ?? 0,
+    pendingCount: optionalNumberValue(raw, ['pendingCount', 'pending_count']) ?? 0,
+    dbSizeBytes: optionalNumberValue(raw, ['dbSizeBytes', 'db_size_bytes']) ?? 0,
+  }
+}
+
+export async function runPendingMigrations(): Promise<void> {
+  await invoke<void>('run_pending_migrations')
+}
+
+export async function subscribeToMigrationProgress(
+  onProgress: (progress: MigrationProgress) => void,
+): Promise<() => void> {
+  return listen('migration://progress', (event) => {
+    const raw = event.payload
+    if (!isRecord(raw)) return
+    onProgress({
+      phase: raw.phase === 'backup' ? 'backup' : 'migrate',
+      current: optionalNumberValue(raw, ['current']) ?? 0,
+      total: optionalNumberValue(raw, ['total']) ?? 0,
+      label: typeof raw.label === 'string' ? raw.label : '',
+    })
+  })
+}
+
+export async function subscribeToMigrationCompletion(
+  onDone: () => void,
+  onError: (message: string) => void,
+): Promise<() => void> {
+  const unlistenDone = await listen('migration://done', () => onDone())
+  const unlistenError = await listen('migration://error', (event) => {
+    onError(typeof event.payload === 'string' ? event.payload : 'Migration failed.')
+  })
+  return () => {
+    unlistenDone()
+    unlistenError()
+  }
+}
+
+export async function openBackupsFolder(): Promise<void> {
+  const path = await invoke<string>('backups_folder_path')
+  await openPath(path)
+}
+
 export async function loadSourceDeleteQueueStatus(): Promise<SourceDeleteQueueStatus> {
   const result = await withTimeout(
     invoke<unknown>('source_delete_queue_status'),
@@ -2898,6 +2981,13 @@ function parseSourceMediaGallery(raw: unknown, sourceId: string): SourceMediaGal
     provider: stringValue(value, ['provider'], 'instagram') as SourceMediaGallery['provider'],
     handle: stringValue(value, ['handle'], ''),
     profileUrl: stringValue(value, ['profileUrl', 'profile_url'], ''),
+    // Metadados de perfil da última sync (Fase 3); ausentes em perfis sem sync.
+    biography: optionalStringValue(value, ['biography']),
+    followerCount: optionalNumberValue(value, ['followerCount', 'follower_count']),
+    followingCount: optionalNumberValue(value, ['followingCount', 'following_count']),
+    mediaCount: optionalNumberValue(value, ['mediaCount', 'media_count']),
+    isVerified: value.isVerified === true || value.is_verified === true,
+    statsUpdatedAt: optionalStringValue(value, ['statsUpdatedAt', 'stats_updated_at']),
     posts: posts.filter(isRecord).map((post) => ({
       postId: optionalStringValue(post, ['postId', 'post_id']),
       postUrl: optionalStringValue(post, ['postUrl', 'post_url']),
@@ -3719,4 +3809,71 @@ export async function upsertAppSetting(draft: AppSettingUpsert): Promise<Workspa
     'upsert_app_setting',
     buildInvokeArgs(payload),
   )
+}
+
+export interface BackupExportResult {
+  cancelled: boolean
+  path: string | null
+  includesSecrets: boolean
+}
+
+export interface BackupInspection {
+  cancelled: boolean
+  path: string | null
+  includesSecrets: boolean
+  appVersion: string | null
+  createdAt: string | null
+}
+
+export interface BackupImportResult {
+  includesSecrets: boolean
+  secretsRestored: number
+  restartRequired: boolean
+  preRestorePath: string | null
+}
+
+export async function exportWorkspaceBackup(
+  includeSecrets: boolean,
+  password?: string,
+): Promise<BackupExportResult> {
+  const result = await invoke<unknown>('export_workspace_backup', {
+    includeSecrets,
+    include_secrets: includeSecrets,
+    password: password ?? null,
+  })
+  const record = isRecord(result) ? result : {}
+  return {
+    cancelled: booleanValue(record, ['cancelled']),
+    path: optionalStringValue(record, ['path']) ?? null,
+    includesSecrets: booleanValue(record, ['includesSecrets', 'includes_secrets']),
+  }
+}
+
+export async function inspectWorkspaceBackup(): Promise<BackupInspection> {
+  const result = await invoke<unknown>('inspect_workspace_backup')
+  const record = isRecord(result) ? result : {}
+  return {
+    cancelled: booleanValue(record, ['cancelled']),
+    path: optionalStringValue(record, ['path']) ?? null,
+    includesSecrets: booleanValue(record, ['includesSecrets', 'includes_secrets']),
+    appVersion: optionalStringValue(record, ['appVersion', 'app_version']) ?? null,
+    createdAt: optionalStringValue(record, ['createdAt', 'created_at']) ?? null,
+  }
+}
+
+export async function importWorkspaceBackup(
+  path: string,
+  password?: string,
+): Promise<BackupImportResult> {
+  const result = await invoke<unknown>('import_workspace_backup', {
+    path,
+    password: password ?? null,
+  })
+  const record = isRecord(result) ? result : {}
+  return {
+    includesSecrets: booleanValue(record, ['includesSecrets', 'includes_secrets']),
+    secretsRestored: numberValue(record, ['secretsRestored', 'secrets_restored'], 0),
+    restartRequired: booleanValue(record, ['restartRequired', 'restart_required'], true),
+    preRestorePath: optionalStringValue(record, ['preRestorePath', 'pre_restore_path']) ?? null,
+  }
 }

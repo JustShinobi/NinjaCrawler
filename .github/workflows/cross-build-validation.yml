@@ -18,7 +18,7 @@ concurrency:
 
 jobs:
   build:
-    if: ${{ github.repository == 'MetalDevOps/NinjaCrawler' }}
+    if: ${{ github.repository == 'JustShinobi/NinjaCrawler' }}
     runs-on: [self-hosted, proxmox-lxc, crossbuild, mode-ephemeral]
     timeout-minutes: 60
     permissions:

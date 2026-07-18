@@ -693,4 +693,136 @@ describe('ProfileViewPage', () => {
     )
     await waitFor(() => expect(refreshButton.textContent).toMatch(/queued/i))
   })
+
+  it('filters the grid by media type (photos vs videos)', async () => {
+    bridgeMocks.loadSourceMediaGallery.mockResolvedValue(instagramGalleryFixture())
+    render(<ProfileViewPage initialSourceId="ig-1" />)
+    await screen.findByRole('heading', { name: /bibiss\.sz/i })
+
+    // Both a photo (Feed) and a video (Reel) are present initially.
+    expect(screen.getAllByRole('button', { name: /open preview/i }).length).toBe(2)
+
+    // Only videos → the single reel remains.
+    fireEvent.click(screen.getByRole('button', { name: /videos/i }))
+    expect(screen.getAllByRole('button', { name: /open preview/i }).length).toBe(1)
+
+    // Only photos → the single feed image remains.
+    fireEvent.click(screen.getByRole('button', { name: /photos/i }))
+    expect(screen.getAllByRole('button', { name: /open preview/i }).length).toBe(1)
+
+    // The preference persists across remounts.
+    cleanup()
+    render(<ProfileViewPage initialSourceId="ig-1" />)
+    await screen.findByRole('heading', { name: /bibiss\.sz/i })
+    await waitFor(() =>
+      expect(screen.getAllByRole('button', { name: /open preview/i }).length).toBe(1),
+    )
+  })
+
+  it('shows the display name, sync health and labels in the header', async () => {
+    bridgeMocks.loadSourceMediaGallery.mockResolvedValue(instagramGalleryFixture())
+    bridgeMocks.loadWorkspaceSnapshot.mockResolvedValue({
+      sources: [
+        {
+          id: 'ig-1',
+          provider: 'instagram',
+          sourceKind: 'profile',
+          handle: 'bibiss.sz',
+          displayName: 'Bibi Souza',
+          labels: ['subscriber', 'vip'],
+          readyForDownload: true,
+          profileImageCustom: false,
+          remoteState: 'exists',
+          isSubscription: true,
+          lastSyncedAt: new Date(Date.now() - 2 * 3600 * 1000).toISOString(),
+        },
+      ],
+    })
+    render(<ProfileViewPage initialSourceId="ig-1" />)
+    await screen.findByRole('heading', { name: /bibiss\.sz/i })
+
+    expect(await screen.findByText('Bibi Souza')).toBeTruthy()
+    expect(screen.getByText(/synced 2 h ago/i)).toBeTruthy()
+    expect(screen.getByText('subscriber')).toBeTruthy()
+    expect(screen.getByText('vip')).toBeTruthy()
+  })
+
+  it('renders the synced bio, follower counts and verified badge from the gallery', async () => {
+    bridgeMocks.loadSourceMediaGallery.mockResolvedValue({
+      ...instagramGalleryFixture(),
+      biography: 'Pole & flexibility\nRio de Janeiro',
+      followerCount: 8135,
+      followingCount: 1192,
+      isVerified: true,
+    })
+    render(<ProfileViewPage initialSourceId="ig-1" />)
+    await screen.findByRole('heading', { name: /bibiss\.sz/i })
+
+    // Bio sincronizada (Fase 3) vem da galeria, não do snapshot.
+    expect(screen.getByText(/Pole & flexibility/)).toBeTruthy()
+    // Contadores confiáveis (seguidores/seguindo) — o post count remoto é omitido.
+    const stats = document.querySelector('.profile-view-stats')
+    expect(stats?.textContent).toMatch(/followers/)
+    expect(stats?.textContent).toMatch(/following/)
+    expect(stats?.textContent).not.toMatch(/posts/)
+    // Selo de verificado.
+    expect(screen.getByLabelText('Verified account')).toBeTruthy()
+  })
+
+  it('queues a manual sync from the header "Sync now" button', async () => {
+    render(<ProfileViewPage initialSourceId="src-1" />)
+    const syncButton = await screen.findByRole('button', { name: /sync now/i })
+
+    fireEvent.click(syncButton)
+
+    await waitFor(() =>
+      expect(bridgeMocks.runSourceSync).toHaveBeenCalledWith('src-1', { trigger: 'manual' }),
+    )
+  })
+
+  it('reloads the gallery and snapshot when a sync for this profile finishes', async () => {
+    let queueCallback: ((status: unknown) => void) | undefined
+    bridgeMocks.subscribeToSourceSyncQueue.mockImplementation((callback: (status: unknown) => void) => {
+      queueCallback = callback
+      return Promise.resolve(() => undefined)
+    })
+    render(<ProfileViewPage initialSourceId="src-1" />)
+    await screen.findByRole('heading', { name: /gaaby\.tls/i })
+
+    const galleryCallsBefore = bridgeMocks.loadSourceMediaGallery.mock.calls.length
+    const snapshotCallsBefore = bridgeMocks.loadWorkspaceSnapshot.mock.calls.length
+
+    // A fila reporta um sync deste perfil concluído.
+    queueCallback?.({
+      queuedItems: [],
+      runningItems: [],
+      recentResults: [
+        {
+          sourceId: 'src-1',
+          provider: 'tiktok',
+          handle: 'gaaby.tls',
+          status: 'succeeded',
+          summary: '',
+          finishedAt: '2026-07-18T00:00:00Z',
+        },
+      ],
+    })
+
+    // Recarrega galeria E snapshot (posts + bio/contadores + "Synced X ago").
+    await waitFor(() => {
+      expect(bridgeMocks.loadSourceMediaGallery.mock.calls.length).toBeGreaterThan(galleryCallsBefore)
+      expect(bridgeMocks.loadWorkspaceSnapshot.mock.calls.length).toBeGreaterThan(snapshotCallsBefore)
+    })
+  })
+
+  it('filters by the carousels-only advanced filter', async () => {
+    render(<ProfileViewPage initialSourceId="src-1" />)
+    await screen.findByRole('heading', { name: /gaaby\.tls/i })
+    // TikTok fixture: one video + one slideshow (2 files) → carousels-only keeps 1.
+    expect(screen.getAllByRole('button', { name: /open preview/i }).length).toBe(2)
+
+    fireEvent.click(screen.getByRole('button', { name: /advanced filters/i }))
+    fireEvent.click(screen.getByLabelText(/carousels \/ slideshows only/i))
+    expect(screen.getAllByRole('button', { name: /open preview/i }).length).toBe(1)
+  })
 })

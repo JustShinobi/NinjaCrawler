@@ -1,6 +1,6 @@
 [package]
 name = "ninjacrawler"
-version = "0.25.0" # x-release-please-version
+version = "0.26.0" # x-release-please-version
 description = "Local-first desktop crawler manager"
 authors = ["MetalDevOps"]
 edition = "2021"
@@ -19,12 +19,14 @@ tauri-build = { version = "2.6.3", features = [] }
 
 [dependencies]
 chrono = { version = "0.4", features = ["clock"] }
-rusqlite = { version = "0.37", features = ["bundled"] }
+rusqlite = { version = "0.37", features = ["bundled", "backup"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tauri = { version = "2.11.5", features = ["protocol-asset", "tray-icon"] }
 tauri-plugin-window-state = "2.4.1"
 tauri-plugin-opener = "2.5.4"
+tauri-plugin-notification = "2.3.1"
+tauri-plugin-updater = "2.9.0"
 rfd = "0.15"
 uuid = { version = "1", features = ["v4", "fast-rng"] }
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls", "gzip", "brotli", "deflate"] }
@@ -38,6 +40,9 @@ tempfile = "3"
 trash = "5"
 fs2 = "0.4"
 same-file = "1"
+argon2 = "0.5"
+aes-gcm = "0.10"
+rand = "0.8"
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.55"
