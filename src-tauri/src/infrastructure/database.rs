@@ -163,6 +163,30 @@ const MIGRATIONS: &[(i64, &str)] = &[
         42,
         include_str!("../../migrations/0042_source_profile_stats.sql"),
     ),
+    (
+        43,
+        include_str!("../../migrations/0043_workspace_health_media_dedupe.sql"),
+    ),
+    (
+        44,
+        include_str!("../../migrations/0044_workspace_health_media_dedupe_schema_repair.sql"),
+    ),
+    (
+        45,
+        include_str!("../../migrations/0045_media_dedupe_incremental_vdf.sql"),
+    ),
+    (
+        46,
+        include_str!("../../migrations/0046_media_dedupe_provider_scope.sql"),
+    ),
+    (
+        47,
+        include_str!("../../migrations/0047_media_dedupe_performance.sql"),
+    ),
+    (
+        48,
+        include_str!("../../migrations/0048_media_dedupe_source_scope.sql"),
+    ),
 ];
 
 const PROVIDER_SYNC_RESUME_SCHEMA: &str =
@@ -222,6 +246,118 @@ fn ensure_provider_sync_resume_schema(connection: &Connection) -> rusqlite::Resu
     )
 }
 
+fn add_column_if_missing(
+    connection: &Connection,
+    table: &str,
+    column: &str,
+    declaration: &str,
+) -> rusqlite::Result<()> {
+    let columns = table_columns(connection, table)?;
+    if columns.is_empty() || columns.contains(column) {
+        return Ok(());
+    }
+    connection.execute(
+        &format!("ALTER TABLE {table} ADD COLUMN {column} {declaration}"),
+        [],
+    )?;
+    Ok(())
+}
+
+fn ensure_source_profile_stats_schema(connection: &Connection) -> rusqlite::Result<()> {
+    for (column, declaration) in [
+        ("profile_biography", "TEXT"),
+        ("profile_follower_count", "INTEGER"),
+        ("profile_following_count", "INTEGER"),
+        ("profile_media_count", "INTEGER"),
+        ("profile_is_verified", "INTEGER"),
+        ("profile_stats_updated_at", "TEXT"),
+    ] {
+        add_column_if_missing(connection, "source_profiles", column, declaration)?;
+    }
+    Ok(())
+}
+
+fn ensure_media_dedupe_provider_scope_schema(connection: &Connection) -> rusqlite::Result<()> {
+    add_column_if_missing(connection, "media_dedupe_scans", "provider_scope", "TEXT")?;
+    Ok(())
+}
+
+fn ensure_media_dedupe_performance_schema(connection: &Connection) -> rusqlite::Result<()> {
+    ensure_media_dedupe_provider_scope_schema(connection)?;
+    add_column_if_missing(
+        connection,
+        "media_dedupe_scans",
+        "resource_profile",
+        "TEXT NOT NULL DEFAULT 'balanced'",
+    )?;
+    add_column_if_missing(
+        connection,
+        "media_dedupe_source_jobs",
+        "inventory_fingerprint",
+        "TEXT",
+    )?;
+    add_column_if_missing(
+        connection,
+        "media_dedupe_source_jobs",
+        "cached_from_scan_id",
+        "TEXT",
+    )?;
+    let source_job_columns = table_columns(connection, "media_dedupe_source_jobs")?;
+    if source_job_columns.contains("inventory_fingerprint") {
+        connection.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_media_dedupe_source_jobs_cache
+             ON media_dedupe_source_jobs(
+                 source_id,
+                 status,
+                 runtime_digest,
+                 settings_fingerprint,
+                 inventory_fingerprint,
+                 finished_at DESC
+             );",
+        )?;
+    }
+    Ok(())
+}
+
+fn ensure_media_dedupe_source_scope_schema(connection: &Connection) -> rusqlite::Result<()> {
+    add_column_if_missing(
+        connection,
+        "media_dedupe_scans",
+        "source_scope",
+        "TEXT REFERENCES source_profiles(id) ON DELETE SET NULL",
+    )?;
+    if table_columns(connection, "media_dedupe_scans")?.contains("source_scope") {
+        connection.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_media_dedupe_scans_source_scope
+             ON media_dedupe_scans(source_scope, started_at DESC);",
+        )?;
+    }
+    Ok(())
+}
+
+fn reconcile_colliding_development_migrations(connection: &Connection) -> rusqlite::Result<()> {
+    ensure_source_profile_stats_schema(connection)?;
+    ensure_media_dedupe_performance_schema(connection)?;
+    ensure_media_dedupe_source_scope_schema(connection)
+}
+
+fn apply_migration(
+    transaction: &rusqlite::Transaction<'_>,
+    version: i64,
+    sql: &str,
+) -> rusqlite::Result<()> {
+    if version == 46 {
+        return ensure_media_dedupe_provider_scope_schema(transaction);
+    }
+    if version == 47 {
+        return ensure_media_dedupe_performance_schema(transaction);
+    }
+    if version == 48 {
+        return ensure_media_dedupe_source_scope_schema(transaction);
+    }
+    transaction.execute_batch(sql)
+}
+
 pub fn open_connection(path: &Path) -> rusqlite::Result<Connection> {
     let mut connection = Connection::open(path)?;
     connection.pragma_update(None, "foreign_keys", "ON")?;
@@ -238,6 +374,7 @@ pub fn open_connection(path: &Path) -> rusqlite::Result<Connection> {
     // processo. A chave por path preserva o suite hermético dos testes (um
     // banco temporário por teste, cada um migrado na 1ª abertura).
     ensure_migrations(&mut connection, path)?;
+    reconcile_colliding_development_migrations(&connection)?;
 
     // Invariante operacional: migrations de branches de desenvolvimento podem
     // colidir por versao. A fila nao deve falhar só porque o ledger diz que a
@@ -306,7 +443,7 @@ fn ensure_migrations(connection: &mut Connection, path: &Path) -> rusqlite::Resu
         }
 
         let transaction = connection.transaction()?;
-        transaction.execute_batch(sql)?;
+        apply_migration(&transaction, *version, sql)?;
         transaction.execute(
             "INSERT INTO schema_migrations (version) VALUES (?1)",
             [version],
@@ -456,7 +593,9 @@ pub fn migration_precheck(
         .map(|(version, _)| *version)
         .max()
         .unwrap_or(applied_max);
-    let db_size_bytes = std::fs::metadata(db_path).map(|meta| meta.len()).unwrap_or(0);
+    let db_size_bytes = std::fs::metadata(db_path)
+        .map(|meta| meta.len())
+        .unwrap_or(0);
     Ok(Some(crate::domain::models::MigrationStatus {
         from_version: applied_max,
         to_version,
@@ -503,6 +642,8 @@ where
         .filter(|(version, _)| !applied.contains(version))
         .collect();
     if pending.is_empty() {
+        reconcile_colliding_development_migrations(&connection)
+            .map_err(|error| error.to_string())?;
         return Ok(());
     }
 
@@ -519,15 +660,19 @@ where
             total,
             label: format!("Applying update {version}"),
         });
-        let transaction = connection.transaction().map_err(|error| error.to_string())?;
-        transaction
-            .execute_batch(sql)
+        let transaction = connection
+            .transaction()
             .map_err(|error| error.to_string())?;
+        apply_migration(&transaction, *version, sql).map_err(|error| error.to_string())?;
         transaction
-            .execute("INSERT INTO schema_migrations (version) VALUES (?1)", [version])
+            .execute(
+                "INSERT INTO schema_migrations (version) VALUES (?1)",
+                [version],
+            )
             .map_err(|error| error.to_string())?;
         transaction.commit().map_err(|error| error.to_string())?;
     }
+    reconcile_colliding_development_migrations(&connection).map_err(|error| error.to_string())?;
     on_progress(crate::domain::models::MigrationProgress {
         phase: "migrate".to_string(),
         current: total,
@@ -633,10 +778,182 @@ mod tests {
     }
 
     #[test]
+    fn open_connection_repairs_registered_dedupe_migration_with_missing_tables() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("dedupe-repair.db");
+        let raw = Connection::open(&path).expect("raw connection");
+        raw.execute_batch(
+            "CREATE TABLE schema_migrations (
+                version INTEGER PRIMARY KEY,
+                applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+             );",
+        )
+        .expect("migration ledger");
+        for version in 1..=43 {
+            raw.execute(
+                "INSERT INTO schema_migrations(version) VALUES (?1)",
+                [version],
+            )
+            .expect("registered migration");
+        }
+        drop(raw);
+
+        let repaired = open_connection(&path).expect("repaired connection");
+        for table in [
+            "media_dedupe_scans",
+            "media_dedupe_files",
+            "media_dedupe_jobs",
+            "media_dedupe_actions",
+            "media_dedupe_catalog",
+            "media_dedupe_source_jobs",
+            "media_dedupe_vdf_candidates",
+        ] {
+            assert!(
+                !table_columns(&repaired, table)
+                    .expect("dedupe columns")
+                    .is_empty(),
+                "{table} should be repaired"
+            );
+        }
+        assert!(table_columns(&repaired, "media_dedupe_jobs")
+            .expect("job columns")
+            .contains("current_root"));
+        assert!(table_columns(&repaired, "media_dedupe_scans")
+            .expect("scan columns")
+            .contains("resource_profile"));
+        assert!(table_columns(&repaired, "media_dedupe_scans")
+            .expect("scan columns")
+            .contains("source_scope"));
+        let source_job_columns =
+            table_columns(&repaired, "media_dedupe_source_jobs").expect("source job columns");
+        assert!(source_job_columns.contains("inventory_fingerprint"));
+        assert!(source_job_columns.contains("cached_from_scan_id"));
+    }
+
+    #[test]
+    fn migration_reconciles_the_previous_feature_branch_version_history() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("colliding-v42.db");
+        let raw = Connection::open(&path).expect("raw connection");
+        raw.execute_batch(
+            "CREATE TABLE schema_migrations (
+                version INTEGER PRIMARY KEY,
+                applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+             );
+             CREATE TABLE source_profiles (id TEXT PRIMARY KEY);",
+        )
+        .expect("legacy base schema");
+        raw.execute_batch(include_str!(
+            "../../migrations/0043_workspace_health_media_dedupe.sql"
+        ))
+        .expect("legacy dedupe schema");
+        raw.execute_batch(include_str!(
+            "../../migrations/0044_workspace_health_media_dedupe_schema_repair.sql"
+        ))
+        .expect("legacy dedupe repair");
+        raw.execute_batch(include_str!(
+            "../../migrations/0045_media_dedupe_incremental_vdf.sql"
+        ))
+        .expect("legacy incremental schema");
+        raw.execute_batch(include_str!(
+            "../../migrations/0046_media_dedupe_provider_scope.sql"
+        ))
+        .expect("legacy provider scope");
+        raw.execute_batch(
+            "ALTER TABLE media_dedupe_scans
+                 ADD COLUMN resource_profile TEXT NOT NULL DEFAULT 'balanced';
+             ALTER TABLE media_dedupe_source_jobs
+                 ADD COLUMN inventory_fingerprint TEXT;
+             ALTER TABLE media_dedupe_source_jobs
+                 ADD COLUMN cached_from_scan_id TEXT;",
+        )
+        .expect("legacy performance schema");
+        for version in 1..=46 {
+            raw.execute(
+                "INSERT INTO schema_migrations(version) VALUES (?1)",
+                [version],
+            )
+            .expect("legacy migration ledger");
+        }
+        drop(raw);
+
+        let reconciled = open_connection(&path).expect("reconciled connection");
+        let profile_columns =
+            table_columns(&reconciled, "source_profiles").expect("profile columns");
+        assert!(profile_columns.contains("profile_biography"));
+        assert!(profile_columns.contains("profile_stats_updated_at"));
+        let scan_columns = table_columns(&reconciled, "media_dedupe_scans").expect("scan columns");
+        assert!(scan_columns.contains("provider_scope"));
+        assert!(scan_columns.contains("resource_profile"));
+        assert!(scan_columns.contains("source_scope"));
+        let applied_47_and_48: i64 = reconciled
+            .query_row(
+                "SELECT count(*) FROM schema_migrations WHERE version IN (47, 48)",
+                [],
+                |row| row.get(0),
+            )
+            .expect("version 47");
+        assert_eq!(applied_47_and_48, 2);
+    }
+
+    #[test]
+    fn migration_retries_when_provider_scope_exists_before_version_46() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("provider-scope-before-v46.db");
+        let raw = Connection::open(&path).expect("raw connection");
+        raw.execute_batch(
+            "CREATE TABLE schema_migrations (
+                version INTEGER PRIMARY KEY,
+                applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+             );
+             CREATE TABLE source_profiles (id TEXT PRIMARY KEY);",
+        )
+        .expect("legacy base schema");
+        raw.execute_batch(include_str!(
+            "../../migrations/0043_workspace_health_media_dedupe.sql"
+        ))
+        .expect("legacy dedupe schema");
+        raw.execute_batch(include_str!(
+            "../../migrations/0045_media_dedupe_incremental_vdf.sql"
+        ))
+        .expect("legacy incremental schema");
+        raw.execute_batch("ALTER TABLE media_dedupe_scans ADD COLUMN provider_scope TEXT;")
+            .expect("legacy provider scope");
+        for version in 1..=45 {
+            raw.execute(
+                "INSERT INTO schema_migrations(version) VALUES (?1)",
+                [version],
+            )
+            .expect("legacy migration ledger");
+        }
+        drop(raw);
+
+        run_pending_migrations_with_progress(&path, |_| {}).expect("retry should reconcile schema");
+        let reconciled = Connection::open(&path).expect("reconciled database");
+        let scan_columns =
+            table_columns(&reconciled, "media_dedupe_scans").expect("media dedupe scan columns");
+        assert!(scan_columns.contains("provider_scope"));
+        assert!(scan_columns.contains("resource_profile"));
+        assert!(scan_columns.contains("source_scope"));
+        let applied_versions: i64 = reconciled
+            .query_row(
+                "SELECT count(*) FROM schema_migrations WHERE version IN (46, 47, 48)",
+                [],
+                |row| row.get(0),
+            )
+            .expect("reconciled migration versions");
+        assert_eq!(applied_versions, 3);
+    }
+
+    #[test]
     fn migration_precheck_and_progress_runner_backup_and_apply() {
         let temp = tempfile::tempdir().expect("tempdir");
         let path = temp.path().join("ninjacrawler.db");
-        let max_version = MIGRATIONS.iter().map(|(v, _)| *v).max().expect("migrations");
+        let max_version = MIGRATIONS
+            .iter()
+            .map(|(v, _)| *v)
+            .max()
+            .expect("migrations");
         {
             let connection = Connection::open(&path).expect("open");
             connection
@@ -652,7 +969,10 @@ mod tests {
             // Marca todas menos a ÚLTIMA como aplicadas → só a última fica pendente.
             for (version, _) in MIGRATIONS.iter().filter(|(v, _)| *v < max_version) {
                 connection
-                    .execute("INSERT INTO schema_migrations(version) VALUES (?1)", [version])
+                    .execute(
+                        "INSERT INTO schema_migrations(version) VALUES (?1)",
+                        [version],
+                    )
                     .expect("seed version");
             }
         }
@@ -669,8 +989,14 @@ mod tests {
         let mut phases: Vec<String> = Vec::new();
         run_pending_migrations_with_progress(&path, |progress| phases.push(progress.phase))
             .expect("migrate ok");
-        assert!(phases.iter().any(|p| p == "backup"), "reports backup progress");
-        assert!(phases.iter().any(|p| p == "migrate"), "reports migrate progress");
+        assert!(
+            phases.iter().any(|p| p == "backup"),
+            "reports backup progress"
+        );
+        assert!(
+            phases.iter().any(|p| p == "migrate"),
+            "reports migrate progress"
+        );
 
         // A última migration foi registrada e um snapshot foi gravado.
         let connection = Connection::open(&path).expect("reopen");
@@ -727,7 +1053,11 @@ mod tests {
             .filter(|name| name.starts_with("ninjacrawler.pre-v") && name.ends_with(".db"))
             .collect();
         files.sort();
-        assert_eq!(files.len(), 3, "keeps only the newest three backups: {files:?}");
+        assert_eq!(
+            files.len(),
+            3,
+            "keeps only the newest three backups: {files:?}"
+        );
         assert!(
             !files.iter().any(|name| name.contains(".pre-v1.")),
             "the oldest backup (v1) should have been pruned: {files:?}"

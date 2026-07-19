@@ -1,0 +1,63 @@
+name: sync-release-cargo-lock
+
+# After Release Please bumps Cargo.toml on the app release PR, keep the
+# derived ninjacrawler version line in Cargo.lock aligned. Cargo.lock is not
+# an extra-files target for Release Please (markers are lost whenever cargo
+# regenerates the lockfile).
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches:
+      - main
+
+permissions:
+  contents: write
+  pull-requests: read
+
+concurrency:
+  group: sync-release-cargo-lock-${{ github.head_ref }}
+  cancel-in-progress: true
+
+jobs:
+  sync:
+    name: Sync Cargo.lock app version
+    if: ${{ github.head_ref == 'release-please--branches--main--components--ninjacrawler' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out release PR branch
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.head_ref }}
+          # GITHUB_TOKEN cannot push when the repo restricts workflow PR creation.
+          token: ${{ secrets.GH_TOKEN }}
+          fetch-depth: 0
+
+      - name: Sync Cargo.lock from Cargo.toml
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: |
+          Set-StrictMode -Version Latest
+          $ErrorActionPreference = "Stop"
+
+          & pwsh -File Tools/Sync-NinjaCrawlerCargoLockVersion.ps1 | Out-Host
+
+          if (-not (git status --short -- src-tauri/Cargo.lock)) {
+            Write-Host "Cargo.lock already matches Cargo.toml."
+            exit 0
+          }
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src-tauri/Cargo.lock
+          git commit -m "chore(release): sync Cargo.lock app version from Cargo.toml"
+
+          # checkout may inject an auth header; prefer gh for the push.
+          git config --local --unset-all http.https://github.com/.extraheader 2>$null
+          gh auth setup-git
+          git push origin "HEAD:$env:GITHUB_HEAD_REF"
+          if ($LASTEXITCODE -ne 0) {
+            throw "Could not push the Cargo.lock version sync commit to the release PR branch."
+          }

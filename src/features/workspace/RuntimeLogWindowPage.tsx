@@ -3,6 +3,7 @@ import {
   loadRuntimeLogContext,
   queryRuntimeLogs,
   reportRuntimeLogWindowReady,
+  subscribeToRuntimeLogWindowIntent,
   subscribeToDesktopRuntimeEvents,
 } from '../../bridge/desktop'
 import type {
@@ -47,12 +48,14 @@ function buildLogQuery(
   scope: string,
   provider: string,
   accountId: string,
+  sourceId: string,
 ): {
   limit: number
   level?: 'info' | 'warning' | 'error' | 'debug'
   scope?: string
   provider?: ProviderKey
   accountId?: string
+  sourceId?: string
 } {
   return {
     limit: MAX_RENDERED_LOGS,
@@ -60,6 +63,7 @@ function buildLogQuery(
     scope: scope === 'all' ? undefined : scope,
     provider: provider === 'all' ? undefined : (provider as ProviderKey),
     accountId: accountId === 'all' ? undefined : accountId,
+    sourceId: sourceId === 'all' ? undefined : sourceId,
   }
 }
 
@@ -70,6 +74,7 @@ function matchesFilters(
     scope: string
     provider: string
     accountId: string
+    sourceId: string
   },
 ): boolean {
   if (filters.level !== 'all' && entry.level !== filters.level) {
@@ -82,6 +87,9 @@ function matchesFilters(
     return false
   }
   if (filters.accountId !== 'all' && entry.accountId !== filters.accountId) {
+    return false
+  }
+  if (filters.sourceId !== 'all' && entry.sourceId !== filters.sourceId) {
     return false
   }
   return true
@@ -132,6 +140,7 @@ function renderScope(scope: string) {
 }
 
 export function RuntimeLogWindowPage() {
+  const initialParams = useMemo(() => new URLSearchParams(window.location.search), [])
   const [accounts, setAccounts] = useState<ProviderAccount[]>(EMPTY_ACCOUNTS)
   const [providerCatalog, setProviderCatalog] = useState<ProviderDescriptor[]>(EMPTY_PROVIDERS)
   const [logs, setLogs] = useState<RuntimeLogEntry[]>(EMPTY_LOGS)
@@ -140,10 +149,11 @@ export function RuntimeLogWindowPage() {
   const [loading, setLoading] = useState(false)
   const [contextError, setContextError] = useState<string>()
   const [queryError, setQueryError] = useState<string>()
-  const [level, setLevel] = useState<string>('all')
+  const [level, setLevel] = useState<string>(initialParams.get('level') ?? 'all')
   const [scope, setScope] = useState<string>('all')
   const [provider, setProvider] = useState<string>('all')
-  const [accountId, setAccountId] = useState<string>('all')
+  const [accountId, setAccountId] = useState<string>(initialParams.get('accountId') ?? 'all')
+  const [sourceId, setSourceId] = useState<string>(initialParams.get('sourceId') ?? 'all')
   const contextRequestRef = useRef(0)
   const queryRequestRef = useRef(0)
 
@@ -200,7 +210,7 @@ export function RuntimeLogWindowPage() {
       setQueryError(undefined)
 
       try {
-        const entries = await queryRuntimeLogs(buildLogQuery(level, scope, provider, accountId))
+        const entries = await queryRuntimeLogs(buildLogQuery(level, scope, provider, accountId, sourceId))
         if (queryRequestRef.current !== requestId) {
           return
         }
@@ -221,11 +231,21 @@ export function RuntimeLogWindowPage() {
         }
       }
     },
-    [accountId, level, provider, scope],
+    [accountId, level, provider, scope, sourceId],
   )
 
   useEffect(() => {
     void reportRuntimeLogWindowReady()
+  }, [])
+
+  useEffect(() => {
+    let unsubscribe: (() => void) | undefined
+    void subscribeToRuntimeLogWindowIntent((intent) => {
+      setSourceId(intent.sourceId ?? 'all')
+      setAccountId(intent.accountId ?? 'all')
+      setLevel(intent.level ?? 'all')
+    }).then((value) => { unsubscribe = value }).catch(() => undefined)
+    return () => unsubscribe?.()
   }, [])
 
   useEffect(() => {
@@ -259,6 +279,7 @@ export function RuntimeLogWindowPage() {
             scope,
             provider,
             accountId,
+            sourceId,
           })
         ) {
           return
@@ -282,7 +303,7 @@ export function RuntimeLogWindowPage() {
       disposed = true
       unsubscribe?.()
     }
-  }, [accountId, level, provider, scope])
+  }, [accountId, level, provider, scope, sourceId])
 
   useEffect(() => {
     if (!contextReady) {
@@ -372,6 +393,15 @@ export function RuntimeLogWindowPage() {
                   </option>
                 ))}
               </select>
+            </label>
+
+            <label className="accounts-config-field">
+              <span>Source ID</span>
+              <input
+                onChange={(event) => setSourceId(event.target.value.trim() || 'all')}
+                placeholder="all"
+                value={sourceId === 'all' ? '' : sourceId}
+              />
             </label>
           </div>
         </section>

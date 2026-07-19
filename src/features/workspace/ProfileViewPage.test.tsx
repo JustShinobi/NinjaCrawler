@@ -9,13 +9,17 @@ const bridgeMocks = vi.hoisted(() => ({
   loadSourceMediaGallery: vi.fn(),
   loadMediaThumbnails: vi.fn(),
   deleteSourceMedia: vi.fn(),
+  enqueueMediaDedupeScan: vi.fn(),
+  loadMediaDedupeStatus: vi.fn(),
   loadWorkspaceSnapshot: vi.fn(),
   openExternalTarget: vi.fn(),
   openMediaFile: vi.fn(),
   revealMediaInFolder: vi.fn(),
+  openWorkspaceHealthWindow: vi.fn(),
   runSourceSync: vi.fn(),
   subscribeToProfileViewSource: vi.fn(),
   subscribeToSourceSyncQueue: vi.fn(),
+  subscribeToDesktopRuntimeEvents: vi.fn(),
 }))
 
 vi.mock('../../bridge/desktop', () => bridgeMocks)
@@ -163,6 +167,31 @@ describe('ProfileViewPage', () => {
     bridgeMocks.loadWorkspaceSnapshot.mockResolvedValue({ sources: [] })
     bridgeMocks.subscribeToProfileViewSource.mockResolvedValue(() => undefined)
     bridgeMocks.subscribeToSourceSyncQueue.mockResolvedValue(() => undefined)
+    bridgeMocks.subscribeToDesktopRuntimeEvents.mockResolvedValue(() => undefined)
+    bridgeMocks.loadMediaDedupeStatus.mockResolvedValue({
+      state: 'idle',
+      stage: 'idle',
+      resourceProfile: 'balanced',
+      similarityScope: 'source',
+      filesProcessed: 0,
+      filesTotal: 0,
+      bytesProcessed: 0,
+      bytesTotal: 0,
+      cancellable: false,
+      similarityEngine: {},
+      perceptualSourcesProcessed: 0,
+      perceptualSourcesTotal: 0,
+      perceptualSourcesFailed: 0,
+      elapsedSeconds: 0,
+      sourceJobs: [],
+      updatedAt: '',
+    })
+    bridgeMocks.enqueueMediaDedupeScan.mockResolvedValue({
+      state: 'queued',
+      stage: 'inventory',
+      sourceScope: 'src-1',
+    })
+    bridgeMocks.openWorkspaceHealthWindow.mockResolvedValue(undefined)
     bridgeMocks.openExternalTarget.mockResolvedValue(undefined)
     bridgeMocks.openMediaFile.mockResolvedValue(undefined)
     bridgeMocks.revealMediaInFolder.mockResolvedValue(undefined)
@@ -778,6 +807,22 @@ describe('ProfileViewPage', () => {
     await waitFor(() =>
       expect(bridgeMocks.runSourceSync).toHaveBeenCalledWith('src-1', { trigger: 'manual' }),
     )
+  })
+
+  it('starts profile-scoped dedupe and opens Storage & Cleanup with feedback', async () => {
+    render(<ProfileViewPage initialSourceId="src-1" />)
+
+    fireEvent.click(await screen.findByRole('button', { name: /dedupe profile media/i }))
+
+    await waitFor(() => {
+      expect(bridgeMocks.enqueueMediaDedupeScan).toHaveBeenCalledWith({
+        sourceId: 'src-1',
+        provider: 'tiktok',
+        resourceProfile: 'balanced',
+      })
+      expect(bridgeMocks.openWorkspaceHealthWindow).toHaveBeenCalledWith({ initialTab: 'storage' })
+    })
+    expect(screen.getByRole('status').textContent).toContain('Workspace Health › Storage & Cleanup')
   })
 
   it('reloads the gallery and snapshot when a sync for this profile finishes', async () => {

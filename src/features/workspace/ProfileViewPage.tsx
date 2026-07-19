@@ -5,14 +5,18 @@ import { convertFileSrc } from '@tauri-apps/api/core'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import {
   deleteSourceMedia,
+  enqueueMediaDedupeScan,
+  loadMediaDedupeStatus,
   loadMediaThumbnails,
   loadSourceMediaGallery,
   loadWorkspaceSnapshot,
   openExternalTarget,
   openMediaFile,
+  openWorkspaceHealthWindow,
   revealMediaInFolder,
   runSourceSync,
   subscribeToSourceSyncQueue,
+  subscribeToDesktopRuntimeEvents,
 } from '../../bridge/desktop'
 import { DEFAULT_PROVIDER_CATALOG } from '../../domain/defaults'
 import type {
@@ -20,6 +24,7 @@ import type {
   ProviderKey,
   SourceMediaGallery,
   SourceProfile,
+  MediaDedupeJobStatus,
 } from '../../domain/models'
 import { WindowShell } from '../brand/WindowShell'
 import { WindowTitlebar } from '../brand/WindowTitlebar'
@@ -410,6 +415,12 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
   const [bioExpanded, setBioExpanded] = useState(false)
   // Estado ao vivo deste perfil na fila de sync (dirige o botão "Sync now").
   const [syncActivity, setSyncActivity] = useState<'idle' | 'queued' | 'running'>('idle')
+  const [dedupeStatus, setDedupeStatus] = useState<MediaDedupeJobStatus>()
+  const [dedupeLaunching, setDedupeLaunching] = useState(false)
+  const [dedupeFeedback, setDedupeFeedback] = useState<{
+    tone: 'success' | 'error'
+    message: string
+  }>()
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string>()
   const [lightboxIndex, setLightboxIndex] = useState<number>()
@@ -629,6 +640,28 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
       unlisten?.()
     }
   }, [reloadSilently])
+
+  useEffect(() => {
+    let unlisten: (() => void) | undefined
+    let active = true
+    void loadMediaDedupeStatus()
+      .then((status) => {
+        if (active) setDedupeStatus(status)
+      })
+      .catch(() => undefined)
+    void subscribeToDesktopRuntimeEvents({
+      onMediaDedupeStatusChanged: (status) => setDedupeStatus(status),
+    })
+      .then((dispose) => {
+        if (active) unlisten = dispose
+        else dispose()
+      })
+      .catch(() => undefined)
+    return () => {
+      active = false
+      unlisten?.()
+    }
+  }, [])
 
   // Seções presentes (feed/reels/stories/…), em ordem estável. O chip de
   // Highlights aparece se qualquer post pertence a um álbum, mesmo que o arquivo
@@ -1113,6 +1146,50 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
       window.alert(`Failed to start the sync.\n${message}`)
     })
   }, [sourceId, syncActivity])
+
+  const mediaCleanupActive = Boolean(
+    dedupeStatus && ['queued', 'scanning', 'applying'].includes(dedupeStatus.state),
+  )
+  const thisProfileDedupeActive = Boolean(
+    mediaCleanupActive && sourceId && dedupeStatus?.sourceScope === sourceId,
+  )
+
+  const handleDedupe = useCallback(async () => {
+    if (!sourceId || dedupeLaunching) return
+    if (thisProfileDedupeActive) {
+      await openWorkspaceHealthWindow({ initialTab: 'storage' }).catch((actionError) =>
+        handleActionError('Open media cleanup', actionError),
+      )
+      return
+    }
+    setDedupeLaunching(true)
+    setDedupeFeedback(undefined)
+    try {
+      const status = await enqueueMediaDedupeScan({
+        sourceId,
+        ...(gallery?.provider ? { provider: gallery.provider } : {}),
+        resourceProfile: 'balanced',
+      })
+      setDedupeStatus(status)
+      setDedupeFeedback({
+        tone: 'success',
+        message: 'Profile dedupe started in Workspace Health › Storage & Cleanup.',
+      })
+      try {
+        await openWorkspaceHealthWindow({ initialTab: 'storage' })
+      } catch {
+        setDedupeFeedback({
+          tone: 'success',
+          message: 'Profile dedupe started. Open Tools › Workspace Health › Storage & Cleanup to follow it.',
+        })
+      }
+    } catch (dedupeError) {
+      const message = dedupeError instanceof Error ? dedupeError.message : String(dedupeError)
+      setDedupeFeedback({ tone: 'error', message: `Could not start profile dedupe. ${message}` })
+    } finally {
+      setDedupeLaunching(false)
+    }
+  }, [dedupeLaunching, gallery?.provider, handleActionError, sourceId, thisProfileDedupeActive])
 
   const handleRefreshMediaStats = useCallback(() => {
     if (!sourceId || statsRefreshState === 'queueing') return
@@ -1635,6 +1712,36 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
               </span>
             </button>
           ) : null}
+          {sourceId ? (
+            <button
+              className={`ghost-button profile-view-header-action profile-view-sync-now profile-view-dedupe${thisProfileDedupeActive ? ' is-running' : ''}`}
+              disabled={dedupeLaunching || (mediaCleanupActive && !thisProfileDedupeActive)}
+              onClick={() => void handleDedupe()}
+              type="button"
+              aria-label={thisProfileDedupeActive ? 'View profile dedupe progress' : 'Dedupe profile media'}
+              title={
+                thisProfileDedupeActive
+                  ? 'View this profile scan in Workspace Health › Storage & Cleanup'
+                  : mediaCleanupActive
+                    ? 'Another media cleanup job is already running'
+                    : 'Scan this profile for duplicate media'
+              }
+            >
+              <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true" focusable="false">
+                <rect x="4" y="5" width="10" height="10" rx="2" fill="none" stroke="currentColor" strokeWidth="1.7" />
+                <path d="M10 9h6a4 4 0 0 1 4 4v2a4 4 0 0 1-4 4h-5a4 4 0 0 1-4-4" fill="none" stroke="currentColor" strokeLinecap="round" strokeWidth="1.7" />
+              </svg>
+              <span className="profile-view-header-action-label">
+                {dedupeLaunching
+                  ? 'Starting…'
+                  : thisProfileDedupeActive
+                    ? 'View dedupe'
+                    : mediaCleanupActive
+                      ? 'Cleanup busy'
+                      : 'Dedupe'}
+              </span>
+            </button>
+          ) : null}
           {popularitySortAvailable && sourceId ? (
             <button
               className={`ghost-button profile-view-header-action profile-view-stats-refresh is-${statsRefreshState}`}
@@ -1689,6 +1796,28 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
           ) : null}
         </div>
       </header>
+
+      {dedupeFeedback ? (
+        <div
+          className={`profile-view-dedupe-feedback is-${dedupeFeedback.tone}`}
+          role={dedupeFeedback.tone === 'error' ? 'alert' : 'status'}
+        >
+          <span>{dedupeFeedback.message}</span>
+          {dedupeFeedback.tone === 'success' ? (
+            <button type="button" onClick={() => void openWorkspaceHealthWindow({ initialTab: 'storage' })}>
+              View progress
+            </button>
+          ) : null}
+          <button
+            className="profile-view-dedupe-feedback-close"
+            type="button"
+            aria-label="Dismiss dedupe message"
+            onClick={() => setDedupeFeedback(undefined)}
+          >
+            ×
+          </button>
+        </div>
+      ) : null}
 
       {hasMedia ? (
         <div className={`profile-view-toolbar${selectMode ? ' is-selecting' : ''}`}>

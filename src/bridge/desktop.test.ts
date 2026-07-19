@@ -517,6 +517,23 @@ describe('loadWorkspaceSnapshot', () => {
     })
   })
 
+  it('opens Workspace Health on Storage & Cleanup and receives follow-up intents', async () => {
+    invokeMock.mockResolvedValue(undefined)
+    const desktop = await import('./desktop')
+    const handler = vi.fn()
+
+    await desktop.openWorkspaceHealthWindow({ initialTab: 'storage' })
+    const unsubscribe = await desktop.subscribeToWorkspaceHealthWindowIntent(handler)
+    eventHandlers.get('runtime://workspace-health-window-intent')?.({
+      payload: { initial_tab: 'storage' },
+    })
+
+    expect(invokeMock).toHaveBeenCalledWith('open_workspace_health_window', {
+      intent: { initialTab: 'storage' },
+    })
+    expect(handler).toHaveBeenCalledWith({ initialTab: 'storage' })
+    unsubscribe()
+  })
   it('keeps openProfileEditorWindow as alias for source editor command', async () => {
     invokeMock.mockResolvedValue(undefined)
     const desktop = await import('./desktop')

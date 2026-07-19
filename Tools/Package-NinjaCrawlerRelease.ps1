@@ -17,6 +17,11 @@ if ($CompanionOnly -and $SkipCompanion) {
     throw "-CompanionOnly and -SkipCompanion are mutually exclusive."
 }
 
+# The tauri-plugin-updater `latest.json` manifest is NOT produced here. It is
+# generated in the release workflow's publish job by Tools/New-UpdaterManifest.ps1,
+# which signs the installer out-of-band (bundle.createUpdaterArtifacts is off) so
+# the signing key never reaches the unprivileged build.
+
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $releaseRoot = if ([string]::IsNullOrWhiteSpace($BuildRoot)) {
     $path = if ([string]::IsNullOrWhiteSpace($env:CARGO_TARGET_DIR)) {

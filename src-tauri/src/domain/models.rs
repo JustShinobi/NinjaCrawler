@@ -397,6 +397,12 @@ pub struct AccountsWindowIntent {
     pub initial_mode: Option<String>,
 }
 
+#[derive(Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceHealthWindowIntent {
+    pub initial_tab: Option<String>,
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SourceEditorSeedIntent {
@@ -1377,6 +1383,232 @@ pub struct SyncPlanRun {
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct WorkspaceHealthIncident {
+    pub id: String,
+    pub severity: String,
+    pub kind: String,
+    pub title: String,
+    pub detail: String,
+    pub source_id: Option<String>,
+    pub account_id: Option<String>,
+    pub volume_key: Option<String>,
+    pub evidence: Vec<String>,
+    pub available_actions: Vec<String>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceHealthItem {
+    pub source_id: String,
+    pub provider: String,
+    pub handle: String,
+    pub display_name: String,
+    pub account_id: Option<String>,
+    pub last_synced_at: Option<String>,
+    pub latest_status: Option<String>,
+    pub consecutive_failures: u32,
+    pub recurring_failure: bool,
+    pub freshness: String,
+    pub severity: String,
+    pub problem_code: Option<String>,
+    pub problem_message: Option<String>,
+    pub recent_runs: Vec<SourceSyncRun>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountHealthItem {
+    pub account_id: String,
+    pub provider: String,
+    pub display_name: String,
+    pub auth_state: String,
+    pub has_session: bool,
+    pub has_secret: bool,
+    pub last_validated_at: Option<String>,
+    pub last_validation_error: Option<String>,
+    pub impacted_source_count: u32,
+    pub severity: String,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StorageRootHealth {
+    pub path: String,
+    pub source_count: u32,
+    pub primary: bool,
+    pub accessible: bool,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StorageVolumeHealth {
+    pub volume_key: String,
+    pub total_bytes: u64,
+    pub available_bytes: u64,
+    pub used_bytes: u64,
+    pub available_percent: f64,
+    pub severity: String,
+    pub roots: Vec<StorageRootHealth>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceHealthCounts {
+    pub source_count: u32,
+    pub affected_source_count: u32,
+    pub recurring_failure_count: u32,
+    pub degraded_account_count: u32,
+    pub critical_account_count: u32,
+    pub storage_attention_count: u32,
+    pub critical_issue_count: u32,
+    pub attention_issue_count: u32,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceHealthSnapshot {
+    pub overall_status: String,
+    pub generated_at: String,
+    pub counts: WorkspaceHealthCounts,
+    pub incidents: Vec<WorkspaceHealthIncident>,
+    pub sources: Vec<SourceHealthItem>,
+    pub accounts: Vec<AccountHealthItem>,
+    pub volumes: Vec<StorageVolumeHealth>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaDedupeFile {
+    pub path: String,
+    pub source_id: Option<String>,
+    pub provider: Option<String>,
+    pub media_type: String,
+    pub size_bytes: u64,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    pub duration_ms: Option<u64>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaDedupeGroup {
+    pub id: String,
+    pub kind: String,
+    pub confidence_percent: Option<u32>,
+    pub reclaimable_bytes: u64,
+    pub consolidatable: bool,
+    pub reason: Option<String>,
+    pub files: Vec<MediaDedupeFile>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaDedupeScanResult {
+    pub scan_id: String,
+    pub provider_scope: Option<String>,
+    pub source_scope: Option<String>,
+    pub resource_profile: String,
+    pub similarity_scope: String,
+    pub status: String,
+    pub files_scanned: u64,
+    pub bytes_scanned: u64,
+    pub exact_group_count: u32,
+    pub similar_group_count: u32,
+    pub reclaimable_bytes: u64,
+    pub skipped_video_similarity_count: u32,
+    pub started_at: String,
+    pub finished_at: Option<String>,
+    pub exact_groups: Vec<MediaDedupeGroup>,
+    pub similar_groups: Vec<MediaDedupeGroup>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaDedupeEngineStatus {
+    pub status: String,
+    pub version: String,
+    pub installed: bool,
+    pub ffmpeg_available: bool,
+    pub ffmpeg_status: String,
+    pub ffmpeg_source: Option<String>,
+    pub ffmpeg_version: Option<String>,
+    pub ffmpeg_install_path: Option<String>,
+    pub ffmpeg_error: Option<String>,
+    pub install_path: Option<String>,
+    pub error: Option<String>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaDedupeSourceJobStatus {
+    pub source_id: String,
+    pub provider: String,
+    pub source_path: String,
+    pub status: String,
+    pub stage: String,
+    pub progress_percent: Option<u32>,
+    pub files_processed: u64,
+    pub files_total: u64,
+    pub current_path: Option<String>,
+    pub error: Option<String>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaDedupeJobStatus {
+    pub state: String,
+    pub stage: String,
+    pub scan_id: Option<String>,
+    pub provider_scope: Option<String>,
+    pub source_scope: Option<String>,
+    pub resource_profile: String,
+    pub similarity_scope: String,
+    pub files_processed: u64,
+    pub files_total: u64,
+    pub bytes_processed: u64,
+    pub bytes_total: u64,
+    pub current_path: Option<String>,
+    pub current_root: Option<String>,
+    pub cancellable: bool,
+    pub error: Option<String>,
+    pub similarity_engine: MediaDedupeEngineStatus,
+    pub perceptual_sources_processed: u32,
+    pub perceptual_sources_total: u32,
+    pub perceptual_sources_failed: u32,
+    pub elapsed_seconds: u64,
+    pub estimated_seconds_remaining: Option<u64>,
+    pub throughput_per_second: Option<f64>,
+    pub source_jobs: Vec<MediaDedupeSourceJobStatus>,
+    pub latest_scan: Option<MediaDedupeScanResult>,
+    pub updated_at: String,
+}
+
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaDedupeScanInput {
+    pub provider: Option<String>,
+    pub source_id: Option<String>,
+    pub resource_profile: Option<String>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaDedupeSimilarSelection {
+    pub group_id: String,
+    pub keep_path: String,
+    pub remove_paths: Vec<String>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaDedupeApplyInput {
+    pub scan_id: String,
+    pub consolidate_exact: bool,
+    pub similar_selections: Vec<MediaDedupeSimilarSelection>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AppSetting {
     pub key: String,
     pub value: String,
@@ -1462,6 +1694,15 @@ pub struct RuntimeLogQuery {
     pub scope: Option<String>,
     pub provider: Option<String>,
     pub account_id: Option<String>,
+    pub source_id: Option<String>,
+}
+
+#[derive(Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeLogWindowIntent {
+    pub source_id: Option<String>,
+    pub account_id: Option<String>,
+    pub level: Option<String>,
 }
 
 #[derive(Clone, Deserialize, Default)]

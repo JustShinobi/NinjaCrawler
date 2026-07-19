@@ -9,8 +9,9 @@ use tauri::{Emitter, Manager, PhysicalPosition, Runtime, Window, WindowEvent};
 use tauri_plugin_window_state::{StateFlags, WindowExt};
 
 use crate::domain::models::{
-    AccountsWindowIntent, DesktopRuntimeState, PlanEditorWindowIntent, RuntimeLogWindowStatus,
-    SourceEditorWindowIntent, WorkspaceSnapshot,
+    AccountsWindowIntent, DesktopRuntimeState, PlanEditorWindowIntent, RuntimeLogWindowIntent,
+    RuntimeLogWindowStatus, SourceEditorWindowIntent, WorkspaceHealthWindowIntent,
+    WorkspaceSnapshot,
 };
 
 #[derive(Clone, Serialize)]
@@ -19,8 +20,8 @@ pub struct BatchEditorIntent {
     pub source_ids: Vec<String>,
 }
 use crate::infrastructure::{
-    companion_api, connector_debug, database, media_path_migration_runtime, runtime_log,
-    scheduler_runtime, source_sync_runtime, storage, workspace_repository,
+    companion_api, connector_debug, database, media_dedupe_runtime, media_path_migration_runtime,
+    runtime_log, scheduler_runtime, source_sync_runtime, storage, workspace_repository,
 };
 #[cfg(windows)]
 use winreg::enums::HKEY_CURRENT_USER;
@@ -32,12 +33,14 @@ pub const WORKSPACE_SNAPSHOT_CHANGED_EVENT: &str = "runtime://workspace-snapshot
 pub const FOREGROUND_ROUTE_EVENT: &str = "runtime://foreground-route";
 pub const RUNTIME_LOG_WINDOW_READY_EVENT: &str = "runtime://runtime-log-window-ready";
 pub const RUNTIME_LOG_WINDOW_FAILED_EVENT: &str = "runtime://runtime-log-window-failed";
+pub const RUNTIME_LOG_WINDOW_INTENT_EVENT: &str = "runtime://runtime-log-window-intent";
 pub const ACCOUNTS_WINDOW_INTENT_EVENT: &str = "runtime://accounts-window-intent";
 pub const PROFILE_VIEW_WINDOW_SOURCE_EVENT: &str = "runtime://profile-view-source";
 pub const SOURCE_EDITOR_WINDOW_INTENT_EVENT: &str = "runtime://source-editor-window-intent";
 pub const PROFILE_EDITOR_WINDOW_INTENT_EVENT: &str = "runtime://profile-editor-window-intent";
 pub const PLANS_WINDOW_INTENT_EVENT: &str = "runtime://plans-window-intent";
 pub const BATCH_EDITOR_WINDOW_INTENT_EVENT: &str = "runtime://batch-editor-window-intent";
+pub const WORKSPACE_HEALTH_WINDOW_INTENT_EVENT: &str = "runtime://workspace-health-window-intent";
 
 const MAIN_WINDOW_LABEL: &str = "main";
 const ACCOUNTS_WINDOW_LABEL: &str = "accounts";
@@ -47,6 +50,7 @@ const RUNTIME_LOG_WINDOW_LABEL: &str = "runtime-log";
 const CONNECTOR_DEBUG_WINDOW_LABEL: &str = "connector-debug";
 const SCHEDULER_WINDOW_LABEL: &str = "scheduler-plans";
 const SOURCE_SYNC_QUEUE_WINDOW_LABEL: &str = "source-sync-queue";
+const WORKSPACE_HEALTH_WINDOW_LABEL: &str = "workspace-health";
 const CONNECTOR_RUNTIMES_WINDOW_LABEL: &str = "connector-runtimes";
 const SINGLE_VIDEOS_WINDOW_LABEL: &str = "single-videos";
 const IMPORT_WINDOW_LABEL: &str = "import";
@@ -57,6 +61,7 @@ const MANAGED_STANDALONE_WINDOW_LABELS: &[&str] = &[
     CONNECTOR_DEBUG_WINDOW_LABEL,
     SCHEDULER_WINDOW_LABEL,
     SOURCE_SYNC_QUEUE_WINDOW_LABEL,
+    WORKSPACE_HEALTH_WINDOW_LABEL,
     CONNECTOR_RUNTIMES_WINDOW_LABEL,
     ACCOUNTS_WINDOW_LABEL,
     PROFILE_EDITOR_WINDOW_LABEL,
@@ -145,6 +150,7 @@ pub fn start_runtime_services(app: tauri::AppHandle) -> Result<(), String> {
     std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_millis(2000));
         media_path_migration_runtime::restore_persisted_queue(&app_handle);
+        media_dedupe_runtime::recover_interrupted_jobs();
         source_sync_runtime::restore_persisted_queue(&app_handle);
     });
     Ok(())
@@ -330,7 +336,10 @@ pub fn system_short_date_pattern() -> Result<String, String> {
     }
 }
 
-pub fn open_runtime_log_window(app: &tauri::AppHandle) -> Result<(), String> {
+pub fn open_runtime_log_window(
+    app: &tauri::AppHandle,
+    intent: Option<RuntimeLogWindowIntent>,
+) -> Result<(), String> {
     if let Some(controller) = app.try_state::<DesktopRuntimeController>() {
         controller.register_runtime_log_open_request()?;
     }
@@ -339,6 +348,11 @@ pub fn open_runtime_log_window(app: &tauri::AppHandle) -> Result<(), String> {
         window.show().map_err(|error| error.to_string())?;
         window.unminimize().map_err(|error| error.to_string())?;
         window.set_focus().map_err(|error| error.to_string())?;
+        if let Some(intent) = intent {
+            window
+                .emit(RUNTIME_LOG_WINDOW_INTENT_EVENT, intent)
+                .map_err(|error| error.to_string())?;
+        }
         return Ok(());
     }
 
@@ -349,7 +363,7 @@ pub fn open_runtime_log_window(app: &tauri::AppHandle) -> Result<(), String> {
     // thread is still blocked waiting for the IPC response → deadlock.
     let app_handle = app.clone();
     std::thread::spawn(move || {
-        if let Err(error) = create_runtime_log_window(&app_handle) {
+        if let Err(error) = create_runtime_log_window(&app_handle, intent) {
             eprintln!("[runtime-log] failed to create window: {error}");
         }
     });
@@ -434,6 +448,31 @@ pub fn open_source_sync_queue_window(app: &tauri::AppHandle) -> Result<(), Strin
         }
     });
 
+    Ok(())
+}
+
+pub fn open_workspace_health_window(
+    app: &tauri::AppHandle,
+    intent: Option<WorkspaceHealthWindowIntent>,
+) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window(WORKSPACE_HEALTH_WINDOW_LABEL) {
+        window.show().map_err(|error| error.to_string())?;
+        window.unminimize().map_err(|error| error.to_string())?;
+        window.set_focus().map_err(|error| error.to_string())?;
+        if let Some(intent_payload) = intent {
+            window
+                .emit(WORKSPACE_HEALTH_WINDOW_INTENT_EVENT, intent_payload)
+                .map_err(|error| error.to_string())?;
+        }
+        return Ok(());
+    }
+
+    let app_handle = app.clone();
+    std::thread::spawn(move || {
+        if let Err(error) = create_workspace_health_window(&app_handle, intent) {
+            eprintln!("[workspace-health] failed to create window: {error}");
+        }
+    });
     Ok(())
 }
 
@@ -652,11 +691,14 @@ fn apply_batch_editor_window_constraints(window: &tauri::WebviewWindow) -> Resul
     Ok(())
 }
 
-fn create_runtime_log_window(app: &tauri::AppHandle) -> Result<(), String> {
+fn create_runtime_log_window(
+    app: &tauri::AppHandle,
+    intent: Option<RuntimeLogWindowIntent>,
+) -> Result<(), String> {
     let window = tauri::WebviewWindowBuilder::new(
         app,
         RUNTIME_LOG_WINDOW_LABEL,
-        tauri::WebviewUrl::App(runtime_log_entrypoint().into()),
+        tauri::WebviewUrl::App(runtime_log_entrypoint(intent.as_ref()).into()),
     )
     .title("Runtime Log")
     .inner_size(1100.0, 760.0)
@@ -751,6 +793,35 @@ fn create_source_sync_queue_window(app: &tauri::AppHandle) -> Result<(), String>
         WindowSizeSpec {
             width: 1180,
             height: 780,
+        },
+        |_| Ok(()),
+    )
+}
+
+fn create_workspace_health_window(
+    app: &tauri::AppHandle,
+    intent: Option<WorkspaceHealthWindowIntent>,
+) -> Result<(), String> {
+    let window = tauri::WebviewWindowBuilder::new(
+        app,
+        WORKSPACE_HEALTH_WINDOW_LABEL,
+        tauri::WebviewUrl::App(workspace_health_entrypoint(intent.as_ref()).into()),
+    )
+    .title("Workspace Health")
+    .inner_size(1240.0, 820.0)
+    .min_inner_size(900.0, 600.0)
+    .decorations(false)
+    .closable(true)
+    .visible(false)
+    .build()
+    .map_err(|error| error.to_string())?;
+
+    show_new_standalone_window(
+        app,
+        &window,
+        WindowSizeSpec {
+            width: 1240,
+            height: 820,
         },
         |_| Ok(()),
     )
@@ -1227,8 +1298,43 @@ fn clamp_child_axis(desired: i32, child_size: i32, monitor_origin: i32, monitor_
     desired.clamp(monitor_origin, max_position)
 }
 
-fn runtime_log_entrypoint() -> String {
-    "runtime-log.html".to_string()
+fn runtime_log_entrypoint(intent: Option<&RuntimeLogWindowIntent>) -> String {
+    let Some(intent) = intent else {
+        return "runtime-log.html".to_string();
+    };
+    let mut query = Vec::new();
+    if let Some(source_id) = intent
+        .source_id
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        query.push(format!(
+            "sourceId={}",
+            encode_query_component(source_id.trim())
+        ));
+    }
+    if let Some(account_id) = intent
+        .account_id
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        query.push(format!(
+            "accountId={}",
+            encode_query_component(account_id.trim())
+        ));
+    }
+    if let Some(level) = intent
+        .level
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        query.push(format!("level={}", encode_query_component(level.trim())));
+    }
+    if query.is_empty() {
+        "runtime-log.html".to_string()
+    } else {
+        format!("runtime-log.html?{}", query.join("&"))
+    }
 }
 
 fn scheduler_entrypoint() -> String {
@@ -1322,6 +1428,19 @@ fn accounts_entrypoint(intent: Option<&AccountsWindowIntent>) -> String {
 
 fn source_sync_queue_entrypoint() -> String {
     "queue-status.html".to_string()
+}
+
+fn workspace_health_entrypoint(intent: Option<&WorkspaceHealthWindowIntent>) -> String {
+    let initial_tab = intent
+        .and_then(|value| value.initial_tab.as_deref())
+        .filter(|value| matches!(*value, "overview" | "sources" | "accounts" | "storage"));
+    match initial_tab {
+        Some(value) => format!(
+            "workspace-health.html?initialTab={}",
+            encode_query_component(value)
+        ),
+        None => "workspace-health.html".to_string(),
+    }
 }
 
 fn profile_view_entrypoint(source_id: &str) -> String {

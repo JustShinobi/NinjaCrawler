@@ -7,6 +7,7 @@ import {
   runPendingMigrations,
   subscribeToMigrationProgress,
 } from '../../bridge/desktop'
+import { closeDesktopWindow } from '../../utils/closeDesktopWindow'
 
 type Phase = 'checking' | 'ready' | 'pending' | 'running' | 'error'
 
@@ -39,6 +40,8 @@ export function MigrationGate({ children }: { children: ReactNode }) {
   const [status, setStatus] = useState<MigrationStatus | null>(null)
   const [progress, setProgress] = useState<MigrationProgress | null>(null)
   const [error, setError] = useState('')
+  const [backupFolderError, setBackupFolderError] = useState('')
+  const [openingBackupFolder, setOpeningBackupFolder] = useState(false)
   const disposeProgressRef = useRef<(() => void) | null>(null)
 
   useEffect(() => {
@@ -65,6 +68,8 @@ export function MigrationGate({ children }: { children: ReactNode }) {
   useEffect(() => () => disposeProgressRef.current?.(), [])
 
   const handleConfirm = useCallback(() => {
+    setError('')
+    setBackupFolderError('')
     setPhase('running')
     setProgress(null)
     void subscribeToMigrationProgress(setProgress).then((dispose) => {
@@ -80,6 +85,22 @@ export function MigrationGate({ children }: { children: ReactNode }) {
         disposeProgressRef.current?.()
         disposeProgressRef.current = null
       })
+  }, [])
+
+  const handleOpenBackupsFolder = useCallback(async () => {
+    setBackupFolderError('')
+    setOpeningBackupFolder(true)
+    try {
+      await openBackupsFolder()
+    } catch (openError) {
+      setBackupFolderError(
+        openError instanceof Error
+          ? openError.message
+          : `Could not open the backups folder: ${String(openError)}`,
+      )
+    } finally {
+      setOpeningBackupFolder(false)
+    }
   }, [])
 
   if (phase === 'ready') return <>{children}</>
@@ -103,6 +124,17 @@ export function MigrationGate({ children }: { children: ReactNode }) {
   return (
     <div className="migration-screen" role="dialog" aria-modal="true" aria-label="Database update">
       <div className="migration-card">
+        {phase !== 'running' ? (
+          <button
+            className="migration-close"
+            type="button"
+            aria-label="Close NinjaCrawler"
+            title="Close NinjaCrawler"
+            onClick={() => void closeDesktopWindow()}
+          >
+            ×
+          </button>
+        ) : null}
         <div className="migration-logo" aria-hidden="true">
           N
         </div>
@@ -176,6 +208,11 @@ export function MigrationGate({ children }: { children: ReactNode }) {
               backup manually from the backups folder.
             </p>
             {error ? <pre className="migration-error">{error}</pre> : null}
+            {backupFolderError ? (
+              <p className="migration-action-error" role="alert">
+                {backupFolderError}
+              </p>
+            ) : null}
             <div className="migration-actions">
               <button className="migration-primary" type="button" onClick={handleConfirm}>
                 Retry
@@ -183,9 +220,10 @@ export function MigrationGate({ children }: { children: ReactNode }) {
               <button
                 className="migration-secondary"
                 type="button"
-                onClick={() => void openBackupsFolder()}
+                disabled={openingBackupFolder}
+                onClick={() => void handleOpenBackupsFolder()}
               >
-                Open backups folder
+                {openingBackupFolder ? 'Opening…' : 'Open backups folder'}
               </button>
             </div>
           </>

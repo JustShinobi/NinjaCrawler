@@ -3,10 +3,13 @@ import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow'
 import {
   enqueueSourceMediaPathMigration,
   checkAppUpdate,
+  installAppUpdate,
+  onAppUpdateProgress,
   checkSourceAvailability,
   enqueueSourceDelete,
   loadSourceDeleteQueueStatus,
   loadSourceSyncQueueStatus,
+  loadWorkspaceHealth,
   getAppBuildInfo,
   openAccountsWindow,
   openConnectorRuntimesWindow,
@@ -17,6 +20,7 @@ import {
   openImportWindow,
   openProfileViewWindow,
   openRuntimeLogWindow,
+  openWorkspaceHealthWindow,
   openSchedulerWindow,
   openSourceSyncQueueWindow,
   pickImportRootFolder,
@@ -32,6 +36,7 @@ import {
 import type {
   AccountsWindowIntent,
   AppBuildInfo,
+  AppUpdateProgress,
   AppUpdateStatus,
   ConnectorRuntimeStatus,
   InstagramPresetSlot,
@@ -41,6 +46,7 @@ import type {
   SourceAvailabilityCheckResult,
   SourceProfileDeleteMode,
   SourceSyncQueueStatus,
+  WorkspaceHealthSnapshot,
 } from './domain/models'
 import { SettingsPage } from './features/settings/SettingsPage'
 import { ConnectorPreparationScreen } from './features/connectors/ConnectorPreparationScreen'
@@ -155,6 +161,9 @@ function App() {
   const [appUpdateStatus, setAppUpdateStatus] = useState<AppUpdateStatus>()
   const [appUpdateChecking, setAppUpdateChecking] = useState(false)
   const [appUpdateError, setAppUpdateError] = useState<string>()
+  const [appUpdateInstalling, setAppUpdateInstalling] = useState(false)
+  const [appUpdateProgress, setAppUpdateProgress] = useState<AppUpdateProgress>()
+  const [appUpdateInstallError, setAppUpdateInstallError] = useState<string>()
   const [availabilityCheckDialog, setAvailabilityCheckDialog] = useState<AvailabilityCheckDialogState>()
   const [availabilityAccountPrompt, setAvailabilityAccountPrompt] = useState<AvailabilityAccountPromptState>()
   const [openMenu, setOpenMenu] = useState<string | null>(null)
@@ -172,6 +181,7 @@ function App() {
   const [sourceDeleteSubmitting, setSourceDeleteSubmitting] = useState(false)
   const [queueStatus, setQueueStatus] = useState<SourceSyncQueueStatus>(() => createEmptyQueueStatus())
   const [deleteQueueStatus, setDeleteQueueStatus] = useState<SourceDeleteQueueStatus>(() => createEmptyDeleteQueueStatus())
+  const [workspaceHealth, setWorkspaceHealth] = useState<WorkspaceHealthSnapshot>()
   const runPresetSyncShortcutRef = useRef<(slot: InstagramPresetSlot) => void>(() => undefined)
   const automaticUpdateCheckStartedRef = useRef(false)
   const searchInputRef = useRef<HTMLInputElement | null>(null)
@@ -204,6 +214,25 @@ function App() {
       setAppUpdateError(updateError instanceof Error ? updateError.message : String(updateError))
     } finally {
       setAppUpdateChecking(false)
+    }
+  }, [])
+
+  const runAppUpdateInstall = useCallback(async () => {
+    setAppUpdateInstalling(true)
+    setAppUpdateInstallError(undefined)
+    setAppUpdateProgress(undefined)
+    let unlisten: (() => void) | undefined
+    try {
+      unlisten = await onAppUpdateProgress((progress) => setAppUpdateProgress(progress))
+      // On success the backend relaunches the app, so this never resolves.
+      await installAppUpdate()
+    } catch (installError) {
+      setAppUpdateInstallError(
+        installError instanceof Error ? installError.message : String(installError),
+      )
+      setAppUpdateInstalling(false)
+    } finally {
+      unlisten?.()
     }
   }, [])
 
@@ -287,6 +316,24 @@ function App() {
       .catch(() => {
         setDeleteQueueStatus(createEmptyDeleteQueueStatus())
       })
+
+    void loadWorkspaceHealth()
+      .then(setWorkspaceHealth)
+      .catch(() => setWorkspaceHealth(undefined))
+  }, [windowKind])
+
+  useEffect(() => {
+    if (windowKind !== 'main') {
+      return undefined
+    }
+
+    const refreshHealth = () => {
+      if (document.visibilityState !== 'hidden') {
+        void loadWorkspaceHealth().then(setWorkspaceHealth).catch(() => undefined)
+      }
+    }
+    const timer = window.setInterval(refreshHealth, 60_000)
+    return () => window.clearInterval(timer)
   }, [windowKind])
 
   useEffect(() => {
@@ -304,6 +351,7 @@ function App() {
       onWorkspaceSnapshotChanged: (nextSnapshot) => {
         applySnapshot(nextSnapshot)
         void refreshAvatarThumbnails()
+        void loadWorkspaceHealth().then(setWorkspaceHealth).catch(() => undefined)
       },
       onRouteActivation: (actionRoute) => {
         if (actionRoute === 'scheduler') {
@@ -698,6 +746,11 @@ function App() {
     : '0/0'
   const connectorToolbarSummaryText = connectorToolbarSummary(workspaceSnapshot.connectorRuntimes)
   const connectorToolbarTone = connectorToolbarToneClassName(workspaceSnapshot.connectorRuntimes)
+  const healthTone = workspaceHealth?.overallStatus ?? 'healthy'
+  const healthIssueCount = workspaceHealth
+    ? workspaceHealth.counts.criticalIssueCount + workspaceHealth.counts.attentionIssueCount
+    : 0
+  const criticalDisk = workspaceHealth?.volumes.some((volume) => volume.severity === 'critical') ?? false
   const statusText = error
     ? error
     : deleteQueueStatus.runningCount > 0
@@ -714,6 +767,7 @@ function App() {
     { label: 'Refresh workspace', onSelect: () => void handleRefreshWorkspace() },
   ]
   const toolsMenuItems: MenuItem[] = [
+    { label: 'Workspace health', onSelect: () => void handleOpenWorkspaceHealth() },
     { label: 'Scheduler', onSelect: () => void handleOpenSchedulerConsole() },
     { label: 'Queue status', onSelect: () => void handleOpenQueueStatus() },
     { label: 'Runtime log', onSelect: () => void handleOpenRuntimeLog() },
@@ -896,6 +950,19 @@ function App() {
       const message = openError instanceof Error ? openError.message : String(openError)
       if (typeof window !== 'undefined' && typeof window.alert === 'function') {
         window.alert(`Failed to open Runtime Log.\n${message}`)
+      }
+    }
+  }
+
+  async function handleOpenWorkspaceHealth() {
+    setOpenMenu(null)
+    setProfileContextMenu(undefined)
+    try {
+      await openWorkspaceHealthWindow()
+    } catch (openError) {
+      const message = openError instanceof Error ? openError.message : String(openError)
+      if (typeof window !== 'undefined' && typeof window.alert === 'function') {
+        window.alert(`Failed to open Workspace Health.\n${message}`)
       }
     }
   }
@@ -1501,6 +1568,15 @@ function App() {
               />
             </label>
             <div className="toolbar-utility-group">
+              <button
+                className={`toolbar-button health-toolbar-button health-tone-${healthTone}`}
+                onClick={() => void handleOpenWorkspaceHealth()}
+                title={workspaceHealth ? `${healthIssueCount} workspace health issue${healthIssueCount === 1 ? '' : 's'}` : 'Open Workspace Health'}
+                type="button"
+              >
+                <span className="health-toolbar-dot" aria-hidden="true" />
+                Health{healthIssueCount > 0 ? ` · ${healthIssueCount}` : ''}
+              </button>
               <button className="toolbar-button" onClick={() => void handleOpenSchedulerConsole()} type="button">
                 Scheduler
               </button>
@@ -1509,6 +1585,13 @@ function App() {
               </button>
             </div>
           </section>
+
+          {criticalDisk ? (
+            <section className="workspace-health-disk-banner" role="alert">
+              <span><strong>Media storage is critical.</strong> A media root is inaccessible or below its safe free-space level.</span>
+              <button onClick={() => void handleOpenWorkspaceHealth()} type="button">Review storage</button>
+            </section>
+          ) : null}
 
           <ProfileWorkspace
             deletingSourceIds={Array.from(deletingSourceIds)}
@@ -1836,7 +1919,11 @@ function App() {
             databasePath={workspaceSnapshot.dbPath}
             mediaRoot={workspaceSnapshot.mediaRoot}
             onCheckUpdate={() => void runAppUpdateCheck()}
+            onInstallUpdate={() => void runAppUpdateInstall()}
             onOpenRelease={(url) => void openExternalTarget(url)}
+            updateInstalling={appUpdateInstalling}
+            updateProgress={appUpdateProgress}
+            updateInstallError={appUpdateInstallError}
             planCount={workspaceSnapshot.schedulerSets.reduce((count, schedulerSet) => count + schedulerSet.plans.length, 0)}
             profileCount={workspaceSnapshot.sources.length}
             updateChecking={appUpdateChecking}

@@ -2,9 +2,11 @@ name: release-please
 
 # Automates the release flow on every merge to main:
 #   1. release-please keeps a "release PR" that bumps the version across
-#      package.json / package-lock.json / tauri.conf.json / Cargo.toml /
-#      NinjaCrawler.Companion/manifest.json and updates CHANGELOG.md from the
-#      Conventional Commits since the last release.
+#      package.json / package-lock.json / tauri.conf.json / Cargo.toml and
+#      updates CHANGELOG.md from the Conventional Commits since the last
+#      release. Cargo.lock is derived: the sync-release-cargo-lock workflow
+#      rewrites only the ninjacrawler package version from Cargo.toml on the
+#      app release PR (Companion uses a separate track/manifest).
 #   2. Merging that PR creates a *draft* GitHub Release (draft: true in the
 #      config). A draft does not create the git tag yet, so nothing is visible.
 #   3. We dispatch the Release workflow with the release tag and commit SHA. It

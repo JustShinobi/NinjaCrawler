@@ -35,7 +35,11 @@ $requiredVersion = if ([string]::IsNullOrWhiteSpace($ExpectedVersion)) {
 
 foreach ($entry in $versions.GetEnumerator()) {
     if ($entry.Value -ne $requiredVersion) {
-        throw "$($entry.Key) has version '$($entry.Value)', expected '$requiredVersion'."
+        $hint = ""
+        if ($entry.Key -eq 'src-tauri/Cargo.lock') {
+            $hint = " Cargo.lock is derived from Cargo.toml; run: pwsh -File Tools/Sync-NinjaCrawlerCargoLockVersion.ps1"
+        }
+        throw "$($entry.Key) has version '$($entry.Value)', expected '$requiredVersion'.$hint"
     }
 }
 

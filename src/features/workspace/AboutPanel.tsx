@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import type { AppBuildInfo, AppUpdateStatus } from '../../domain/models'
+import type { AppBuildInfo, AppUpdateProgress, AppUpdateStatus } from '../../domain/models'
 import { BrandLockup } from '../brand/BrandLockup'
 import { SettingTextField } from '../settings/appSettingControls'
 
@@ -13,6 +13,9 @@ interface AboutPanelProps {
   updateStatus?: AppUpdateStatus
   updateChecking: boolean
   updateError?: string
+  updateInstalling: boolean
+  updateProgress?: AppUpdateProgress
+  updateInstallError?: string
   workspaceRoot: string
   databasePath: string
   mediaRoot: string
@@ -20,6 +23,7 @@ interface AboutPanelProps {
   accountCount: number
   planCount: number
   onCheckUpdate: () => void
+  onInstallUpdate: () => void
   onOpenRelease: (url: string) => void
 }
 
@@ -29,11 +33,15 @@ export function AboutPanel({
   databasePath,
   mediaRoot,
   onCheckUpdate,
+  onInstallUpdate,
   onOpenRelease,
   planCount,
   profileCount,
   updateChecking,
   updateError,
+  updateInstalling,
+  updateProgress,
+  updateInstallError,
   updateStatus,
   workspaceRoot,
 }: AboutPanelProps) {
@@ -55,6 +63,16 @@ export function AboutPanel({
       setCopyError(error instanceof Error ? error.message : 'Clipboard access is unavailable.')
     }
   }
+
+  const installProgressMessage = updateProgress
+    ? updateProgress.phase === 'downloading'
+      ? `Downloading update… ${updateProgress.percent ?? 0}%`
+      : updateProgress.phase === 'installing'
+        ? 'Installing update…'
+        : 'Update installed. Restarting…'
+    : updateInstalling
+      ? 'Preparing update…'
+      : undefined
 
   const releaseMessage = updateChecking
     ? 'Checking GitHub…'
@@ -85,13 +103,29 @@ export function AboutPanel({
             <p className="muted-copy">Development builds are identified by commit and are not compared by age.</p>
           ) : null}
         </div>
+        {installProgressMessage ? (
+          <p className="muted-copy" role="status">{installProgressMessage}</p>
+        ) : null}
+        {updateInstallError ? (
+          <p className="about-inline-error" role="alert">{updateInstallError}</p>
+        ) : null}
         <div className="about-update-actions">
-          <button className="ghost-button" disabled={updateChecking} onClick={onCheckUpdate} type="button">
+          <button className="ghost-button" disabled={updateChecking || updateInstalling} onClick={onCheckUpdate} type="button">
             {updateChecking ? 'Checking…' : 'Check again'}
           </button>
+          {updateStatus?.updateAvailable ? (
+            <button
+              className="primary-button"
+              disabled={updateInstalling}
+              onClick={onInstallUpdate}
+              type="button"
+            >
+              {updateInstalling ? 'Installing…' : 'Install update'}
+            </button>
+          ) : null}
           {updateStatus?.releaseUrl ? (
             <button
-              className={updateStatus.updateAvailable ? 'primary-button' : 'ghost-button'}
+              className="ghost-button"
               onClick={() => onOpenRelease(updateStatus.releaseUrl)}
               type="button"
             >

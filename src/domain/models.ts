@@ -38,6 +38,10 @@ export interface AccountsWindowIntent {
   initialMode?: 'create' | 'edit'
 }
 
+export interface WorkspaceHealthWindowIntent {
+  initialTab?: 'overview' | 'sources' | 'accounts' | 'storage'
+}
+
 export interface SourceEditorSeedIntent {
   provider: ProviderKey
   handle: string
@@ -991,6 +995,204 @@ export interface WorkspaceSnapshot {
   sourceMediaPaths?: Record<string, string>
 }
 
+export type WorkspaceHealthSeverity = 'healthy' | 'attention' | 'critical'
+
+export interface WorkspaceHealthIncident {
+  id: string
+  severity: WorkspaceHealthSeverity
+  kind: string
+  title: string
+  detail: string
+  sourceId?: string
+  accountId?: string
+  volumeKey?: string
+  evidence: string[]
+  availableActions: string[]
+}
+
+export interface SourceHealthItem {
+  sourceId: string
+  provider: ProviderKey
+  handle: string
+  displayName: string
+  accountId?: string
+  lastSyncedAt?: string
+  latestStatus?: SourceSyncRun['status']
+  consecutiveFailures: number
+  recurringFailure: boolean
+  freshness: 'fresh' | 'stale' | 'old' | 'ancient' | 'never'
+  severity: WorkspaceHealthSeverity
+  problemCode?: string
+  problemMessage?: string
+  recentRuns: SourceSyncRun[]
+}
+
+export interface AccountHealthItem {
+  accountId: string
+  provider: ProviderKey
+  displayName: string
+  authState: AuthState
+  hasSession: boolean
+  hasSecret: boolean
+  lastValidatedAt?: string
+  lastValidationError?: string
+  impactedSourceCount: number
+  severity: WorkspaceHealthSeverity
+}
+
+export interface StorageRootHealth {
+  path: string
+  sourceCount: number
+  primary: boolean
+  accessible: boolean
+}
+
+export interface StorageVolumeHealth {
+  volumeKey: string
+  totalBytes: number
+  availableBytes: number
+  usedBytes: number
+  availablePercent: number
+  severity: WorkspaceHealthSeverity
+  roots: StorageRootHealth[]
+}
+
+export interface WorkspaceHealthCounts {
+  sourceCount: number
+  affectedSourceCount: number
+  recurringFailureCount: number
+  degradedAccountCount: number
+  criticalAccountCount: number
+  storageAttentionCount: number
+  criticalIssueCount: number
+  attentionIssueCount: number
+}
+
+export interface WorkspaceHealthSnapshot {
+  overallStatus: WorkspaceHealthSeverity
+  generatedAt: string
+  counts: WorkspaceHealthCounts
+  incidents: WorkspaceHealthIncident[]
+  sources: SourceHealthItem[]
+  accounts: AccountHealthItem[]
+  volumes: StorageVolumeHealth[]
+}
+
+export interface MediaDedupeFile {
+  path: string
+  sourceId?: string
+  provider?: ProviderKey
+  mediaType: 'image' | 'video'
+  sizeBytes: number
+  width?: number
+  height?: number
+  durationMs?: number
+}
+
+export interface MediaDedupeGroup {
+  id: string
+  kind: 'exact' | 'similar'
+  confidencePercent?: number
+  reclaimableBytes: number
+  consolidatable: boolean
+  reason?: string
+  files: MediaDedupeFile[]
+}
+
+export interface MediaDedupeScanResult {
+  scanId: string
+  providerScope?: ProviderKey
+  sourceScope?: string
+  resourceProfile: MediaDedupeResourceProfile
+  similarityScope: 'source'
+  status: string
+  filesScanned: number
+  bytesScanned: number
+  exactGroupCount: number
+  similarGroupCount: number
+  reclaimableBytes: number
+  skippedVideoSimilarityCount: number
+  startedAt: string
+  finishedAt?: string
+  exactGroups: MediaDedupeGroup[]
+  similarGroups: MediaDedupeGroup[]
+}
+
+export interface MediaDedupeEngineStatus {
+  status: 'ready' | 'not_installed' | 'installing' | 'error' | 'unsupported'
+  version: string
+  installed: boolean
+  ffmpegAvailable: boolean
+  ffmpegStatus: 'ready' | 'not_installed' | 'installing' | 'error'
+  ffmpegSource?: 'system' | 'managed'
+  ffmpegVersion?: string
+  ffmpegInstallPath?: string
+  ffmpegError?: string
+  installPath?: string
+  error?: string
+}
+
+export interface MediaDedupeSourceJobStatus {
+  sourceId: string
+  provider: ProviderKey
+  sourcePath: string
+  status: string
+  stage: string
+  progressPercent?: number
+  filesProcessed: number
+  filesTotal: number
+  currentPath?: string
+  error?: string
+}
+
+export interface MediaDedupeJobStatus {
+  state: 'idle' | 'queued' | 'scanning' | 'applying' | 'completed' | 'failed' | 'cancelled'
+  stage: string
+  scanId?: string
+  providerScope?: ProviderKey
+  sourceScope?: string
+  resourceProfile: MediaDedupeResourceProfile
+  similarityScope: 'source'
+  filesProcessed: number
+  filesTotal: number
+  bytesProcessed: number
+  bytesTotal: number
+  currentPath?: string
+  currentRoot?: string
+  cancellable: boolean
+  error?: string
+  similarityEngine: MediaDedupeEngineStatus
+  perceptualSourcesProcessed: number
+  perceptualSourcesTotal: number
+  perceptualSourcesFailed: number
+  elapsedSeconds: number
+  estimatedSecondsRemaining?: number
+  throughputPerSecond?: number
+  sourceJobs: MediaDedupeSourceJobStatus[]
+  latestScan?: MediaDedupeScanResult
+  updatedAt: string
+}
+
+export interface MediaDedupeScanInput {
+  provider?: ProviderKey
+  sourceId?: string
+  resourceProfile?: MediaDedupeResourceProfile
+}
+
+export type MediaDedupeResourceProfile = 'quiet' | 'balanced' | 'fast'
+
+export interface MediaDedupeSimilarSelection {
+  groupId: string
+  keepPath: string
+  removePaths: string[]
+}
+
+export interface MediaDedupeApplyInput {
+  scanId: string
+  consolidateExact: boolean
+  similarSelections: MediaDedupeSimilarSelection[]
+}
+
 export interface ProviderAccountUpsert {
   id?: string
   provider: ProviderKey
@@ -1013,6 +1215,13 @@ export interface RuntimeLogQuery {
   scope?: string
   provider?: ProviderKey
   accountId?: string
+  sourceId?: string
+}
+
+export interface RuntimeLogWindowIntent {
+  sourceId?: string
+  accountId?: string
+  level?: NotificationLevel | 'debug'
 }
 
 export interface SourceProfileUpsert {
@@ -1166,4 +1375,13 @@ export interface AppUpdateStatus {
   releaseUrl: string
   publishedAt?: string
   updateAvailable: boolean
+}
+
+export type AppUpdatePhase = 'downloading' | 'installing' | 'done'
+
+export interface AppUpdateProgress {
+  phase: AppUpdatePhase
+  downloaded: number
+  total?: number
+  percent?: number
 }

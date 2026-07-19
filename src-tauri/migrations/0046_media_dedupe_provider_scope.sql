@@ -1,0 +1,3 @@
+-- Applied by the conditional schema reconciler in database.rs. Some feature
+-- builds created provider_scope as migration 45, before develop assigned the
+-- media cleanup migrations their final version numbers.

@@ -16,6 +16,7 @@ import type {
   AppSetting,
   AppSettingUpsert,
   AppBuildInfo,
+  AppUpdateProgress,
   AppUpdateStatus,
   MigrationStatus,
   MigrationProgress,
@@ -62,10 +63,12 @@ import type {
   RunSyncPlanNowInput,
   SourceEditorSeedIntent,
   SourceEditorWindowIntent,
+  SourceHealthItem,
   RunSourceSyncOptions,
   RuntimeLogEntry,
   RuntimeLogContext,
   RuntimeLogQuery,
+  RuntimeLogWindowIntent,
   SourceAvailabilityCheckItem,
   SourceAvailabilityCheckResult,
   SourceDeleteQueueJob,
@@ -84,6 +87,12 @@ import type {
   MediaThumbnailQueueStatus,
   MediaPathMigrationQueueStatus,
   MediaPathMigrationQueueJob,
+  MediaDedupeApplyInput,
+  MediaDedupeScanInput,
+  MediaDedupeFile,
+  MediaDedupeGroup,
+  MediaDedupeJobStatus,
+  MediaDedupeScanResult,
   SchedulerSet,
   SchedulerGroup,
   SchedulerGroupUpsert,
@@ -111,6 +120,8 @@ import type {
   SyncPlan,
   SyncPlanUpsert,
   WorkspaceSnapshot,
+  WorkspaceHealthSnapshot,
+  WorkspaceHealthWindowIntent,
 } from '../domain/models'
 import { createEmptyWorkspaceSnapshot } from '../domain/workspaceSnapshot'
 
@@ -144,6 +155,7 @@ const DESKTOP_WORKSPACE_SNAPSHOT_CHANGED_EVENT_NAME = 'runtime://workspace-snaps
 const DESKTOP_SOURCE_SYNC_QUEUE_CHANGED_EVENT_NAME = 'runtime://source-sync-queue-changed'
 const DESKTOP_SOURCE_DELETE_QUEUE_CHANGED_EVENT_NAME = 'runtime://source-delete-queue-changed'
 const DESKTOP_MEDIA_PATH_MIGRATION_QUEUE_CHANGED_EVENT_NAME = 'runtime://media-path-migration-queue-changed'
+const DESKTOP_MEDIA_DEDUPE_STATUS_CHANGED_EVENT_NAME = 'media-dedupe://status-changed'
 const DESKTOP_IMPORT_QUEUE_CHANGED_EVENT_NAME = 'runtime://import-queue-changed'
 const DESKTOP_CONNECTOR_RUNTIME_CHANGED_EVENT_NAME = 'runtime://connector-runtime-changed'
 const DESKTOP_ACCOUNTS_WINDOW_INTENT_EVENT_NAME = 'runtime://accounts-window-intent'
@@ -152,6 +164,8 @@ const DESKTOP_PROFILE_EDITOR_WINDOW_INTENT_EVENT_NAME = 'runtime://profile-edito
 const DESKTOP_PLANS_WINDOW_INTENT_EVENT_NAME = 'runtime://plans-window-intent'
 const DESKTOP_BATCH_EDITOR_WINDOW_INTENT_EVENT_NAME = 'runtime://batch-editor-window-intent'
 const DESKTOP_RUNTIME_LOG_APPENDED_EVENT_NAME = 'runtime://runtime-log-appended'
+const DESKTOP_RUNTIME_LOG_INTENT_EVENT_NAME = 'runtime://runtime-log-window-intent'
+const DESKTOP_WORKSPACE_HEALTH_INTENT_EVENT_NAME = 'runtime://workspace-health-window-intent'
 const DESKTOP_CONNECTOR_DEBUG_APPENDED_EVENT_NAME = 'runtime://connector-debug-appended'
 const DESKTOP_FOCUS_SOURCE_EVENT_NAME = 'runtime://focus-source'
 const RUNTIME_LOG_TIMEOUT_MS = 5000
@@ -2059,6 +2073,203 @@ function normalizeWorkspaceSnapshot(raw: unknown): WorkspaceSnapshot {
   return normalized
 }
 
+function normalizeHealthSeverity(value: unknown): WorkspaceHealthSnapshot['overallStatus'] {
+  return enumValue(value, ['healthy', 'attention', 'critical'] as const, 'healthy')
+}
+
+function normalizeWorkspaceHealth(raw: unknown): WorkspaceHealthSnapshot {
+  const value = isRecord(raw) ? raw : {}
+  const countsValue = isRecord(pick(value, 'counts')) ? pick(value, 'counts') as UnknownRecord : {}
+  return {
+    overallStatus: normalizeHealthSeverity(pick(value, 'overallStatus', 'overall_status')),
+    generatedAt: stringValue(value, ['generatedAt', 'generated_at'], new Date().toISOString()),
+    counts: {
+      sourceCount: numberValue(countsValue, ['sourceCount', 'source_count'], 0),
+      affectedSourceCount: numberValue(countsValue, ['affectedSourceCount', 'affected_source_count'], 0),
+      recurringFailureCount: numberValue(countsValue, ['recurringFailureCount', 'recurring_failure_count'], 0),
+      degradedAccountCount: numberValue(countsValue, ['degradedAccountCount', 'degraded_account_count'], 0),
+      criticalAccountCount: numberValue(countsValue, ['criticalAccountCount', 'critical_account_count'], 0),
+      storageAttentionCount: numberValue(countsValue, ['storageAttentionCount', 'storage_attention_count'], 0),
+      criticalIssueCount: numberValue(countsValue, ['criticalIssueCount', 'critical_issue_count'], 0),
+      attentionIssueCount: numberValue(countsValue, ['attentionIssueCount', 'attention_issue_count'], 0),
+    },
+    incidents: arrayValue(value, ['incidents']).filter(isRecord).map((entry) => ({
+      id: stringValue(entry, ['id'], ''),
+      severity: normalizeHealthSeverity(pick(entry, 'severity')),
+      kind: stringValue(entry, ['kind'], ''),
+      title: stringValue(entry, ['title'], ''),
+      detail: stringValue(entry, ['detail'], ''),
+      sourceId: optionalStringValue(entry, ['sourceId', 'source_id']),
+      accountId: optionalStringValue(entry, ['accountId', 'account_id']),
+      volumeKey: optionalStringValue(entry, ['volumeKey', 'volume_key']),
+      evidence: stringArray(pick(entry, 'evidence')),
+      availableActions: stringArray(pick(entry, 'availableActions', 'available_actions')),
+    })),
+    sources: arrayValue(value, ['sources']).filter(isRecord).map((entry) => ({
+      sourceId: stringValue(entry, ['sourceId', 'source_id'], ''),
+      provider: normalizeProviderKey(pick(entry, 'provider')),
+      handle: stringValue(entry, ['handle'], ''),
+      displayName: stringValue(entry, ['displayName', 'display_name'], ''),
+      accountId: optionalStringValue(entry, ['accountId', 'account_id']),
+      lastSyncedAt: optionalStringValue(entry, ['lastSyncedAt', 'last_synced_at']),
+      latestStatus: optionalStringValue(entry, ['latestStatus', 'latest_status']) as SourceHealthItem['latestStatus'],
+      consecutiveFailures: numberValue(entry, ['consecutiveFailures', 'consecutive_failures'], 0),
+      recurringFailure: booleanValue(entry, ['recurringFailure', 'recurring_failure'], false),
+      freshness: enumValue(pick(entry, 'freshness'), ['fresh', 'stale', 'old', 'ancient', 'never'] as const, 'never'),
+      severity: normalizeHealthSeverity(pick(entry, 'severity')),
+      problemCode: optionalStringValue(entry, ['problemCode', 'problem_code']),
+      problemMessage: optionalStringValue(entry, ['problemMessage', 'problem_message']),
+      recentRuns: arrayValue(entry, ['recentRuns', 'recent_runs'])
+        .map(normalizeSourceSyncRun)
+        .filter((run): run is SourceSyncRun => run !== null),
+    })),
+    accounts: arrayValue(value, ['accounts']).filter(isRecord).map((entry) => ({
+      accountId: stringValue(entry, ['accountId', 'account_id'], ''),
+      provider: normalizeProviderKey(pick(entry, 'provider')),
+      displayName: stringValue(entry, ['displayName', 'display_name'], ''),
+      authState: enumValue(pick(entry, 'authState', 'auth_state'), AUTH_STATES, 'expired'),
+      hasSession: booleanValue(entry, ['hasSession', 'has_session'], false),
+      hasSecret: booleanValue(entry, ['hasSecret', 'has_secret'], false),
+      lastValidatedAt: optionalStringValue(entry, ['lastValidatedAt', 'last_validated_at']),
+      lastValidationError: optionalStringValue(entry, ['lastValidationError', 'last_validation_error']),
+      impactedSourceCount: numberValue(entry, ['impactedSourceCount', 'impacted_source_count'], 0),
+      severity: normalizeHealthSeverity(pick(entry, 'severity')),
+    })),
+    volumes: arrayValue(value, ['volumes']).filter(isRecord).map((entry) => ({
+      volumeKey: stringValue(entry, ['volumeKey', 'volume_key'], ''),
+      totalBytes: numberValue(entry, ['totalBytes', 'total_bytes'], 0),
+      availableBytes: numberValue(entry, ['availableBytes', 'available_bytes'], 0),
+      usedBytes: numberValue(entry, ['usedBytes', 'used_bytes'], 0),
+      availablePercent: numberValue(entry, ['availablePercent', 'available_percent'], 0),
+      severity: normalizeHealthSeverity(pick(entry, 'severity')),
+      roots: arrayValue(entry, ['roots']).filter(isRecord).map((root) => ({
+        path: stringValue(root, ['path'], ''),
+        sourceCount: numberValue(root, ['sourceCount', 'source_count'], 0),
+        primary: booleanValue(root, ['primary'], false),
+        accessible: booleanValue(root, ['accessible'], false),
+      })),
+    })),
+  }
+}
+
+function normalizeMediaDedupeFile(value: unknown): MediaDedupeFile | null {
+  if (!isRecord(value)) return null
+  return {
+    path: stringValue(value, ['path'], ''),
+    sourceId: optionalStringValue(value, ['sourceId', 'source_id']),
+    provider: optionalProviderKey(value, ['provider']),
+    mediaType: enumValue(pick(value, 'mediaType', 'media_type'), ['image', 'video'] as const, 'image'),
+    sizeBytes: numberValue(value, ['sizeBytes', 'size_bytes'], 0),
+    width: optionalNumberValue(value, ['width']),
+    height: optionalNumberValue(value, ['height']),
+    durationMs: optionalNumberValue(value, ['durationMs', 'duration_ms']),
+  }
+}
+
+function normalizeMediaDedupeGroup(value: unknown): MediaDedupeGroup | null {
+  if (!isRecord(value)) return null
+  return {
+    id: stringValue(value, ['id'], ''),
+    kind: enumValue(pick(value, 'kind'), ['exact', 'similar'] as const, 'exact'),
+    confidencePercent: optionalNumberValue(value, ['confidencePercent', 'confidence_percent']),
+    reclaimableBytes: numberValue(value, ['reclaimableBytes', 'reclaimable_bytes'], 0),
+    consolidatable: booleanValue(value, ['consolidatable'], false),
+    reason: optionalStringValue(value, ['reason']),
+    files: arrayValue(value, ['files']).map(normalizeMediaDedupeFile).filter((file): file is MediaDedupeFile => file !== null),
+  }
+}
+
+function normalizeMediaDedupeScanResult(value: unknown): MediaDedupeScanResult | undefined {
+  if (!isRecord(value)) return undefined
+  const providerScope = optionalStringValue(value, ['providerScope', 'provider_scope'])
+  return {
+    scanId: stringValue(value, ['scanId', 'scan_id'], ''),
+    providerScope: providerScope && ['instagram', 'tiktok', 'twitter'].includes(providerScope)
+      ? providerScope as ProviderKey
+      : undefined,
+    sourceScope: optionalStringValue(value, ['sourceScope', 'source_scope']),
+    resourceProfile: enumValue(pick(value, 'resourceProfile', 'resource_profile'), ['quiet', 'balanced', 'fast'] as const, 'balanced'),
+    similarityScope: 'source',
+    status: stringValue(value, ['status'], 'completed'),
+    filesScanned: numberValue(value, ['filesScanned', 'files_scanned'], 0),
+    bytesScanned: numberValue(value, ['bytesScanned', 'bytes_scanned'], 0),
+    exactGroupCount: numberValue(value, ['exactGroupCount', 'exact_group_count'], 0),
+    similarGroupCount: numberValue(value, ['similarGroupCount', 'similar_group_count'], 0),
+    reclaimableBytes: numberValue(value, ['reclaimableBytes', 'reclaimable_bytes'], 0),
+    skippedVideoSimilarityCount: numberValue(value, ['skippedVideoSimilarityCount', 'skipped_video_similarity_count'], 0),
+    startedAt: stringValue(value, ['startedAt', 'started_at'], new Date().toISOString()),
+    finishedAt: optionalStringValue(value, ['finishedAt', 'finished_at']),
+    exactGroups: arrayValue(value, ['exactGroups', 'exact_groups']).map(normalizeMediaDedupeGroup).filter((group): group is MediaDedupeGroup => group !== null),
+    similarGroups: arrayValue(value, ['similarGroups', 'similar_groups']).map(normalizeMediaDedupeGroup).filter((group): group is MediaDedupeGroup => group !== null),
+  }
+}
+
+function normalizeMediaDedupeJobStatus(raw: unknown): MediaDedupeJobStatus {
+  const value = isRecord(raw) ? raw : {}
+  const engineValue = isRecord(pick(value, 'similarityEngine', 'similarity_engine'))
+    ? pick(value, 'similarityEngine', 'similarity_engine') as Record<string, unknown>
+    : {}
+  const providerScope = optionalStringValue(value, ['providerScope', 'provider_scope'])
+  const ffmpegSource = optionalStringValue(engineValue, ['ffmpegSource', 'ffmpeg_source'])
+  return {
+    state: enumValue(pick(value, 'state'), ['idle', 'queued', 'scanning', 'applying', 'completed', 'failed', 'cancelled'] as const, 'idle'),
+    stage: stringValue(value, ['stage'], 'idle'),
+    scanId: optionalStringValue(value, ['scanId', 'scan_id']),
+    providerScope: providerScope && ['instagram', 'tiktok', 'twitter'].includes(providerScope)
+      ? providerScope as ProviderKey
+      : undefined,
+    sourceScope: optionalStringValue(value, ['sourceScope', 'source_scope']),
+    resourceProfile: enumValue(pick(value, 'resourceProfile', 'resource_profile'), ['quiet', 'balanced', 'fast'] as const, 'balanced'),
+    similarityScope: 'source',
+    filesProcessed: numberValue(value, ['filesProcessed', 'files_processed'], 0),
+    filesTotal: numberValue(value, ['filesTotal', 'files_total'], 0),
+    bytesProcessed: numberValue(value, ['bytesProcessed', 'bytes_processed'], 0),
+    bytesTotal: numberValue(value, ['bytesTotal', 'bytes_total'], 0),
+    currentPath: optionalStringValue(value, ['currentPath', 'current_path']),
+    currentRoot: optionalStringValue(value, ['currentRoot', 'current_root']),
+    cancellable: booleanValue(value, ['cancellable'], false),
+    error: optionalStringValue(value, ['error']),
+    similarityEngine: {
+      status: enumValue(pick(engineValue, 'status'), ['ready', 'not_installed', 'installing', 'error', 'unsupported'] as const, 'not_installed'),
+      version: stringValue(engineValue, ['version'], 'unknown'),
+      installed: booleanValue(engineValue, ['installed'], false),
+      ffmpegAvailable: booleanValue(engineValue, ['ffmpegAvailable', 'ffmpeg_available'], false),
+      ffmpegStatus: enumValue(pick(engineValue, 'ffmpegStatus', 'ffmpeg_status'), ['ready', 'not_installed', 'installing', 'error'] as const, 'not_installed'),
+      ffmpegSource: ffmpegSource && ['system', 'managed'].includes(ffmpegSource)
+        ? ffmpegSource as 'system' | 'managed'
+        : undefined,
+      ffmpegVersion: optionalStringValue(engineValue, ['ffmpegVersion', 'ffmpeg_version']),
+      ffmpegInstallPath: optionalStringValue(engineValue, ['ffmpegInstallPath', 'ffmpeg_install_path']),
+      ffmpegError: optionalStringValue(engineValue, ['ffmpegError', 'ffmpeg_error']),
+      installPath: optionalStringValue(engineValue, ['installPath', 'install_path']),
+      error: optionalStringValue(engineValue, ['error']),
+    },
+    perceptualSourcesProcessed: numberValue(value, ['perceptualSourcesProcessed', 'perceptual_sources_processed'], 0),
+    perceptualSourcesTotal: numberValue(value, ['perceptualSourcesTotal', 'perceptual_sources_total'], 0),
+    perceptualSourcesFailed: numberValue(value, ['perceptualSourcesFailed', 'perceptual_sources_failed'], 0),
+    elapsedSeconds: numberValue(value, ['elapsedSeconds', 'elapsed_seconds'], 0),
+    estimatedSecondsRemaining: optionalNumberValue(value, ['estimatedSecondsRemaining', 'estimated_seconds_remaining']),
+    throughputPerSecond: optionalNumberValue(value, ['throughputPerSecond', 'throughput_per_second']),
+    sourceJobs: arrayValue(value, ['sourceJobs', 'source_jobs']).flatMap((rawJob) => {
+      if (!isRecord(rawJob)) return []
+      return [{
+        sourceId: stringValue(rawJob, ['sourceId', 'source_id'], ''),
+        provider: normalizeProviderKey(pick(rawJob, 'provider')),
+        sourcePath: stringValue(rawJob, ['sourcePath', 'source_path'], ''),
+        status: stringValue(rawJob, ['status'], 'queued'),
+        stage: stringValue(rawJob, ['stage'], 'queued'),
+        progressPercent: optionalNumberValue(rawJob, ['progressPercent', 'progress_percent']),
+        filesProcessed: numberValue(rawJob, ['filesProcessed', 'files_processed'], 0),
+        filesTotal: numberValue(rawJob, ['filesTotal', 'files_total'], 0),
+        currentPath: optionalStringValue(rawJob, ['currentPath', 'current_path']),
+        error: optionalStringValue(rawJob, ['error']),
+      }]
+    }),
+    latestScan: normalizeMediaDedupeScanResult(pick(value, 'latestScan', 'latest_scan')),
+    updatedAt: stringValue(value, ['updatedAt', 'updated_at'], new Date().toISOString()),
+  }
+}
+
 function normalizeStringMap(raw: unknown): Record<string, string> {
   if (!isRecord(raw)) {
     return {}
@@ -2126,12 +2337,69 @@ export async function loadWorkspaceSnapshot(): Promise<WorkspaceSnapshot> {
   return invokeWorkspaceCommand('bootstrap_workspace', undefined)
 }
 
+export async function loadWorkspaceHealth(): Promise<WorkspaceHealthSnapshot> {
+  return normalizeWorkspaceHealth(await invoke<unknown>('load_workspace_health'))
+}
+
+export async function loadMediaDedupeStatus(): Promise<MediaDedupeJobStatus> {
+  return normalizeMediaDedupeJobStatus(await invoke<unknown>('media_dedupe_status'))
+}
+
+export async function installMediaDedupeSimilarityEngine(): Promise<MediaDedupeJobStatus> {
+  return normalizeMediaDedupeJobStatus(await invoke<unknown>('install_media_dedupe_similarity_engine'))
+}
+
+export async function installMediaToolRuntime(): Promise<MediaDedupeJobStatus> {
+  return normalizeMediaDedupeJobStatus(await invoke<unknown>('install_media_tool_runtime'))
+}
+
+export async function enqueueMediaDedupeScan(input: MediaDedupeScanInput): Promise<MediaDedupeJobStatus> {
+  return normalizeMediaDedupeJobStatus(await invoke<unknown>('enqueue_media_dedupe_scan', { input }))
+}
+
+export async function cancelMediaDedupe(): Promise<MediaDedupeJobStatus> {
+  return normalizeMediaDedupeJobStatus(await invoke<unknown>('cancel_media_dedupe'))
+}
+
+export async function applyMediaDedupe(input: MediaDedupeApplyInput): Promise<MediaDedupeJobStatus> {
+  return normalizeMediaDedupeJobStatus(await invoke<unknown>('apply_media_dedupe', { input }))
+}
+
 export async function getAppBuildInfo(): Promise<AppBuildInfo> {
   return normalizeAppBuildInfo(await invoke<unknown>('get_app_build_info'))
 }
 
 export async function checkAppUpdate(): Promise<AppUpdateStatus> {
   return normalizeAppUpdateStatus(await invoke<unknown>('check_app_update'))
+}
+
+const APP_UPDATE_PROGRESS_EVENT_NAME = 'runtime://app-update-progress'
+
+function normalizeAppUpdateProgress(raw: unknown): AppUpdateProgress {
+  const value = isRecord(raw) ? raw : {}
+  const phase = enumValue(
+    pick(value, 'phase'),
+    ['downloading', 'installing', 'done'] as const,
+    'downloading',
+  )
+  return {
+    phase,
+    downloaded: numberValue(value, ['downloaded'], 0),
+    total: optionalNumberValue(value, ['total']),
+    percent: optionalNumberValue(value, ['percent']),
+  }
+}
+
+export async function installAppUpdate(): Promise<void> {
+  await invoke('install_app_update')
+}
+
+export function onAppUpdateProgress(
+  handler: (progress: AppUpdateProgress) => void,
+): Promise<() => void> {
+  return listen(APP_UPDATE_PROGRESS_EVENT_NAME, (event) => {
+    handler(normalizeAppUpdateProgress(event.payload))
+  })
 }
 
 export async function loadSystemShortDatePattern(): Promise<string> {
@@ -2148,6 +2416,7 @@ export async function subscribeToDesktopRuntimeEvents(handlers: {
   onSourceSyncQueueChanged?: (status: SourceSyncQueueStatus) => void
   onSourceDeleteQueueChanged?: (status: SourceDeleteQueueStatus) => void
   onMediaPathMigrationQueueChanged?: (status: MediaPathMigrationQueueStatus) => void
+  onMediaDedupeStatusChanged?: (status: MediaDedupeJobStatus) => void
   onImportQueueChanged?: (status: ImportQueueStatus) => void
   onConnectorRuntimeChanged?: () => void
   onRuntimeLogAppended?: (entry: RuntimeLogEntry) => void
@@ -2170,6 +2439,9 @@ export async function subscribeToDesktopRuntimeEvents(handlers: {
     }),
     listen(DESKTOP_MEDIA_PATH_MIGRATION_QUEUE_CHANGED_EVENT_NAME, (event) => {
       handlers.onMediaPathMigrationQueueChanged?.(normalizeMediaPathMigrationQueueStatus(event.payload))
+    }),
+    listen(DESKTOP_MEDIA_DEDUPE_STATUS_CHANGED_EVENT_NAME, (event) => {
+      handlers.onMediaDedupeStatusChanged?.(normalizeMediaDedupeJobStatus(event.payload))
     }),
     listen(DESKTOP_IMPORT_QUEUE_CHANGED_EVENT_NAME, (event) => {
       handlers.onImportQueueChanged?.(normalizeImportQueueStatus(event.payload))
@@ -2640,8 +2912,7 @@ export async function subscribeToMigrationCompletion(
 }
 
 export async function openBackupsFolder(): Promise<void> {
-  const path = await invoke<string>('backups_folder_path')
-  await openPath(path)
+  await invoke<void>('open_backups_folder')
 }
 
 export async function loadSourceDeleteQueueStatus(): Promise<SourceDeleteQueueStatus> {
@@ -2652,8 +2923,37 @@ export async function loadSourceDeleteQueueStatus(): Promise<SourceDeleteQueueSt
   return normalizeSourceDeleteQueueStatus(result)
 }
 
-export async function openRuntimeLogWindow(): Promise<void> {
-  await invoke<void>('open_runtime_log_window')
+export async function openRuntimeLogWindow(intent?: RuntimeLogWindowIntent): Promise<void> {
+  await invoke<void>('open_runtime_log_window', intent ? { intent } : undefined)
+}
+
+export async function subscribeToRuntimeLogWindowIntent(
+  handler: (intent: RuntimeLogWindowIntent) => void,
+): Promise<() => void> {
+  return listen(DESKTOP_RUNTIME_LOG_INTENT_EVENT_NAME, (event) => {
+    if (!isRecord(event.payload)) return
+    handler({
+      sourceId: optionalStringValue(event.payload, ['sourceId', 'source_id']),
+      accountId: optionalStringValue(event.payload, ['accountId', 'account_id']),
+      level: optionalStringValue(event.payload, ['level']) as RuntimeLogWindowIntent['level'],
+    })
+  })
+}
+
+export async function openWorkspaceHealthWindow(intent?: WorkspaceHealthWindowIntent): Promise<void> {
+  await invoke<void>('open_workspace_health_window', intent ? { intent } : undefined)
+}
+
+export async function subscribeToWorkspaceHealthWindowIntent(
+  handler: (intent: WorkspaceHealthWindowIntent) => void,
+): Promise<() => void> {
+  return listen(DESKTOP_WORKSPACE_HEALTH_INTENT_EVENT_NAME, (event) => {
+    if (!isRecord(event.payload)) return
+    const initialTab = optionalStringValue(event.payload, ['initialTab', 'initial_tab'])
+    if (initialTab === 'overview' || initialTab === 'sources' || initialTab === 'accounts' || initialTab === 'storage') {
+      handler({ initialTab })
+    }
+  })
 }
 
 export async function openConnectorDebugWindow(): Promise<void> {
@@ -3524,4 +3824,71 @@ export async function upsertAppSetting(draft: AppSettingUpsert): Promise<Workspa
     'upsert_app_setting',
     buildInvokeArgs(payload),
   )
+}
+
+export interface BackupExportResult {
+  cancelled: boolean
+  path: string | null
+  includesSecrets: boolean
+}
+
+export interface BackupInspection {
+  cancelled: boolean
+  path: string | null
+  includesSecrets: boolean
+  appVersion: string | null
+  createdAt: string | null
+}
+
+export interface BackupImportResult {
+  includesSecrets: boolean
+  secretsRestored: number
+  restartRequired: boolean
+  preRestorePath: string | null
+}
+
+export async function exportWorkspaceBackup(
+  includeSecrets: boolean,
+  password?: string,
+): Promise<BackupExportResult> {
+  const result = await invoke<unknown>('export_workspace_backup', {
+    includeSecrets,
+    include_secrets: includeSecrets,
+    password: password ?? null,
+  })
+  const record = isRecord(result) ? result : {}
+  return {
+    cancelled: booleanValue(record, ['cancelled']),
+    path: optionalStringValue(record, ['path']) ?? null,
+    includesSecrets: booleanValue(record, ['includesSecrets', 'includes_secrets']),
+  }
+}
+
+export async function inspectWorkspaceBackup(): Promise<BackupInspection> {
+  const result = await invoke<unknown>('inspect_workspace_backup')
+  const record = isRecord(result) ? result : {}
+  return {
+    cancelled: booleanValue(record, ['cancelled']),
+    path: optionalStringValue(record, ['path']) ?? null,
+    includesSecrets: booleanValue(record, ['includesSecrets', 'includes_secrets']),
+    appVersion: optionalStringValue(record, ['appVersion', 'app_version']) ?? null,
+    createdAt: optionalStringValue(record, ['createdAt', 'created_at']) ?? null,
+  }
+}
+
+export async function importWorkspaceBackup(
+  path: string,
+  password?: string,
+): Promise<BackupImportResult> {
+  const result = await invoke<unknown>('import_workspace_backup', {
+    path,
+    password: password ?? null,
+  })
+  const record = isRecord(result) ? result : {}
+  return {
+    includesSecrets: booleanValue(record, ['includesSecrets', 'includes_secrets']),
+    secretsRestored: numberValue(record, ['secretsRestored', 'secrets_restored'], 0),
+    restartRequired: booleanValue(record, ['restartRequired', 'restart_required'], true),
+    preRestorePath: optionalStringValue(record, ['preRestorePath', 'pre_restore_path']) ?? null,
+  }
 }

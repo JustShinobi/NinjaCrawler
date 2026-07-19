@@ -9,9 +9,19 @@ const mocks = vi.hoisted(() => ({
   subscribeToMigrationProgress: vi.fn(),
   subscribeToMigrationCompletion: vi.fn(),
   openBackupsFolder: vi.fn(),
+  closeDesktopWindow: vi.fn(),
 }))
 
-vi.mock('../../bridge/desktop', () => mocks)
+vi.mock('../../bridge/desktop', () => ({
+  getMigrationStatus: mocks.getMigrationStatus,
+  runPendingMigrations: mocks.runPendingMigrations,
+  subscribeToMigrationProgress: mocks.subscribeToMigrationProgress,
+  subscribeToMigrationCompletion: mocks.subscribeToMigrationCompletion,
+  openBackupsFolder: mocks.openBackupsFolder,
+}))
+vi.mock('../../utils/closeDesktopWindow', () => ({
+  closeDesktopWindow: mocks.closeDesktopWindow,
+}))
 
 import { MigrationGate } from './MigrationGate'
 
@@ -81,6 +91,33 @@ describe('MigrationGate', () => {
     expect(await screen.findByText(/update failed/i)).toBeTruthy()
     expect(screen.getByText(/disk full/)).toBeTruthy()
     expect(screen.getByRole('button', { name: /retry/i })).toBeTruthy()
-    expect(screen.getByRole('button', { name: /open backups folder/i })).toBeTruthy()
+    const openBackups = screen.getByRole('button', { name: /open backups folder/i })
+    fireEvent.click(openBackups)
+    await waitFor(() => expect(mocks.openBackupsFolder).toHaveBeenCalledTimes(1))
+
+    fireEvent.click(screen.getByRole('button', { name: /close ninjacrawler/i }))
+    expect(mocks.closeDesktopWindow).toHaveBeenCalledTimes(1)
+  })
+
+  it('reports a failure to open the backups folder', async () => {
+    mocks.getMigrationStatus.mockResolvedValue({
+      fromVersion: 41,
+      toVersion: 42,
+      pendingCount: 1,
+      dbSizeBytes: 512,
+    })
+    mocks.runPendingMigrations.mockRejectedValueOnce(new Error('migration failed'))
+    mocks.openBackupsFolder.mockRejectedValueOnce(new Error('Explorer is unavailable'))
+
+    render(
+      <MigrationGate>
+        <div>APP READY</div>
+      </MigrationGate>,
+    )
+
+    fireEvent.click(await screen.findByRole('button', { name: /back up.*update/i }))
+    fireEvent.click(await screen.findByRole('button', { name: /open backups folder/i }))
+
+    expect((await screen.findByRole('alert')).textContent).toContain('Explorer is unavailable')
   })
 })

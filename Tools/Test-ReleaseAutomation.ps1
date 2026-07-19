@@ -70,17 +70,49 @@ if ($appSections -ne $companionSections) {
     throw "App and Companion Release Please configs must use the same changelog sections."
 }
 
-$cargoLockUpdater = @($config.packages.'.'.'extra-files') | Where-Object {
-    $_.PSObject.Properties['type'] -and
-    $_.type -eq 'generic' -and
-    $_.path -eq 'src-tauri/Cargo.lock'
+$cargoLockExtraFiles = @(
+    @($config.packages.'.'.'extra-files') | Where-Object {
+        (
+            ($null -ne $_) -and
+            ($_.PSObject.Properties['path']) -and
+            $_.path -eq 'src-tauri/Cargo.lock'
+        ) -or $_ -eq 'src-tauri/Cargo.lock'
+    }
+)
+if ($cargoLockExtraFiles.Count -gt 0) {
+    throw "Cargo.lock is derived and must not be listed in Release Please extra-files."
 }
-if (-not $cargoLockUpdater) {
-    throw "Release Please must update the Cargo lockfile version."
+if ($cargoLock -match 'x-release-please-version') {
+    throw "Cargo.lock must not carry x-release-please-version; sync it with Tools/Sync-NinjaCrawlerCargoLockVersion.ps1."
 }
-if (-not $cargoLock.Contains('x-release-please-version')) {
-    throw "Cargo.lock must mark the application package version for Release Please."
+
+$cargoLockSyncScriptPath = Join-Path $repoRoot "Tools\Sync-NinjaCrawlerCargoLockVersion.ps1"
+$cargoLockSyncTestPath = Join-Path $repoRoot "Tools\Test-Sync-NinjaCrawlerCargoLockVersion.ps1"
+$cargoLockSyncWorkflowPath = Join-Path $repoRoot ".github\workflows\sync-release-cargo-lock.yml"
+foreach ($requiredPath in @(
+    $cargoLockSyncScriptPath,
+    $cargoLockSyncTestPath,
+    $cargoLockSyncWorkflowPath
+)) {
+    if (-not (Test-Path -LiteralPath $requiredPath)) {
+        throw "Missing Cargo.lock version sync asset: $requiredPath"
+    }
 }
+
+$cargoLockSyncWorkflow = Get-Content -LiteralPath $cargoLockSyncWorkflowPath -Raw
+foreach ($requiredFragment in @(
+    'Sync-NinjaCrawlerCargoLockVersion.ps1',
+    'release-please--branches--main--components--ninjacrawler',
+    'chore(release): sync Cargo.lock app version from Cargo.toml',
+    'secrets.GH_TOKEN'
+)) {
+    if (-not $cargoLockSyncWorkflow.Contains($requiredFragment)) {
+        throw "Cargo.lock sync workflow is missing required behavior: $requiredFragment"
+    }
+}
+
+& $cargoLockSyncTestPath
+& $cargoLockSyncScriptPath -Check | Out-Null
 
 foreach ($requiredFragment in @(
     'recover_package:',

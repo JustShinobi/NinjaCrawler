@@ -1,0 +1,3 @@
+-- Applied by the conditional schema reconciler in database.rs. Development
+-- builds used migration versions 42-46 for two different schema histories, so
+-- unconditional ALTER TABLE statements would fail for one of those histories.

@@ -60,10 +60,5 @@ pub fn workspace_layout_from_roots(
 }
 
 fn preferred_media_root(user_profile: &Path) -> PathBuf {
-    let scrawler_data_root = PathBuf::from(r"F:\SCrawler\Data");
-    if scrawler_data_root.exists() {
-        return scrawler_data_root;
-    }
-
     user_profile.join("Pictures").join("NinjaCrawler")
 }
