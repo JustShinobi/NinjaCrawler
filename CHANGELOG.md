@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.27.0](https://github.com/JustShinobi/NinjaCrawler/compare/v0.26.0...v0.27.0) (2026-07-19)
+
+
+### Features
+
+* **workspace:** introduce backups, auto-updates, and native sync notifications ([#87](https://github.com/JustShinobi/NinjaCrawler/issues/87)) ([aeb78e5](https://github.com/JustShinobi/NinjaCrawler/commit/aeb78e51be7032ea8cd2ff9a15bc828af7cb0876))
+* **workspace:** introduce health dashboard and media dedupe ([#89](https://github.com/JustShinobi/NinjaCrawler/issues/89)) ([ed7c91f](https://github.com/JustShinobi/NinjaCrawler/commit/ed7c91fc0d48ac7d5325c53d6023e57b08950201))
+
 ## [0.26.0](https://github.com/JustShinobi/NinjaCrawler/compare/v0.25.0...v0.26.0) (2026-07-18)
 
 
