@@ -87,6 +87,7 @@ export function MediaLightbox({
 
   // Refs: keyboard listener mounts once and always reads current state.
   // Avoids “dead” arrows from a stale closure after switching slide/post.
+  // Updated in an effect (not during render) to satisfy react-hooks/refs.
   const navRef = useRef({
     isVideo,
     hasPrev,
@@ -99,18 +100,20 @@ export function MediaLightbox({
     onSlidePrev,
     onSlideNext,
   })
-  navRef.current = {
-    isVideo,
-    hasPrev,
-    hasNext,
-    hasSlidePrev,
-    hasSlideNext,
-    onPrev,
-    onNext,
-    onClose,
-    onSlidePrev,
-    onSlideNext,
-  }
+  useEffect(() => {
+    navRef.current = {
+      isVideo,
+      hasPrev,
+      hasNext,
+      hasSlidePrev,
+      hasSlideNext,
+      onPrev,
+      onNext,
+      onClose,
+      onSlidePrev,
+      onSlideNext,
+    }
+  })
 
   useEffect(() => {
     lightboxRef.current?.focus()
