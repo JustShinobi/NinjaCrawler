@@ -17,7 +17,7 @@ Supports **Instagram** · **TikTok** · **X / Twitter** · optional **Chrome Com
 
 <p>
 <!-- ninjacrawler-release-start -->
-<a href="https://github.com/JustShinobi/NinjaCrawler/releases/download/v0.26.0/NinjaCrawler-0.26.0-windows-x64-setup.exe">
+<a href="https://github.com/JustShinobi/NinjaCrawler/releases/download/v0.27.0/NinjaCrawler-0.27.0-windows-x64-setup.exe">
   <img src="https://img.shields.io/badge/Download%20for%20Windows-x64-2ea44f?style=for-the-badge&logo=windows&logoColor=white" alt="Download for Windows x64" height="46">
 </a>
 <!-- ninjacrawler-release-end -->
@@ -32,9 +32,9 @@ Supports **Instagram** · **TikTok** · **X / Twitter** · optional **Chrome Com
 <!-- ninjacrawler-release-start -->
 <p>
 <sub>
-App v0.26.0 ·
-<a href="https://github.com/JustShinobi/NinjaCrawler/releases/download/v0.26.0/NinjaCrawler-0.26.0-windows-x64-portable.exe">portable</a> ·
-<a href="https://github.com/JustShinobi/NinjaCrawler/releases/download/v0.26.0/SHA256SUMS.txt">checksums</a> ·
+App v0.27.0 ·
+<a href="https://github.com/JustShinobi/NinjaCrawler/releases/download/v0.27.0/NinjaCrawler-0.27.0-windows-x64-portable.exe">portable</a> ·
+<a href="https://github.com/JustShinobi/NinjaCrawler/releases/download/v0.27.0/SHA256SUMS.txt">checksums</a> ·
 <a href="https://github.com/JustShinobi/NinjaCrawler/releases">all releases</a> ·
 <a href="CHANGELOG.md">changelog</a>
 </sub>
@@ -95,9 +95,9 @@ NinjaCrawler is a **local-first** Windows app for operators who manage many soci
 ### Desktop app
 
 <!-- ninjacrawler-release-start -->
-1. **[Download NinjaCrawler for Windows](https://github.com/JustShinobi/NinjaCrawler/releases/download/v0.26.0/NinjaCrawler-0.26.0-windows-x64-setup.exe)** (setup installer).
-2. Prefer no install? Use the standalone [portable executable](https://github.com/JustShinobi/NinjaCrawler/releases/download/v0.26.0/NinjaCrawler-0.26.0-windows-x64-portable.exe).
-3. Optional: verify the file against [SHA256SUMS.txt](https://github.com/JustShinobi/NinjaCrawler/releases/download/v0.26.0/SHA256SUMS.txt).
+1. **[Download NinjaCrawler for Windows](https://github.com/JustShinobi/NinjaCrawler/releases/download/v0.27.0/NinjaCrawler-0.27.0-windows-x64-setup.exe)** (setup installer).
+2. Prefer no install? Use the standalone [portable executable](https://github.com/JustShinobi/NinjaCrawler/releases/download/v0.27.0/NinjaCrawler-0.27.0-windows-x64-portable.exe).
+3. Optional: verify the file against [SHA256SUMS.txt](https://github.com/JustShinobi/NinjaCrawler/releases/download/v0.27.0/SHA256SUMS.txt).
 <!-- ninjacrawler-release-end -->
 
 > [!WARNING]

@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.28.0](https://github.com/JustShinobi/NinjaCrawler/compare/v0.27.0...v0.28.0) (2026-07-19)
+
+
+### Features
+
+* **providers:** add YouTube and VSCO providers with YouTube-style feed ([#96](https://github.com/JustShinobi/NinjaCrawler/issues/96)) ([7a403f6](https://github.com/JustShinobi/NinjaCrawler/commit/7a403f6ee8e3d730deb5c34bdfff0564108fdaa6))
+
+
+### Bug Fixes
+
+* **queue:** harden thumbnail review and delete-with-media progress ([#97](https://github.com/JustShinobi/NinjaCrawler/issues/97)) ([d910b6e](https://github.com/JustShinobi/NinjaCrawler/commit/d910b6e2e6a517bce6338ec9964f9d20ab80cb4b))
+
 ## [0.27.0](https://github.com/JustShinobi/NinjaCrawler/compare/v0.26.0...v0.27.0) (2026-07-19)
 
 
