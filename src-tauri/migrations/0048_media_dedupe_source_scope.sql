@@ -1,0 +1,2 @@
+-- Applied by the conditional schema reconciler in database.rs so retrying a
+-- development database with an already-present source_scope remains safe.

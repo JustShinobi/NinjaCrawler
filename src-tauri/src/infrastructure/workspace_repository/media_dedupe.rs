@@ -158,16 +158,20 @@ struct IndexedFileRow {
 
 pub(crate) fn media_dedupe_scan_context(
     provider_scope: Option<&str>,
+    source_scope: Option<&str>,
 ) -> Result<MediaDedupeScanContext, String> {
     with_workspace(|connection, layout| {
         let sources = load_sources(connection)?;
         let paths = compute_source_media_paths(connection, layout, &sources);
         let mut roots = Vec::new();
         let mut source_roots = Vec::new();
-        if provider_scope.is_none() {
+        if provider_scope.is_none() && source_scope.is_none() {
             roots.push(layout.media_root.clone());
         }
         for source in sources {
+            if source_scope.is_some_and(|source_id| source.id != source_id) {
+                continue;
+            }
             if provider_scope
                 .is_some_and(|provider| !source.provider.eq_ignore_ascii_case(provider))
             {
@@ -185,10 +189,11 @@ pub(crate) fn media_dedupe_scan_context(
             });
         }
         if roots.is_empty() {
-            return Err(format!(
-                "No configured media roots were found for {}.",
-                provider_scope.unwrap_or("the selected scope")
-            ));
+            let scope = source_scope
+                .map(|source_id| format!("profile '{source_id}'"))
+                .or_else(|| provider_scope.map(|provider| provider.to_string()))
+                .unwrap_or_else(|| "the selected scope".to_string());
+            return Err(format!("No configured media roots were found for {scope}."));
         }
         roots.sort_by(|left, right| {
             left.components()
@@ -219,6 +224,28 @@ pub(crate) fn media_dedupe_scan_context(
     })
 }
 
+pub(crate) fn media_dedupe_source_relative_path(
+    source_id: &str,
+    path: &Path,
+) -> Result<String, String> {
+    let context = media_dedupe_scan_context(None, Some(source_id))?;
+    let source = context
+        .source_roots
+        .first()
+        .ok_or_else(|| format!("Profile '{source_id}' has no configured media root."))?;
+    let relative = path.strip_prefix(&source.path).map_err(|_| {
+        format!(
+            "'{}' is outside the media root for profile '{source_id}'.",
+            path.display()
+        )
+    })?;
+    let value = relative.to_string_lossy().replace('\\', "/");
+    if value.is_empty() {
+        return Err("The selected media path is not a file inside the profile root.".to_string());
+    }
+    Ok(value)
+}
+
 fn path_key_starts_with(path: &str, root: &str) -> bool {
     path == root
         || path
@@ -230,15 +257,16 @@ pub(crate) fn begin_media_dedupe_scan(
     scan_id: &str,
     started_at: &str,
     provider_scope: Option<&str>,
+    source_scope: Option<&str>,
     resource_profile: &str,
 ) -> Result<(), String> {
     with_workspace(|connection, _| {
         connection
             .execute(
                 "INSERT INTO media_dedupe_scans (
-                    id, status, stage, provider_scope, resource_profile, started_at, updated_at
-                 ) VALUES (?1, 'running', 'inventory', ?2, ?3, ?4, ?4)",
-                params![scan_id, provider_scope, resource_profile, started_at],
+                    id, status, stage, provider_scope, source_scope, resource_profile, started_at, updated_at
+                 ) VALUES (?1, 'running', 'inventory', ?2, ?3, ?4, ?5, ?5)",
+                params![scan_id, provider_scope, source_scope, resource_profile, started_at],
             )
             .map_err(|error| error.to_string())?;
         Ok(())
@@ -1103,6 +1131,7 @@ pub(crate) fn load_media_dedupe_scan_result(
         let (
             status,
             provider_scope,
+            source_scope,
             resource_profile,
             files_scanned,
             bytes_scanned,
@@ -1111,7 +1140,7 @@ pub(crate) fn load_media_dedupe_scan_result(
             finished_at,
         ) = connection
             .query_row(
-                "SELECT status, provider_scope, resource_profile, files_scanned, bytes_scanned,
+                "SELECT status, provider_scope, source_scope, resource_profile, files_scanned, bytes_scanned,
                         skipped_video_similarity_count, started_at, finished_at
                  FROM media_dedupe_scans WHERE id = ?1",
                 params![scan_id],
@@ -1119,12 +1148,13 @@ pub(crate) fn load_media_dedupe_scan_result(
                     Ok((
                         row.get::<_, String>(0)?,
                         row.get::<_, Option<String>>(1)?,
-                        row.get::<_, String>(2)?,
-                        row.get::<_, i64>(3)?.max(0) as u64,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, String>(3)?,
                         row.get::<_, i64>(4)?.max(0) as u64,
-                        row.get::<_, i64>(5)?.max(0) as u32,
-                        row.get::<_, String>(6)?,
-                        row.get::<_, Option<String>>(7)?,
+                        row.get::<_, i64>(5)?.max(0) as u64,
+                        row.get::<_, i64>(6)?.max(0) as u32,
+                        row.get::<_, String>(7)?,
+                        row.get::<_, Option<String>>(8)?,
                     ))
                 },
             )
@@ -1141,6 +1171,7 @@ pub(crate) fn load_media_dedupe_scan_result(
         Ok(MediaDedupeScanResult {
             scan_id: scan_id.to_string(),
             provider_scope,
+            source_scope,
             resource_profile,
             similarity_scope: "source".to_string(),
             status,

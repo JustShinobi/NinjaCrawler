@@ -1500,6 +1500,7 @@ pub struct MediaDedupeGroup {
 pub struct MediaDedupeScanResult {
     pub scan_id: String,
     pub provider_scope: Option<String>,
+    pub source_scope: Option<String>,
     pub resource_profile: String,
     pub similarity_scope: String,
     pub status: String,
@@ -1553,6 +1554,7 @@ pub struct MediaDedupeJobStatus {
     pub stage: String,
     pub scan_id: Option<String>,
     pub provider_scope: Option<String>,
+    pub source_scope: Option<String>,
     pub resource_profile: String,
     pub similarity_scope: String,
     pub files_processed: u64,
@@ -1579,6 +1581,7 @@ pub struct MediaDedupeJobStatus {
 #[serde(rename_all = "camelCase")]
 pub struct MediaDedupeScanInput {
     pub provider: Option<String>,
+    pub source_id: Option<String>,
     pub resource_profile: Option<String>,
 }
 

@@ -2185,6 +2185,7 @@ function normalizeMediaDedupeScanResult(value: unknown): MediaDedupeScanResult |
     providerScope: providerScope && ['instagram', 'tiktok', 'twitter'].includes(providerScope)
       ? providerScope as ProviderKey
       : undefined,
+    sourceScope: optionalStringValue(value, ['sourceScope', 'source_scope']),
     resourceProfile: enumValue(pick(value, 'resourceProfile', 'resource_profile'), ['quiet', 'balanced', 'fast'] as const, 'balanced'),
     similarityScope: 'source',
     status: stringValue(value, ['status'], 'completed'),
@@ -2215,6 +2216,7 @@ function normalizeMediaDedupeJobStatus(raw: unknown): MediaDedupeJobStatus {
     providerScope: providerScope && ['instagram', 'tiktok', 'twitter'].includes(providerScope)
       ? providerScope as ProviderKey
       : undefined,
+    sourceScope: optionalStringValue(value, ['sourceScope', 'source_scope']),
     resourceProfile: enumValue(pick(value, 'resourceProfile', 'resource_profile'), ['quiet', 'balanced', 'fast'] as const, 'balanced'),
     similarityScope: 'source',
     filesProcessed: numberValue(value, ['filesProcessed', 'files_processed'], 0),

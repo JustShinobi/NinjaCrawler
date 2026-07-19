@@ -183,6 +183,10 @@ const MIGRATIONS: &[(i64, &str)] = &[
         47,
         include_str!("../../migrations/0047_media_dedupe_performance.sql"),
     ),
+    (
+        48,
+        include_str!("../../migrations/0048_media_dedupe_source_scope.sql"),
+    ),
 ];
 
 const PROVIDER_SYNC_RESUME_SCHEMA: &str =
@@ -273,8 +277,13 @@ fn ensure_source_profile_stats_schema(connection: &Connection) -> rusqlite::Resu
     Ok(())
 }
 
-fn ensure_media_dedupe_performance_schema(connection: &Connection) -> rusqlite::Result<()> {
+fn ensure_media_dedupe_provider_scope_schema(connection: &Connection) -> rusqlite::Result<()> {
     add_column_if_missing(connection, "media_dedupe_scans", "provider_scope", "TEXT")?;
+    Ok(())
+}
+
+fn ensure_media_dedupe_performance_schema(connection: &Connection) -> rusqlite::Result<()> {
+    ensure_media_dedupe_provider_scope_schema(connection)?;
     add_column_if_missing(
         connection,
         "media_dedupe_scans",
@@ -310,9 +319,26 @@ fn ensure_media_dedupe_performance_schema(connection: &Connection) -> rusqlite::
     Ok(())
 }
 
+fn ensure_media_dedupe_source_scope_schema(connection: &Connection) -> rusqlite::Result<()> {
+    add_column_if_missing(
+        connection,
+        "media_dedupe_scans",
+        "source_scope",
+        "TEXT REFERENCES source_profiles(id) ON DELETE SET NULL",
+    )?;
+    if table_columns(connection, "media_dedupe_scans")?.contains("source_scope") {
+        connection.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_media_dedupe_scans_source_scope
+             ON media_dedupe_scans(source_scope, started_at DESC);",
+        )?;
+    }
+    Ok(())
+}
+
 fn reconcile_colliding_development_migrations(connection: &Connection) -> rusqlite::Result<()> {
     ensure_source_profile_stats_schema(connection)?;
-    ensure_media_dedupe_performance_schema(connection)
+    ensure_media_dedupe_performance_schema(connection)?;
+    ensure_media_dedupe_source_scope_schema(connection)
 }
 
 fn apply_migration(
@@ -320,8 +346,14 @@ fn apply_migration(
     version: i64,
     sql: &str,
 ) -> rusqlite::Result<()> {
+    if version == 46 {
+        return ensure_media_dedupe_provider_scope_schema(transaction);
+    }
     if version == 47 {
         return ensure_media_dedupe_performance_schema(transaction);
+    }
+    if version == 48 {
+        return ensure_media_dedupe_source_scope_schema(transaction);
     }
     transaction.execute_batch(sql)
 }
@@ -789,6 +821,9 @@ mod tests {
         assert!(table_columns(&repaired, "media_dedupe_scans")
             .expect("scan columns")
             .contains("resource_profile"));
+        assert!(table_columns(&repaired, "media_dedupe_scans")
+            .expect("scan columns")
+            .contains("source_scope"));
         let source_job_columns =
             table_columns(&repaired, "media_dedupe_source_jobs").expect("source job columns");
         assert!(source_job_columns.contains("inventory_fingerprint"));
@@ -850,14 +885,64 @@ mod tests {
         let scan_columns = table_columns(&reconciled, "media_dedupe_scans").expect("scan columns");
         assert!(scan_columns.contains("provider_scope"));
         assert!(scan_columns.contains("resource_profile"));
-        let applied_47: i64 = reconciled
+        assert!(scan_columns.contains("source_scope"));
+        let applied_47_and_48: i64 = reconciled
             .query_row(
-                "SELECT count(*) FROM schema_migrations WHERE version = 47",
+                "SELECT count(*) FROM schema_migrations WHERE version IN (47, 48)",
                 [],
                 |row| row.get(0),
             )
             .expect("version 47");
-        assert_eq!(applied_47, 1);
+        assert_eq!(applied_47_and_48, 2);
+    }
+
+    #[test]
+    fn migration_retries_when_provider_scope_exists_before_version_46() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("provider-scope-before-v46.db");
+        let raw = Connection::open(&path).expect("raw connection");
+        raw.execute_batch(
+            "CREATE TABLE schema_migrations (
+                version INTEGER PRIMARY KEY,
+                applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+             );
+             CREATE TABLE source_profiles (id TEXT PRIMARY KEY);",
+        )
+        .expect("legacy base schema");
+        raw.execute_batch(include_str!(
+            "../../migrations/0043_workspace_health_media_dedupe.sql"
+        ))
+        .expect("legacy dedupe schema");
+        raw.execute_batch(include_str!(
+            "../../migrations/0045_media_dedupe_incremental_vdf.sql"
+        ))
+        .expect("legacy incremental schema");
+        raw.execute_batch("ALTER TABLE media_dedupe_scans ADD COLUMN provider_scope TEXT;")
+            .expect("legacy provider scope");
+        for version in 1..=45 {
+            raw.execute(
+                "INSERT INTO schema_migrations(version) VALUES (?1)",
+                [version],
+            )
+            .expect("legacy migration ledger");
+        }
+        drop(raw);
+
+        run_pending_migrations_with_progress(&path, |_| {}).expect("retry should reconcile schema");
+        let reconciled = Connection::open(&path).expect("reconciled database");
+        let scan_columns =
+            table_columns(&reconciled, "media_dedupe_scans").expect("media dedupe scan columns");
+        assert!(scan_columns.contains("provider_scope"));
+        assert!(scan_columns.contains("resource_profile"));
+        assert!(scan_columns.contains("source_scope"));
+        let applied_versions: i64 = reconciled
+            .query_row(
+                "SELECT count(*) FROM schema_migrations WHERE version IN (46, 47, 48)",
+                [],
+                |row| row.get(0),
+            )
+            .expect("reconciled migration versions");
+        assert_eq!(applied_versions, 3);
     }
 
     #[test]

@@ -27,6 +27,7 @@ struct RuntimeState {
     stage: String,
     scan_id: Option<String>,
     provider_scope: Option<String>,
+    source_scope: Option<String>,
     resource_profile: String,
     started_at: Option<String>,
     phase_started_at: Option<Instant>,
@@ -54,6 +55,7 @@ impl Default for RuntimeState {
             stage: "idle".to_string(),
             scan_id: None,
             provider_scope: None,
+            source_scope: None,
             resource_profile: "balanced".to_string(),
             started_at: None,
             phase_started_at: None,
@@ -218,7 +220,12 @@ pub fn enqueue_scan(
     input: MediaDedupeScanInput,
 ) -> Result<MediaDedupeJobStatus, String> {
     let provider_scope = normalize_provider_scope(input.provider)?;
+    let source_scope = normalize_source_scope(input.source_id);
     let resource_profile = normalize_resource_profile(input.resource_profile)?;
+    workspace_repository::media_dedupe_scan_context(
+        provider_scope.as_deref(),
+        source_scope.as_deref(),
+    )?;
     let scan_id = Uuid::new_v4().to_string();
     let started_at = Utc::now().to_rfc3339();
     let cancel = Arc::new(AtomicBool::new(false));
@@ -231,6 +238,7 @@ pub fn enqueue_scan(
             &scan_id,
             &started_at,
             provider_scope.as_deref(),
+            source_scope.as_deref(),
             &resource_profile,
         )?;
         let job_id = format!("scan:{scan_id}");
@@ -254,6 +262,7 @@ pub fn enqueue_scan(
         state.stage = "inventory".to_string();
         state.scan_id = Some(scan_id.clone());
         state.provider_scope = provider_scope.clone();
+        state.source_scope = source_scope.clone();
         state.resource_profile = resource_profile.clone();
         state.started_at = Some(started_at);
         state.phase_started_at = Some(Instant::now());
@@ -272,7 +281,16 @@ pub fn enqueue_scan(
     publish(app);
 
     let app = app.clone();
-    std::thread::spawn(move || run_scan(app, scan_id, provider_scope, resource_profile, cancel));
+    std::thread::spawn(move || {
+        run_scan(
+            app,
+            scan_id,
+            provider_scope,
+            source_scope,
+            resource_profile,
+            cancel,
+        )
+    });
     media_dedupe_status()
 }
 
@@ -337,6 +355,8 @@ pub fn enqueue_apply(
         state.stage = "preparing".to_string();
         state.scan_id = Some(input.scan_id.clone());
         state.resource_profile = scan.resource_profile.clone();
+        state.provider_scope = scan.provider_scope.clone();
+        state.source_scope = scan.source_scope.clone();
         state.started_at = Some(Utc::now().to_rfc3339());
         state.phase_started_at = Some(Instant::now());
         state.files_processed = 0;
@@ -358,6 +378,7 @@ fn run_scan(
     app: AppHandle,
     scan_id: String,
     provider_scope: Option<String>,
+    source_scope: Option<String>,
     resource_profile: String,
     cancel: Arc<AtomicBool>,
 ) {
@@ -369,6 +390,7 @@ fn run_scan(
         &app,
         &scan_id,
         provider_scope.as_deref(),
+        source_scope.as_deref(),
         &resource_profile,
         &cancel,
     );
@@ -417,10 +439,11 @@ fn scan_library(
     app: &AppHandle,
     scan_id: &str,
     provider_scope: Option<&str>,
+    source_scope: Option<&str>,
     resource_profile: &str,
     cancel: &AtomicBool,
 ) -> Result<MediaDedupeScanResult, String> {
-    let context = workspace_repository::media_dedupe_scan_context(provider_scope)?;
+    let context = workspace_repository::media_dedupe_scan_context(provider_scope, source_scope)?;
     let inventory = collect_inventory(app, scan_id, &context, cancel)?;
     let files_total = inventory.candidate_files;
     let bytes_total = inventory.candidate_bytes;
@@ -1004,8 +1027,21 @@ fn apply_scan(
                 Some(&selection.keep_path),
                 Some(target),
             )?;
-            match trash::delete(target) {
-                Ok(()) => {
+            let source_id = file.source_id.as_deref().ok_or_else(|| {
+                format!(
+                    "'{}' is not associated with a profile and cannot be safely removed.",
+                    target
+                )
+            })?;
+            let relative_path = workspace_repository::media_dedupe_source_relative_path(
+                source_id,
+                Path::new(target),
+            )?;
+            match workspace_repository::delete_source_media(
+                source_id.to_string(),
+                vec![relative_path],
+            ) {
+                Ok(_) => {
                     reclaimed = reclaimed.saturating_add(file.size_bytes);
                     workspace_repository::finish_media_dedupe_action(
                         &action_id,
@@ -1505,6 +1541,7 @@ fn status_from_state(state: &RuntimeState) -> MediaDedupeJobStatus {
         stage: state.stage.clone(),
         scan_id: state.scan_id.clone(),
         provider_scope: state.provider_scope.clone(),
+        source_scope: state.source_scope.clone(),
         resource_profile: state.resource_profile.clone(),
         similarity_scope: "source".to_string(),
         files_processed: state.files_processed,
@@ -1580,6 +1617,10 @@ fn normalize_provider_scope(provider: Option<String>) -> Result<Option<String>, 
     Ok(Some(provider))
 }
 
+fn normalize_source_scope(source_id: Option<String>) -> Option<String> {
+    source_id.map(|value| value.trim().to_string()).filter(|value| !value.is_empty())
+}
+
 fn publish(app: &AppHandle) {
     if let Ok(status) = media_dedupe_status() {
         let _ = app.emit(MEDIA_DEDUPE_STATUS_CHANGED_EVENT, status);
@@ -1617,6 +1658,16 @@ mod tests {
             Some("tiktok".to_string())
         );
         assert!(normalize_provider_scope(Some("unknown".to_string())).is_err());
+    }
+
+    #[test]
+    fn source_scope_trims_identifiers_and_ignores_empty_values() {
+        assert_eq!(
+            normalize_source_scope(Some(" source-1 ".to_string())),
+            Some("source-1".to_string())
+        );
+        assert_eq!(normalize_source_scope(Some("  ".to_string())), None);
+        assert_eq!(normalize_source_scope(None), None);
     }
 
     #[test]

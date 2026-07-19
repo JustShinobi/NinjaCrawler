@@ -1098,6 +1098,7 @@ export interface MediaDedupeGroup {
 export interface MediaDedupeScanResult {
   scanId: string
   providerScope?: ProviderKey
+  sourceScope?: string
   resourceProfile: MediaDedupeResourceProfile
   similarityScope: 'source'
   status: string
@@ -1145,6 +1146,7 @@ export interface MediaDedupeJobStatus {
   stage: string
   scanId?: string
   providerScope?: ProviderKey
+  sourceScope?: string
   resourceProfile: MediaDedupeResourceProfile
   similarityScope: 'source'
   filesProcessed: number
@@ -1169,6 +1171,7 @@ export interface MediaDedupeJobStatus {
 
 export interface MediaDedupeScanInput {
   provider?: ProviderKey
+  sourceId?: string
   resourceProfile?: MediaDedupeResourceProfile
 }
 
