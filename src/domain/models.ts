@@ -669,8 +669,14 @@ export interface MediaThumbnailQueueResult {
   sourceId: string
   provider: ProviderKey
   handle: string
-  /** `warning` = invalid media and/or partial generation issues; manual review. */
-  status: 'succeeded' | 'warning' | 'failed'
+  /**
+   * Terminal job status from the thumbnail runtime:
+   * - `succeeded` — finished with no invalid media / generation failures
+   * - `warning` — finished with invalid media and/or partial generation issues (manual review)
+   * - `failed` — hard failure (fatal error, or only generation failures with no progress)
+   * - `skipped` — cancelled mid-run (e.g. profile delete-with-media releasing file locks)
+   */
+  status: 'succeeded' | 'warning' | 'failed' | 'skipped'
   summary: string
   generated: number
   skippedExisting: number

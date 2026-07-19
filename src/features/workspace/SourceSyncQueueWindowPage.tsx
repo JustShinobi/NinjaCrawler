@@ -693,14 +693,7 @@ export function SourceSyncQueueWindowPage() {
             providerLabel: providerDisplayName(result.provider),
             handle: result.handle,
             operation: 'Thumbnail',
-            status:
-              result.status === 'failed'
-                ? 'failed'
-                : result.status === 'warning'
-                  ? 'warning'
-                  : result.status === 'skipped'
-                    ? 'skipped'
-                    : 'succeeded',
+            status: result.status,
             summary: result.summary?.trim()
               ? result.summary
               : summaryParts.join(' · '),
