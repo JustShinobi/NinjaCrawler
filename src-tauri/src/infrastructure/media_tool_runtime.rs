@@ -93,6 +93,27 @@ pub(crate) fn ffmpeg_executable() -> Option<PathBuf> {
     resolve().map(|paths| paths.ffmpeg)
 }
 
+/// Resolve `ffprobe` ao lado do `ffmpeg` conhecido (PATH do sistema ou runtime
+/// gerenciado). Usado para classificar mídia sem stream de vídeo (áudio-only
+/// `.mp4`/`.m4a`) antes de marcar thumbnail como falha.
+pub(crate) fn ffprobe_executable() -> Option<PathBuf> {
+    let ffmpeg = ffmpeg_executable()?;
+    let probe_name = if cfg!(windows) {
+        "ffprobe.exe"
+    } else {
+        "ffprobe"
+    };
+    if let Some(parent) = ffmpeg.parent() {
+        let sibling = parent.join(probe_name);
+        if sibling.is_file() {
+            return Some(sibling);
+        }
+    }
+    // Shim/PATH: o binário pode não ter sibling no mesmo dir; configure_tool_path
+    // ainda injeta o bin_dir do runtime gerenciado quando existir.
+    Some(PathBuf::from(probe_name))
+}
+
 pub(crate) fn configure_tool_path(command: &mut Command) {
     let Some(paths) = resolve() else {
         return;

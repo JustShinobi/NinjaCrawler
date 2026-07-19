@@ -132,6 +132,7 @@ pub fn run() {
             application::commands::load_avatar_thumbnails,
             application::commands::enqueue_media_thumbnail_generation,
             application::commands::media_thumbnail_queue_status,
+            application::commands::resolve_media_thumbnail_review,
             application::commands::enqueue_single_video_download,
             application::commands::single_video_queue_status,
             application::commands::list_single_videos,

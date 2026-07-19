@@ -3101,6 +3101,24 @@ export async function loadMediaThumbnailQueueStatus(): Promise<MediaThumbnailQue
   return invoke<MediaThumbnailQueueStatus>('media_thumbnail_queue_status')
 }
 
+/**
+ * Move reviewed invalid/unthumbnailable media to the Recycle Bin, tombstone the
+ * post in the ledger (won't re-download), and clear matching review items from
+ * the thumbnail queue result.
+ */
+export async function resolveMediaThumbnailReview(
+  sourceId: string,
+  relativePaths: string[],
+): Promise<MediaThumbnailQueueStatus> {
+  return invoke<MediaThumbnailQueueStatus>(
+    'resolve_media_thumbnail_review',
+    buildInvokeArgs(
+      { sourceId, relativePaths },
+      { source_id: sourceId, relative_paths: relativePaths },
+    ),
+  )
+}
+
 export async function openSingleVideosWindow(): Promise<void> {
   await invoke<void>('open_single_videos_window')
 }

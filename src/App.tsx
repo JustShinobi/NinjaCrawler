@@ -754,7 +754,18 @@ function App() {
   const statusText = error
     ? error
     : deleteQueueStatus.runningCount > 0
-      ? `Deleting ${deleteQueueStatus.activeHandle ?? 'profile'}`
+      ? (() => {
+          const active = deleteQueueStatus.runningItems[0]
+          const handle = active?.handle ?? deleteQueueStatus.activeHandle ?? 'profile'
+          const stage = active?.progressLabel?.trim()
+          const pct =
+            active?.progressPercent !== undefined && !active.progressIndeterminate
+              ? ` ${active.progressPercent}%`
+              : ''
+          return stage
+            ? `Deleting ${handle} · ${stage}${pct}`
+            : `Deleting ${handle}${pct}`
+        })()
       : queueStatus.runningCount > 0
         ? `Syncing ${queueStatus.activeHandle ?? 'profile'}`
         : pendingCommand

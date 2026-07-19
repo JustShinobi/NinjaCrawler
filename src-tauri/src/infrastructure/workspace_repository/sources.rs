@@ -177,15 +177,348 @@ pub fn delete_source_profile_with_progress<F>(
 where
     F: FnMut(SourceDeleteProgressUpdate) -> Result<(), String>,
 {
-    with_workspace(|connection, layout| {
-        delete_source_profile_with_connection_and_progress(
-            connection,
-            layout,
-            id,
-            mode,
-            &mut on_progress,
+    match mode {
+        SourceProfileDeleteMode::UserOnly => with_workspace(|connection, layout| {
+            delete_source_profile_with_connection_and_progress(
+                connection,
+                layout,
+                id,
+                SourceProfileDeleteMode::UserOnly,
+                &mut on_progress,
+            )
+        }),
+        // With-media: do heavy disk I/O *outside* with_workspace so other UI
+        // commands are not stuck behind an open SQLite connection for minutes.
+        SourceProfileDeleteMode::WithMedia => {
+            delete_source_profile_with_media_progress(id, &mut on_progress)
+        }
+    }
+}
+
+struct PreparedWithMediaDelete {
+    source: SourceProfile,
+    primary_root: PathBuf,
+    media_directories: HashSet<PathBuf>,
+}
+
+fn delete_source_profile_with_media_progress<F>(
+    id: String,
+    on_progress: &mut F,
+) -> Result<WorkspaceSnapshot, String>
+where
+    F: FnMut(SourceDeleteProgressUpdate) -> Result<(), String>,
+{
+    on_progress(SourceDeleteProgressUpdate {
+        progress_percent: Some(4),
+        progress_label: Some("Loading source".to_string()),
+        progress_detail: Some("Reading profile metadata and media paths.".to_string()),
+        progress_indeterminate: false,
+        files_processed: None,
+        files_total: None,
+    })?;
+
+    let prepared = with_workspace(|connection, layout| {
+        prepare_with_media_delete(connection, layout, &id)
+    })?;
+
+    on_progress(SourceDeleteProgressUpdate {
+        progress_percent: Some(8),
+        progress_label: Some("Inventorying media".to_string()),
+        progress_detail: Some(format!(
+            "Counting files under {} media root(s) for {}.",
+            prepared.media_directories.len(),
+            prepared.source.handle
+        )),
+        progress_indeterminate: true,
+        files_processed: None,
+        files_total: None,
+    })?;
+
+    let files_total = count_entries_under_roots(&prepared.media_directories);
+    on_progress(SourceDeleteProgressUpdate {
+        progress_percent: Some(12),
+        progress_label: Some("Inventory complete".to_string()),
+        progress_detail: Some(format!(
+            "Found {files_total} file(s)/folder(s) to remove for {}.",
+            prepared.source.handle
+        )),
+        progress_indeterminate: false,
+        files_processed: Some(0),
+        files_total: Some(files_total),
+    })?;
+
+    // Disk phase — no DB connection held. Progress maps into 12%..78%.
+    let mut files_processed = 0_u32;
+    let mut last_emit = std::time::Instant::now()
+        .checked_sub(std::time::Duration::from_secs(1))
+        .unwrap_or_else(std::time::Instant::now);
+    let disk_error = {
+        let mut disk_err: Option<String> = None;
+        for (index, directory) in prepared.media_directories.iter().enumerate() {
+            let root_label = directory
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| directory.display().to_string());
+            if let Err(error) = remove_directory_resilient_with_progress(directory, &mut |path| {
+                files_processed = files_processed.saturating_add(1);
+                let now = std::time::Instant::now();
+                // Throttle UI events; always emit on the last item.
+                let is_last = files_total > 0 && files_processed >= files_total;
+                if !is_last && now.duration_since(last_emit) < std::time::Duration::from_millis(120)
+                {
+                    return Ok(());
+                }
+                last_emit = now;
+                let disk_fraction = if files_total == 0 {
+                    1.0
+                } else {
+                    f64::from(files_processed) / f64::from(files_total.max(1))
+                };
+                let percent = 12 + ((disk_fraction * 66.0).round() as u32).min(66);
+                let name = path
+                    .file_name()
+                    .map(|value| value.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| path.display().to_string());
+                on_progress(SourceDeleteProgressUpdate {
+                    progress_percent: Some(percent.min(78)),
+                    progress_label: Some(format!(
+                        "Deleting media ({}/{})",
+                        index + 1,
+                        prepared.media_directories.len().max(1)
+                    )),
+                    progress_detail: Some(format!(
+                        "Root · {root_label} · removing {name} ({files_processed}/{files_total})"
+                    )),
+                    progress_indeterminate: false,
+                    files_processed: Some(files_processed),
+                    files_total: Some(files_total),
+                })
+            }) {
+                disk_err = Some(error);
+                break;
+            }
+        }
+        disk_err
+    };
+
+    if disk_error.is_none() {
+        on_progress(SourceDeleteProgressUpdate {
+            progress_percent: Some(80),
+            progress_label: Some("Media removed".to_string()),
+            progress_detail: Some(format!(
+                "Removed {files_processed} item(s) from disk. Updating database…"
+            )),
+            progress_indeterminate: false,
+            files_processed: Some(files_processed),
+            files_total: Some(files_total.max(files_processed)),
+        })?;
+    }
+
+    on_progress(SourceDeleteProgressUpdate {
+        progress_percent: Some(84),
+        progress_label: Some("Updating database".to_string()),
+        progress_detail: Some("Opening workspace database to remove the profile record.".to_string()),
+        progress_indeterminate: false,
+        files_processed: Some(files_processed),
+        files_total: Some(files_total.max(files_processed)),
+    })?;
+
+    let snapshot = with_workspace(|connection, layout| {
+        if let Some(disk_error) = disk_error.as_ref() {
+            on_progress(SourceDeleteProgressUpdate {
+                progress_percent: Some(85),
+                progress_label: Some("Reconciling ledgers".to_string()),
+                progress_detail: Some(
+                    "Disk wipe hit a lock; purging ledger rows for missing files.".to_string(),
+                ),
+                progress_indeterminate: false,
+                files_processed: Some(files_processed),
+                files_total: Some(files_total.max(files_processed)),
+            })?;
+            let _ = purge_provider_ledgers_missing_on_disk(
+                connection,
+                &prepared.source.provider,
+                &prepared.source.id,
+                &prepared.primary_root,
+            );
+            let still_has_media = !media_tree_is_effectively_empty(&prepared.primary_root)
+                || prepared
+                    .media_directories
+                    .iter()
+                    .any(|dir| !media_tree_is_effectively_empty(dir));
+            if still_has_media {
+                return Err(format!(
+                    "{disk_error} Ledger rows for missing files were purged so the next sync can re-download them. Retry delete-with-media after closing open files."
+                ));
+            }
+            // Media effectively gone — finish the profile delete.
+            let _ = remove_prepared_media_directories(&prepared.media_directories);
+        }
+
+        on_progress(SourceDeleteProgressUpdate {
+            progress_percent: Some(90),
+            progress_label: Some("Removing profile image cache".to_string()),
+            progress_detail: Some("Deleting custom avatar and thumbnail cache.".to_string()),
+            progress_indeterminate: false,
+            files_processed: Some(files_processed),
+            files_total: Some(files_total.max(files_processed)),
+        })?;
+        remove_source_custom_profile_images(layout, &prepared.source.id)?;
+        remove_avatar_thumbnail(layout, &prepared.source.id);
+
+        on_progress(SourceDeleteProgressUpdate {
+            progress_percent: Some(94),
+            progress_label: Some("Deleting profile record".to_string()),
+            progress_detail: Some(
+                "Hard-deleting source_profiles (cascades ledgers so re-add starts clean).".to_string(),
+            ),
+            progress_indeterminate: false,
+            files_processed: Some(files_processed),
+            files_total: Some(files_total.max(files_processed)),
+        })?;
+        connection
+            .execute(
+                "DELETE FROM source_profiles WHERE id = ?1",
+                params![&prepared.source.id],
+            )
+            .map_err(|error| error.to_string())?;
+
+        on_progress(SourceDeleteProgressUpdate {
+            progress_percent: Some(98),
+            progress_label: Some("Building workspace snapshot".to_string()),
+            progress_detail: Some("Refreshing library state after profile removal.".to_string()),
+            progress_indeterminate: false,
+            files_processed: Some(files_processed),
+            files_total: Some(files_total.max(files_processed)),
+        })?;
+        load_snapshot(connection, layout)
+    })?;
+
+    // 100% only after the snapshot is ready — never mark the queue job done earlier.
+    on_progress(SourceDeleteProgressUpdate {
+        progress_percent: Some(100),
+        progress_label: Some("Delete complete".to_string()),
+        progress_detail: Some(format!(
+            "Removed profile {} and {files_processed} on-disk item(s).",
+            prepared.source.handle
+        )),
+        progress_indeterminate: false,
+        files_processed: Some(files_processed),
+        files_total: Some(files_total.max(files_processed)),
+    })?;
+
+    Ok(snapshot)
+}
+
+fn prepare_with_media_delete(
+    connection: &Connection,
+    layout: &StorageLayout,
+    id: &str,
+) -> Result<PreparedWithMediaDelete, String> {
+    let source = connection
+        .query_row(
+            "SELECT id, provider, source_kind, handle, display_name, account_id, labels_json, ready_for_download, sync_options_json, profile_image_path, profile_image_custom, remote_state, is_subscription, last_synced_at, sync_problem_code, sync_problem_message, sync_problem_at, created_at, group_id, importer_id, imported_at
+             FROM source_profiles
+             WHERE id = ?1
+               AND deleted_at IS NULL
+             LIMIT 1",
+            params![id],
+            |row| {
+                let provider: String = row.get(1)?;
+                Ok(SourceProfile {
+                    id: row.get(0)?,
+                    provider: provider.clone(),
+                    source_kind: row.get(2)?,
+                    handle: row.get(3)?,
+                    display_name: row.get(4)?,
+                    account_id: row.get(5)?,
+                    group_id: row.get(18)?,
+                    labels: from_json_array(row.get::<_, String>(6)?),
+                    ready_for_download: row.get::<_, i64>(7)? != 0,
+                    sync_options: deserialize_source_sync_options(
+                        &provider,
+                        &row.get::<_, String>(8)?,
+                    ),
+                    profile_image_path: row.get(9)?,
+                    profile_image_custom: row.get::<_, i64>(10).unwrap_or(0) != 0,
+                    remote_state: row
+                        .get::<_, String>(11)
+                        .unwrap_or_else(|_| "exists".to_string()),
+                    is_subscription: row.get::<_, i64>(12).unwrap_or(0) != 0,
+                    last_synced_at: row.get(13).ok(),
+                    sync_problem_code: row.get(14).ok(),
+                    sync_problem_message: row.get(15).ok(),
+                    sync_problem_at: row.get(16).ok(),
+                    created_at: row.get(17).ok(),
+                    importer_id: row.get(19).ok(),
+                    imported_at: row.get(20).ok(),
+                })
+            },
         )
+        .optional()
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| format!("Source '{id}' does not exist."))?;
+
+    let account_settings = source
+        .account_id
+        .as_deref()
+        .filter(|_| source.provider.eq_ignore_ascii_case("instagram"))
+        .map(|account_id| load_provider_account_settings_map(connection, account_id))
+        .transpose()?
+        .unwrap_or_default();
+
+    let primary_root =
+        resolved_source_media_output_root(layout, &source, Some(&account_settings));
+    let media_directories =
+        collect_source_media_directories(layout, &source, &account_settings);
+
+    Ok(PreparedWithMediaDelete {
+        source,
+        primary_root,
+        media_directories,
     })
+}
+
+fn remove_prepared_media_directories(directories: &HashSet<PathBuf>) -> Result<(), String> {
+    let mut errors = Vec::new();
+    for directory in directories {
+        if let Err(error) = remove_directory_resilient(directory) {
+            errors.push(error);
+        }
+    }
+    if let Some(error) = errors.into_iter().next() {
+        return Err(error);
+    }
+    Ok(())
+}
+
+fn count_entries_under_roots(directories: &HashSet<PathBuf>) -> u32 {
+    let mut total = 0_u32;
+    for directory in directories {
+        total = total.saturating_add(count_tree_entries(directory));
+    }
+    total
+}
+
+fn count_tree_entries(path: &Path) -> u32 {
+    if !path.exists() {
+        return 0;
+    }
+    let mut total = 1_u32; // the root itself
+    let mut stack = vec![path.to_path_buf()];
+    while let Some(current) = stack.pop() {
+        let Ok(entries) = fs::read_dir(&current) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            total = total.saturating_add(1);
+            let child = entry.path();
+            if child.is_dir() {
+                stack.push(child);
+            }
+        }
+    }
+    total
 }
 pub(super) fn delete_source_profile_with_connection(
     connection: &Connection,
@@ -339,7 +672,47 @@ where
                 files_processed: None,
                 files_total: None,
             })?;
-            remove_source_media_directories(layout, &source, &account_settings)?;
+
+            // Resolve roots *before* any mutation so specialPath / account
+            // mediaPath still resolve while the profile row exists.
+            let primary_root = resolved_source_media_output_root(
+                layout,
+                &source,
+                Some(&account_settings),
+            );
+            let disk_result =
+                remove_source_media_directories(layout, &source, &account_settings);
+
+            match disk_result {
+                Ok(()) => {}
+                Err(disk_error) => {
+                    // Partial wipe is the dangerous case: files gone, ledger still
+                    // claims every post is known → next sync downloads nothing.
+                    // Reconcile ledger against what remains, then decide.
+                    let _ = purge_provider_ledgers_missing_on_disk(
+                        connection,
+                        &source.provider,
+                        &source.id,
+                        &primary_root,
+                    );
+
+                    let media_directories =
+                        collect_source_media_directories(layout, &source, &account_settings);
+                    if media_tree_is_effectively_empty(&primary_root)
+                        && media_directories
+                            .iter()
+                            .all(|dir| media_tree_is_effectively_empty(dir))
+                    {
+                        // User asked for with-media; media is gone. Finish the DB
+                        // delete so CASCADE clears ledgers and the ghost profile.
+                        let _ = remove_source_media_directories(layout, &source, &account_settings);
+                    } else {
+                        return Err(format!(
+                            "{disk_error} Ledger rows for missing files were purged so the next sync can re-download them. Retry delete-with-media after closing open files."
+                        ));
+                    }
+                }
+            }
 
             on_progress(SourceDeleteProgressUpdate {
                 progress_percent: Some(72),
@@ -357,11 +730,15 @@ where
             on_progress(SourceDeleteProgressUpdate {
                 progress_percent: Some(88),
                 progress_label: Some("Deleting profile".to_string()),
-                progress_detail: Some("Removing the source profile record.".to_string()),
+                progress_detail: Some(
+                    "Removing the source profile record and cascading ledgers.".to_string(),
+                ),
                 progress_indeterminate: false,
                 files_processed: None,
                 files_total: None,
             })?;
+            // Hard delete cascades provider_sync_*_ledger, provider_deleted_media,
+            // account_sync_scope_state, etc. Re-adding the same handle starts clean.
             connection
                 .execute(
                     "DELETE FROM source_profiles WHERE id = ?1",
@@ -381,11 +758,31 @@ where
         }
     }
 }
+/// Delete every known media root for a source (resolved specialPath, default
+/// layout, @handle variants, Instagram account base). Used by delete-with-media.
 pub(super) fn remove_source_media_directories(
     layout: &StorageLayout,
     source: &SourceProfile,
     account_settings: &HashMap<String, String>,
 ) -> Result<(), String> {
+    let directories = collect_source_media_directories(layout, source, account_settings);
+    let mut errors = Vec::new();
+    for directory in &directories {
+        if let Err(error) = remove_directory_resilient(directory) {
+            errors.push(error);
+        }
+    }
+    if let Some(error) = errors.into_iter().next() {
+        return Err(error);
+    }
+    Ok(())
+}
+
+fn collect_source_media_directories(
+    layout: &StorageLayout,
+    source: &SourceProfile,
+    account_settings: &HashMap<String, String>,
+) -> HashSet<PathBuf> {
     let normalized_handle = sanitize_source_handle(&source.provider, &source.handle);
     let at_handle = format!("@{}", normalized_handle.trim_start_matches('@'));
     let mut directories = HashSet::new();
@@ -415,13 +812,146 @@ pub(super) fn remove_source_media_directories(
         directories.insert(instagram_base.join(sanitize_path_segment(&at_handle)));
     }
 
-    for directory in directories {
-        if directory.exists() {
-            fs::remove_dir_all(&directory).map_err(|error| error.to_string())?;
-        }
+    directories
+}
+
+/// True when the path is missing, or only has empty dirs / `.thumbs` leftovers
+/// (no real media). Used to finish with-media delete after a partial wipe.
+fn media_tree_is_effectively_empty(path: &Path) -> bool {
+    if !path.exists() {
+        return true;
+    }
+    let Ok(files) = collect_media_file_paths(path) else {
+        return false;
+    };
+    files.is_empty()
+}
+
+/// Windows often returns ERROR_DIR_NOT_EMPTY (145) from `remove_dir_all` when a
+/// child is briefly locked (thumbnail workers, Explorer, AV). Walk bottom-up,
+/// clear read-only, and retry with backoff until the tree is gone.
+pub(super) fn remove_directory_resilient(path: &Path) -> Result<(), String> {
+    remove_directory_resilient_with_progress(path, &mut |_| Ok(()))
+}
+
+/// Same as [`remove_directory_resilient`], but invokes `on_entry` after each
+/// file/directory is removed so the delete queue can show live progress.
+pub(super) fn remove_directory_resilient_with_progress<F>(
+    path: &Path,
+    on_entry: &mut F,
+) -> Result<(), String>
+where
+    F: FnMut(&Path) -> Result<(), String>,
+{
+    if !path.exists() {
+        return Ok(());
     }
 
-    Ok(())
+    const ATTEMPTS: u32 = 10;
+    let mut last_error: Option<String> = None;
+
+    for attempt in 0..ATTEMPTS {
+        // Prefer a walk with progress. Fast `remove_dir_all` is only used when
+        // no progress callback work is needed on the first attempt and the tree
+        // is small — for queue UX we always walk so the UI can update.
+        match remove_path_tree_with_progress(path, on_entry) {
+            Ok(()) if !path.exists() => return Ok(()),
+            Ok(()) => {
+                last_error = Some(format!(
+                    "Path still exists after delete attempt: {}",
+                    path.display()
+                ));
+            }
+            Err(error) => last_error = Some(error),
+        }
+
+        if !path.exists() {
+            return Ok(());
+        }
+
+        std::thread::sleep(std::time::Duration::from_millis(
+            40u64.saturating_mul(u64::from(attempt + 1)),
+        ));
+    }
+
+    if !path.exists() {
+        return Ok(());
+    }
+
+    Err(format!(
+        "Failed to delete media directory '{}': {}. \
+Close any open files from this folder (thumbnails, Explorer preview) and retry.",
+        path.display(),
+        last_error.unwrap_or_else(|| "unknown error".to_string())
+    ))
+}
+
+fn clear_readonly_attribute(path: &Path) {
+    if let Ok(metadata) = fs::metadata(path) {
+        let mut permissions = metadata.permissions();
+        if permissions.readonly() {
+            permissions.set_readonly(false);
+            let _ = fs::set_permissions(path, permissions);
+        }
+    }
+}
+
+fn remove_path_tree_with_progress<F>(path: &Path, on_entry: &mut F) -> Result<(), String>
+where
+    F: FnMut(&Path) -> Result<(), String>,
+{
+    if !path.exists() {
+        return Ok(());
+    }
+
+    clear_readonly_attribute(path);
+    if path.is_file() {
+        fs::remove_file(path).map_err(|error| {
+            format!("Failed to delete file '{}': {error}", path.display())
+        })?;
+        on_entry(path)?;
+        return Ok(());
+    }
+
+    if path.is_dir() {
+        let entries = fs::read_dir(path).map_err(|error| {
+            format!(
+                "Failed to list directory '{}' while deleting: {error}",
+                path.display()
+            )
+        })?;
+        for entry in entries {
+            let entry = entry.map_err(|error| {
+                format!(
+                    "Failed to read entry under '{}' while deleting: {error}",
+                    path.display()
+                )
+            })?;
+            remove_path_tree_with_progress(&entry.path(), on_entry)?;
+        }
+        clear_readonly_attribute(path);
+        match fs::remove_dir(path) {
+            Ok(()) => {
+                on_entry(path)?;
+                Ok(())
+            }
+            Err(_) if !path.exists() => {
+                on_entry(path)?;
+                Ok(())
+            }
+            Err(error) => Err(format!(
+                "Failed to remove directory '{}': {error}",
+                path.display()
+            )),
+        }
+    } else {
+        clear_readonly_attribute(path);
+        fs::remove_file(path)
+            .or_else(|_| fs::remove_dir_all(path))
+            .map_err(|error| format!("Failed to delete '{}': {error}", path.display()))?;
+        on_entry(path)?;
+        Ok(())
+    }
 }
 #[derive(Clone)]
 pub struct SourceSyncQueueItemSeed {

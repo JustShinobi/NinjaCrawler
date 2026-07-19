@@ -10,7 +10,9 @@ use crate::domain::models::{
     SourceDeleteQueueJob, SourceDeleteQueueRecentResult, SourceDeleteQueueStatus,
     SourceProfileDeleteInput, SourceProfileDeleteMode, WorkspaceSnapshot,
 };
-use crate::infrastructure::{desktop_runtime, source_sync_runtime, workspace_repository};
+use crate::infrastructure::{
+    desktop_runtime, media_thumbnail_runtime, source_sync_runtime, workspace_repository,
+};
 
 pub const SOURCE_DELETE_QUEUE_CHANGED_EVENT: &str = "runtime://source-delete-queue-changed";
 const RECENT_RESULTS_LIMIT: usize = 80;
@@ -157,16 +159,37 @@ fn spawn_worker(app: AppHandle) {
 
         match execute_job(&app, &job) {
             Ok(snapshot) => {
+                // Only mark the queue job succeeded after the full delete + snapshot.
+                report_delete_progress(
+                    &job.source_id,
+                    Some(100),
+                    Some("Delete complete".to_string()),
+                    Some("Profile removed. Refreshing library…".to_string()),
+                    false,
+                    None,
+                    None,
+                );
                 finish_job(&job, "succeeded", success_summary(job.mode), None);
+                publish_delete_status_event(&app);
                 publish_workspace_refresh(&app, &snapshot);
             }
             Err(error) => {
+                report_delete_progress(
+                    &job.source_id,
+                    None,
+                    Some("Delete failed".to_string()),
+                    Some(error.clone()),
+                    false,
+                    None,
+                    None,
+                );
                 finish_job(
                     &job,
                     "failed",
                     failure_summary(job.mode),
                     Some(error.clone()),
                 );
+                publish_delete_status_event(&app);
                 if let Ok(snapshot) = workspace_repository::bootstrap_workspace() {
                     publish_workspace_refresh(&app, &snapshot);
                 }
@@ -181,19 +204,51 @@ fn execute_job(app: &AppHandle, job: &SourceDeleteQueuedJob) -> Result<Workspace
     if source_sync_is_live(&job.source_id)? {
         report_delete_progress(
             &job.source_id,
-            Some(2),
+            Some(1),
             Some("Cancelling sync".to_string()),
-            Some("Cancelling queued or running source sync before deleting.".to_string()),
-            true,
+            Some("Stopping queued/running sync for this profile before delete.".to_string()),
+            false,
             None,
             None,
         );
 
-        let snapshot = source_sync_runtime::cancel_source_sync_profile(app, job.source_id.clone())?;
-        publish_workspace_refresh(app, &snapshot);
+        // Do not publish a workspace snapshot here — that made the UI look like
+        // the profile was already gone while media delete was still running.
+        let _snapshot = source_sync_runtime::cancel_source_sync_profile(app, job.source_id.clone())?;
 
         wait_for_source_sync_to_clear(&job.source_id)?;
     }
+
+    // Thumbnail workers keep `.thumbs/*.jpg` open on Windows; deleting the
+    // profile folder while they run yields ERROR_DIR_NOT_EMPTY (145). Cancel
+    // the job (do not wait for a full generation run — that froze the app).
+    report_delete_progress(
+        &job.source_id,
+        Some(2),
+        Some("Releasing media locks".to_string()),
+        Some("Cancelling thumbnail generation for this profile (brief wait).".to_string()),
+        false,
+        None,
+        None,
+    );
+    media_thumbnail_runtime::cancel_queued_and_wait(&job.source_id)?;
+
+    report_delete_progress(
+        &job.source_id,
+        Some(3),
+        Some("Starting profile delete".to_string()),
+        Some(match job.mode {
+            SourceProfileDeleteMode::UserOnly => {
+                "Soft-deleting profile; media files stay on disk.".to_string()
+            }
+            SourceProfileDeleteMode::WithMedia => {
+                "Delete-with-media: inventory → disk wipe → database cascade.".to_string()
+            }
+        }),
+        false,
+        None,
+        None,
+    );
 
     workspace_repository::delete_source_profile_with_progress(
         job.source_id.clone(),
@@ -409,10 +464,10 @@ fn queue_job_to_model(job: &SourceDeleteQueuedJob, state: &str) -> SourceDeleteQ
 fn success_summary(mode: SourceProfileDeleteMode) -> String {
     match mode {
         SourceProfileDeleteMode::UserOnly => {
-            "Deleted the profile and kept existing media files on disk.".to_string()
+            "Profile deleted (user only). Media files were kept on disk.".to_string()
         }
         SourceProfileDeleteMode::WithMedia => {
-            "Deleted the profile, imported media files, and source files.".to_string()
+            "Profile deleted with media. Disk wipe and ledger cascade finished.".to_string()
         }
     }
 }

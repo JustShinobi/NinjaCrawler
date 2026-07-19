@@ -443,8 +443,11 @@ pub fn open_batch_editor_window(
     desktop_runtime::open_batch_editor_window(&app, source_ids)
 }
 
+/// Synchronous delete kept for callers that need a snapshot result. Runs disk
+/// work on a blocking pool thread so the UI event loop is not frozen; prefer
+/// `enqueue_source_delete` for interactive deletes (progress + queue).
 #[tauri::command]
-pub fn delete_source_profile(
+pub async fn delete_source_profile(
     app: tauri::AppHandle,
     input: SourceProfileDeleteInput,
 ) -> Result<WorkspaceSnapshot, String> {
@@ -469,10 +472,16 @@ pub fn delete_source_profile(
         );
     }
 
-    publish_snapshot(
-        &app,
-        workspace_repository::delete_source_profile(input.id, input.mode)?,
-    )
+    // Cancel thumbs first (short wait) so file handles are released before disk wipe.
+    media_thumbnail_runtime::cancel_queued_and_wait(&input.id)?;
+
+    let snapshot = tauri::async_runtime::spawn_blocking(move || {
+        workspace_repository::delete_source_profile(input.id, input.mode)
+    })
+    .await
+    .map_err(|error| error.to_string())??;
+
+    publish_snapshot(&app, snapshot)
 }
 
 #[tauri::command]
@@ -804,6 +813,22 @@ pub fn enqueue_media_thumbnail_generation(
 pub fn media_thumbnail_queue_status(
 ) -> Result<crate::domain::models::MediaThumbnailQueueStatus, String> {
     media_thumbnail_runtime::queue_status()
+}
+
+/// Moves reviewed invalid/unthumbnailable media to the OS Recycle Bin, writes
+/// ledger tombstones (so the next sync will not re-download), and dismisses
+/// matching review items from the thumbnail queue UI.
+#[tauri::command]
+pub fn resolve_media_thumbnail_review(
+    source_id: String,
+    relative_paths: Vec<String>,
+) -> Result<crate::domain::models::MediaThumbnailQueueStatus, String> {
+    if relative_paths.is_empty() {
+        return media_thumbnail_runtime::queue_status();
+    }
+    let _gallery =
+        workspace_repository::delete_source_media(source_id.clone(), relative_paths.clone())?;
+    media_thumbnail_runtime::dismiss_review_items(&source_id, &relative_paths)
 }
 
 #[tauri::command]

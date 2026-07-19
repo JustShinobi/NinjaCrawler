@@ -553,6 +553,20 @@ pub struct AvatarThumbnailBatch {
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct MediaThumbnailReviewItem {
+    /// Absolute path of the media file on disk.
+    pub absolute_path: String,
+    /// Path relative to the source profile root (for `delete_source_media`).
+    pub relative_path: String,
+    pub file_name: String,
+    /// Machine-readable kind: `invalid_media` (no visual stream / corrupt) or
+    /// `generation_failed` (tooling/IO).
+    pub kind: String,
+    pub reason: String,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct MediaThumbnailQueueItem {
     pub source_id: String,
     pub provider: String,
@@ -566,8 +580,13 @@ pub struct MediaThumbnailQueueItem {
     pub generated: u32,
     pub skipped_existing: u32,
     pub failed: u32,
+    /// Non-visual/corrupt media that needs manual review (warning path).
+    pub invalid_media: u32,
     pub current_file: Option<String>,
     pub progress_percent: Option<u32>,
+    /// Accumulated during the run; copied into the finished result.
+    #[serde(default)]
+    pub review_items: Vec<MediaThumbnailReviewItem>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -581,6 +600,9 @@ pub struct MediaThumbnailQueueResult {
     pub generated: u32,
     pub skipped_existing: u32,
     pub failed: u32,
+    pub invalid_media: u32,
+    #[serde(default)]
+    pub review_items: Vec<MediaThumbnailReviewItem>,
     pub finished_at: String,
 }
 

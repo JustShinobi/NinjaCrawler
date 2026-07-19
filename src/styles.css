@@ -6181,6 +6181,68 @@ p {
   color: var(--text-muted);
 }
 
+.thumbnail-review-panel {
+  margin-top: 0.55rem;
+  padding: 0.55rem 0.65rem;
+  border: 1px solid var(--accent-line);
+  border-radius: 10px;
+  background: var(--accent-soft);
+  display: grid;
+  gap: 0.45rem;
+}
+
+.thumbnail-review-lead {
+  margin: 0;
+  font-size: 0.82rem;
+  color: var(--ink-soft);
+  line-height: 1.35;
+}
+
+.thumbnail-review-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.35rem;
+  max-height: 10rem;
+  overflow: auto;
+}
+
+.thumbnail-review-list li {
+  display: grid;
+  gap: 0.1rem;
+  padding: 0.3rem 0.35rem;
+  border-radius: 6px;
+  background: rgba(255, 253, 249, 0.72);
+}
+
+.thumbnail-review-list code {
+  font-family: var(--font-data);
+  font-size: 0.78rem;
+  color: var(--ink);
+  word-break: break-all;
+}
+
+.thumbnail-review-kind {
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--accent);
+}
+
+.thumbnail-review-list small {
+  color: var(--muted);
+  font-size: 0.74rem;
+  line-height: 1.3;
+}
+
+.thumbnail-review-delete {
+  justify-self: start;
+  color: var(--danger);
+  border-color: color-mix(in srgb, var(--danger) 35%, var(--line));
+}
+
 @media (max-width: 680px) {
   .queue-status-action-strip {
     display: grid;

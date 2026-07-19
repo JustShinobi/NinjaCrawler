@@ -843,7 +843,86 @@ fn is_profile_image_file_excludes_avatar_and_profile_picture() {
 }
 
 #[test]
-fn reconcile_tiktok_provider_ledgers_from_disk_seeds_existing_files() {
+fn purge_provider_ledgers_missing_on_disk_unblocks_redownload_after_partial_delete() {
+    // Simula delete-with-media que apagou os arquivos mas deixou o perfil + ledgers.
+    // Sem purge, o TikTok connector trata todo post_key como "já tenho" e não rebaixa.
+    let (_temp_dir, layout) = create_test_layout();
+
+    let (purged_media, purged_posts, remaining_posts, remaining_media) =
+        with_workspace_layout(layout, |connection, test_layout| {
+            upsert_provider_account_with_connection(
+                connection,
+                test_layout,
+                sample_account("account-1", "tiktok"),
+            )?;
+            let mut source = sample_source("source-1", "tiktok", Some("account-1"));
+            source.handle = "_xavierjhenifer".to_string();
+            upsert_source_profile_with_connection(connection, test_layout, source)?;
+
+            let profile_root = test_layout.media_root.join("tiktok").join("_xavierjhenifer");
+            fs::create_dir_all(&profile_root).map_err(|error| error.to_string())?;
+            // One file still on disk (should keep its ledger rows).
+            fs::write(
+                profile_root.join("_xavierjhenifer_100_1111111111111111111.mp4"),
+                b"kept",
+            )
+            .map_err(|error| error.to_string())?;
+
+            connection
+                .execute_batch(
+                    "INSERT INTO provider_sync_post_ledger
+                        (provider, source_id, account_id, source_handle, provider_post_key,
+                         provider_post_code, media_section, first_seen_at, last_seen_at)
+                     VALUES
+                        ('tiktok','source-1','account-1','_xavierjhenifer','1111111111111111111','','timeline','t0','t0'),
+                        ('tiktok','source-1','account-1','_xavierjhenifer','2222222222222222222','','timeline','t0','t0');
+                     INSERT INTO provider_sync_media_ledger
+                        (provider, source_id, account_id, source_handle, provider_media_key,
+                         media_type, media_section, relative_path, first_seen_at, last_seen_at, provider_post_key)
+                     VALUES
+                        ('tiktok','source-1','account-1','_xavierjhenifer',
+                         '_xavierjhenifer_100_1111111111111111111.mp4','video','timeline',
+                         '_xavierjhenifer_100_1111111111111111111.mp4','t0','t0','1111111111111111111'),
+                        ('tiktok','source-1','account-1','_xavierjhenifer',
+                         '_xavierjhenifer_200_2222222222222222222.mp4','video','timeline',
+                         '_xavierjhenifer_200_2222222222222222222.mp4','t0','t0','2222222222222222222');",
+                )
+                .map_err(|error| error.to_string())?;
+
+            let (purged_media, purged_posts) = purge_provider_ledgers_missing_on_disk(
+                connection,
+                "tiktok",
+                "source-1",
+                &profile_root,
+            )?;
+            let remaining_posts: i64 = connection
+                .query_row(
+                    "SELECT COUNT(*) FROM provider_sync_post_ledger
+                     WHERE provider = 'tiktok' AND source_id = 'source-1'",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(|error| error.to_string())?;
+            let remaining_media: i64 = connection
+                .query_row(
+                    "SELECT COUNT(*) FROM provider_sync_media_ledger
+                     WHERE provider = 'tiktok' AND source_id = 'source-1'",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(|error| error.to_string())?;
+            Ok((purged_media, purged_posts, remaining_posts, remaining_media))
+        })
+        .expect("purge should reconcile missing media");
+
+    assert_eq!(purged_media, 1, "missing media row should be purged");
+    assert_eq!(purged_posts, 1, "post key without media should be purged");
+    assert_eq!(remaining_posts, 1, "on-disk post should remain known");
+    assert_eq!(remaining_media, 1, "on-disk media row should remain");
+}
+
+#[test]
+fn reconcile_tiktok_provider_ledgers_seeds_existing_files() {
     let (_temp_dir, layout) = create_test_layout();
 
     let (recovered, post_count, media_count, thumbnail_count, liked_timeline_count, liked_likes_count) =
@@ -918,7 +997,7 @@ fn reconcile_tiktok_provider_ledgers_from_disk_seeds_existing_files() {
                 )
                 .map_err(|error| error.to_string())?;
 
-            let recovered = reconcile_tiktok_provider_ledgers_from_disk(
+            let reconcile = reconcile_tiktok_provider_ledgers(
                 connection,
                 &profile_root,
                 "account-1",
@@ -926,6 +1005,7 @@ fn reconcile_tiktok_provider_ledgers_from_disk_seeds_existing_files() {
                 "@archangelszxx",
                 "2026-07-08T00:00:00Z",
             )?;
+            let recovered = reconcile.recovered_from_disk;
             let post_count: i64 = connection
                 .query_row(
                     "SELECT COUNT(*) FROM provider_sync_post_ledger
@@ -3110,6 +3190,23 @@ fn deleting_provider_account_ignores_soft_deleted_sources() {
 }
 
 #[test]
+fn remove_directory_resilient_deletes_nested_thumbs_tree() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let root = temp.path().join("profile");
+    let thumbs = root.join(".thumbs");
+    fs::create_dir_all(&thumbs).expect("thumbs dir");
+    fs::write(root.join("video.mp4"), b"video").expect("media");
+    fs::write(thumbs.join("video.mp4.jpg"), b"thumb").expect("thumb");
+    // Nested leftover like Windows leave-behind after a partial delete.
+    let nested = thumbs.join("nested");
+    fs::create_dir_all(&nested).expect("nested");
+    fs::write(nested.join("stale.tmp.jpg"), b"tmp").expect("tmp");
+
+    remove_directory_resilient(&root).expect("resilient delete");
+    assert!(!root.exists(), "profile media root should be fully removed");
+}
+
+#[test]
 fn provider_account_settings_roundtrip_through_editor_load() {
     let (_temp_dir, layout) = create_test_layout();
 
@@ -3841,9 +3938,70 @@ fn queued_media_thumbnail_generation_dispatches_images_without_ffmpeg() {
 
     let invalid = temp_dir.path().join("invalid.webp");
     fs::write(&invalid, b"not an image").expect("invalid source image");
-    assert_eq!(
-        generate_media_thumbnail(&invalid),
-        MediaThumbnailGenerationOutcome::Failed
+    match generate_media_thumbnail(&invalid) {
+        MediaThumbnailGenerationOutcome::InvalidMedia { reason } => {
+            assert!(
+                reason.to_ascii_lowercase().contains("undecodable")
+                    || reason.to_ascii_lowercase().contains("corrupt"),
+                "unexpected reason: {reason}"
+            );
+        }
+        other => panic!("expected InvalidMedia for corrupt image, got {other:?}"),
+    }
+}
+
+#[test]
+fn non_visual_mp4_thumbnail_is_invalid_media_not_hard_fail() {
+    // Mídia sem stream de vídeo (inválida online ou só áudio): warning path
+    // (InvalidMedia), não Failed de pipeline.
+    let Some(ffmpeg) = crate::infrastructure::media_tool_runtime::ffmpeg_executable() else {
+        eprintln!(
+            "skipping non_visual_mp4_thumbnail_is_invalid_media_not_hard_fail: ffmpeg unavailable"
+        );
+        return;
+    };
+    let temp_dir = tempfile::tempdir().expect("temp dir");
+    let audio_only = temp_dir.path().join("audio-only.mp4");
+    let status = std::process::Command::new(&ffmpeg)
+        .args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "anullsrc=r=44100:cl=mono",
+            "-t",
+            "0.5",
+            "-c:a",
+            "aac",
+        ])
+        .arg(&audio_only)
+        .status()
+        .expect("spawn ffmpeg for audio-only fixture");
+    if !status.success() || !audio_only.is_file() {
+        eprintln!(
+            "skipping non_visual_mp4_thumbnail_is_invalid_media_not_hard_fail: could not create fixture"
+        );
+        return;
+    }
+    match generate_media_thumbnail(&audio_only) {
+        MediaThumbnailGenerationOutcome::InvalidMedia { reason } => {
+            assert!(
+                reason.to_ascii_lowercase().contains("video")
+                    || reason.to_ascii_lowercase().contains("invalid")
+                    || reason.to_ascii_lowercase().contains("manual"),
+                "unexpected reason: {reason}"
+            );
+        }
+        other => panic!("expected InvalidMedia for non-visual media, got {other:?}"),
+    }
+    assert!(
+        !video_thumbnail_path(&audio_only)
+            .map(|path| path.is_file())
+            .unwrap_or(false),
+        "non-visual media must not produce a thumb file"
     );
 }
 

@@ -637,6 +637,15 @@ export interface SourceMediaGallery {
     statsUpdatedAt?: string
 }
 
+export interface MediaThumbnailReviewItem {
+  absolutePath: string
+  relativePath: string
+  fileName: string
+  /** `invalid_media` (no visual stream / corrupt) or `generation_failed`. */
+  kind: 'invalid_media' | 'generation_failed' | string
+  reason: string
+}
+
 export interface MediaThumbnailQueueItem {
   sourceId: string
   provider: ProviderKey
@@ -650,19 +659,24 @@ export interface MediaThumbnailQueueItem {
   generated: number
   skippedExisting: number
   failed: number
+  invalidMedia: number
   currentFile?: string
   progressPercent?: number
+  reviewItems?: MediaThumbnailReviewItem[]
 }
 
 export interface MediaThumbnailQueueResult {
   sourceId: string
   provider: ProviderKey
   handle: string
-  status: 'succeeded' | 'failed'
+  /** `warning` = invalid media and/or partial generation issues; manual review. */
+  status: 'succeeded' | 'warning' | 'failed'
   summary: string
   generated: number
   skippedExisting: number
   failed: number
+  invalidMedia: number
+  reviewItems: MediaThumbnailReviewItem[]
   finishedAt: string
 }
 

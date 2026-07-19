@@ -48,14 +48,28 @@ pub(super) fn instagram_error_policy_settings(
     (exclude, log_skipped, tagged_limit)
 }
 
-pub(super) fn reconcile_tiktok_provider_ledgers_from_disk(
+/// Result of a bidirectional ledger ↔ disk reconcile for a TikTok source.
+#[derive(Debug, Default, Clone, Copy)]
+pub(super) struct TikTokLedgerReconcileStats {
+    pub recovered_from_disk: usize,
+    pub purged_media_rows: usize,
+    pub purged_post_rows: usize,
+}
+
+/// Two-way ledger reconcile before TikTok sync (and after partial delete-with-media):
+/// 1. purge media/post ledger rows whose files no longer exist on disk
+/// 2. recover on-disk files that are missing from the ledger
+///
+/// Without (1), a failed delete-with-media (disk wiped, profile still in DB) leaves
+/// post keys in the ledger and the connector skips every post as "already have it".
+pub(super) fn reconcile_tiktok_provider_ledgers(
     connection: &Connection,
     profile_root: &Path,
     account_id: &str,
     source_id: &str,
     source_handle: &str,
     timestamp: &str,
-) -> Result<usize, String> {
+) -> Result<TikTokLedgerReconcileStats, String> {
     // Purge liked media that earlier builds wrongly reconciled as "timeline".
     // Those rows share the physical file (and therefore the gallery's relative
     // path key) with the likes runtime's own "likes" row, so leaving them behind
@@ -64,6 +78,9 @@ pub(super) fn reconcile_tiktok_provider_ledgers_from_disk(
     // is untouched; if no likes row exists the gallery falls back to the on-disk
     // `Liked/` folder and still classifies it correctly.
     purge_reconciled_tiktok_liked_timeline_rows(connection, source_id)?;
+
+    let (purged_media_rows, purged_post_rows) =
+        purge_provider_ledgers_missing_on_disk(connection, "tiktok", source_id, profile_root)?;
 
     let files = collect_media_file_paths(profile_root)?;
     let mut observed_by_post: HashMap<String, twitter_connector::ObservedTwitterPost> =
@@ -107,34 +124,161 @@ pub(super) fn reconcile_tiktok_provider_ledgers_from_disk(
         });
     }
 
-    if recovered_media.is_empty() {
-        return Ok(0);
-    }
-
-    let mut observed_posts = observed_by_post.into_values().collect::<Vec<_>>();
-    observed_posts.sort_by(|left, right| left.provider_post_key.cmp(&right.provider_post_key));
-    upsert_provider_sync_post_ledger_entries(
-        connection,
-        "tiktok",
-        source_id,
-        account_id,
-        source_handle,
-        &observed_posts,
-        timestamp,
-    )?;
-    upsert_provider_sync_media_ledger_entries(
-        connection,
-        &ProviderSyncMediaScope {
-            provider: "tiktok",
+    let mut recovered_from_disk = 0usize;
+    if !recovered_media.is_empty() {
+        let mut observed_posts = observed_by_post.into_values().collect::<Vec<_>>();
+        observed_posts.sort_by(|left, right| left.provider_post_key.cmp(&right.provider_post_key));
+        upsert_provider_sync_post_ledger_entries(
+            connection,
+            "tiktok",
             source_id,
             account_id,
             source_handle,
-            profile_root,
+            &observed_posts,
             timestamp,
-        },
-        &recovered_media,
-    )?;
-    Ok(recovered_media.len())
+        )?;
+        upsert_provider_sync_media_ledger_entries(
+            connection,
+            &ProviderSyncMediaScope {
+                provider: "tiktok",
+                source_id,
+                account_id,
+                source_handle,
+                profile_root,
+                timestamp,
+            },
+            &recovered_media,
+        )?;
+        recovered_from_disk = recovered_media.len();
+    }
+
+    Ok(TikTokLedgerReconcileStats {
+        recovered_from_disk,
+        purged_media_rows,
+        purged_post_rows,
+    })
+}
+
+/// Drop media-ledger rows whose relative_path is gone from disk, then drop post-
+/// ledger keys that no longer have any media-ledger rows for this source.
+/// Returns `(purged_media_rows, purged_post_rows)`.
+pub(super) fn purge_provider_ledgers_missing_on_disk(
+    connection: &Connection,
+    provider: &str,
+    source_id: &str,
+    profile_root: &Path,
+) -> Result<(usize, usize), String> {
+    let provider = provider.to_ascii_lowercase();
+    let mut statement = connection
+        .prepare(
+            "SELECT relative_path, provider_post_key FROM provider_sync_media_ledger
+             WHERE provider = ?1 AND source_id = ?2",
+        )
+        .map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map(params![&provider, source_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+        })
+        .map_err(|error| error.to_string())?;
+
+    let mut stale_paths = Vec::new();
+    for row in rows {
+        let (relative_path, _post_key) = row.map_err(|error| error.to_string())?;
+        let normalized = relative_path.replace('\\', "/");
+        let abs = profile_root.join(normalized.trim_start_matches('/'));
+        if !abs.is_file() {
+            stale_paths.push(relative_path);
+        }
+    }
+
+    let mut purged_media = 0usize;
+    for relative_path in &stale_paths {
+        purged_media += connection
+            .execute(
+                "DELETE FROM provider_sync_media_ledger
+                 WHERE provider = ?1 AND source_id = ?2 AND relative_path = ?3",
+                params![&provider, source_id, relative_path],
+            )
+            .map_err(|error| error.to_string())? as usize;
+    }
+
+    // Post keys that still have at least one media-ledger row remain "known".
+    // Keys that lost every media row are stale (typical after partial with-media
+    // delete) and would block re-download forever if left behind.
+    let remaining_post_keys: HashSet<String> = {
+        let mut statement = connection
+            .prepare(
+                "SELECT DISTINCT provider_post_key FROM provider_sync_media_ledger
+                 WHERE provider = ?1 AND source_id = ?2
+                   AND provider_post_key IS NOT NULL
+                   AND TRIM(provider_post_key) != ''",
+            )
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map(params![&provider, source_id], |row| row.get::<_, String>(0))
+            .map_err(|error| error.to_string())?;
+        let mut keys = HashSet::new();
+        for row in rows {
+            let key = row.map_err(|error| error.to_string())?;
+            keys.insert(key);
+        }
+        keys
+    };
+
+    let all_post_keys: Vec<String> = {
+        let mut statement = connection
+            .prepare(
+                "SELECT provider_post_key FROM provider_sync_post_ledger
+                 WHERE provider = ?1 AND source_id = ?2",
+            )
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map(params![&provider, source_id], |row| row.get::<_, String>(0))
+            .map_err(|error| error.to_string())?;
+        let mut keys = Vec::new();
+        for row in rows {
+            keys.push(row.map_err(|error| error.to_string())?);
+        }
+        keys
+    };
+
+    let mut purged_posts = 0usize;
+    for post_key in all_post_keys {
+        if remaining_post_keys.contains(&post_key) {
+            continue;
+        }
+        // If the post id still has a matching file on disk under a path that
+        // was never ledgered, keep the post key (disk recovery runs next).
+        // Otherwise purge so the next sync re-downloads.
+        let keep_for_disk = post_key_has_media_on_disk(profile_root, &post_key);
+        if keep_for_disk {
+            continue;
+        }
+        purged_posts += connection
+            .execute(
+                "DELETE FROM provider_sync_post_ledger
+                 WHERE provider = ?1 AND source_id = ?2 AND provider_post_key = ?3",
+                params![&provider, source_id, post_key],
+            )
+            .map_err(|error| error.to_string())? as usize;
+    }
+
+    Ok((purged_media, purged_posts))
+}
+
+fn post_key_has_media_on_disk(profile_root: &Path, post_key: &str) -> bool {
+    let needle = post_key.trim();
+    if needle.is_empty() || !profile_root.is_dir() {
+        return false;
+    }
+    collect_media_file_paths(profile_root)
+        .unwrap_or_default()
+        .into_iter()
+        .any(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.contains(needle))
+        })
 }
 
 /// Removes the bogus `media_section = "timeline"` rows that older builds wrote
@@ -3247,7 +3391,7 @@ pub(super) fn execute_tiktok_source_sync_with_connection(
         String::new()
     };
 
-    let recovered_from_disk = reconcile_tiktok_provider_ledgers_from_disk(
+    let reconcile = reconcile_tiktok_provider_ledgers(
         connection,
         &profile_root,
         &context.account.id,
@@ -3255,7 +3399,10 @@ pub(super) fn execute_tiktok_source_sync_with_connection(
         &handle,
         &started_at,
     )?;
-    if recovered_from_disk > 0 {
+    if reconcile.recovered_from_disk > 0
+        || reconcile.purged_media_rows > 0
+        || reconcile.purged_post_rows > 0
+    {
         log_runtime_event(
             layout,
             "sync.ledger",
@@ -3267,7 +3414,10 @@ pub(super) fn execute_tiktok_source_sync_with_connection(
                 source_handle: Some(&context.source.handle),
             },
             format!(
-                "Recovered {recovered_from_disk} TikTok media ledger item(s) from existing files before sync."
+                "TikTok ledger reconcile: recovered {} from disk, purged {} missing media row(s) and {} stale post key(s).",
+                reconcile.recovered_from_disk,
+                reconcile.purged_media_rows,
+                reconcile.purged_post_rows
             ),
             None,
         );

@@ -201,13 +201,29 @@ pub(super) fn is_thumbnailable_image(path: &Path) -> bool {
     )
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum MediaThumbnailGenerationOutcome {
     Generated,
+    /// Small image that already fits the thumb budget — not an error.
     NotNeeded,
-    Failed,
+    /// Media has no usable visual content (audio-only / empty / corrupt container).
+    /// Surfaces as a queue **warning** with manual review + recycle-bin option.
+    InvalidMedia { reason: String },
+    /// Tooling/IO failure while generating a thumb for otherwise valid media.
+    Failed { reason: String },
 }
 
+#[derive(Debug)]
+enum VideoThumbnailEnsureResult {
+    Ready(String),
+    /// Sem stream de vídeo / mídia sem conteúdo visual utilizável.
+    InvalidMedia { reason: String },
+    Failed { detail: String },
+}
+
+/// Generate (or classify) a media thumbnail beside the source file.
+/// Returns `InvalidMedia` for non-visual/corrupt content (warning + review path)
+/// and `Failed` for tooling/IO errors.
 pub(crate) fn generate_media_thumbnail(source: &Path) -> MediaThumbnailGenerationOutcome {
     if is_thumbnailable_image(source) {
         return match generate_image_thumbnail(source) {
@@ -215,15 +231,85 @@ pub(crate) fn generate_media_thumbnail(source: &Path) -> MediaThumbnailGeneratio
                 MediaThumbnailGenerationOutcome::Generated
             }
             Some(ImageThumbnailGeneration::NotNeeded) => MediaThumbnailGenerationOutcome::NotNeeded,
-            None => MediaThumbnailGenerationOutcome::Failed,
+            None => {
+                let reason =
+                    "Image is undecodable or corrupt (thumbnail could not be generated).".to_string();
+                log_thumbnail_issue(source, "warn", "invalid_media", &reason);
+                MediaThumbnailGenerationOutcome::InvalidMedia { reason }
+            }
         };
     }
 
-    if ensure_video_thumbnail(source).is_some() {
-        MediaThumbnailGenerationOutcome::Generated
-    } else {
-        MediaThumbnailGenerationOutcome::Failed
+    match ensure_video_thumbnail_result(source) {
+        VideoThumbnailEnsureResult::Ready(_) => MediaThumbnailGenerationOutcome::Generated,
+        VideoThumbnailEnsureResult::InvalidMedia { reason } => {
+            log_thumbnail_issue(source, "warn", "invalid_media", &reason);
+            MediaThumbnailGenerationOutcome::InvalidMedia { reason }
+        }
+        VideoThumbnailEnsureResult::Failed { detail } => {
+            log_thumbnail_issue(source, "warn", "generation_failed", &detail);
+            MediaThumbnailGenerationOutcome::Failed { reason: detail }
+        }
     }
+}
+
+fn log_thumbnail_issue(source: &Path, level: &str, kind: &str, detail: &str) {
+    let _ = runtime_log::append_workspace(
+        "media.thumbnail",
+        level,
+        RuntimeLogAnchor::default(),
+        format!("Thumbnail {kind} for '{}'.", source.display()),
+        Some(detail.to_string()),
+    );
+}
+
+/// Absolute media root for a source profile — used by the thumbnail queue to
+/// derive `relative_path` for recycle-bin + ledger deletion.
+pub fn media_thumbnail_source_root(source_id: &str) -> Result<PathBuf, String> {
+    with_workspace(|connection, layout| {
+        let row = connection
+            .query_row(
+                "SELECT provider, handle, account_id, sync_options_json FROM source_profiles
+                 WHERE id = ?1 AND deleted_at IS NULL LIMIT 1",
+                params![source_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| format!("Source '{source_id}' does not exist."))?;
+        let (provider, handle, account_id, sync_options_json) = row;
+        let source = SourceProfile {
+            id: source_id.to_string(),
+            provider: provider.clone(),
+            source_kind: "profile".to_string(),
+            handle,
+            display_name: String::new(),
+            account_id,
+            group_id: None,
+            labels: Vec::new(),
+            ready_for_download: false,
+            sync_options: deserialize_source_sync_options(&provider, &sync_options_json),
+            profile_image_path: None,
+            profile_image_custom: false,
+            remote_state: "exists".to_string(),
+            is_subscription: false,
+            last_synced_at: None,
+            sync_problem_code: None,
+            sync_problem_message: None,
+            sync_problem_at: None,
+            created_at: None,
+            importer_id: None,
+            imported_at: None,
+        };
+        resolved_source_media_output_root_with_connection(connection, layout, &source)
+    })
 }
 
 pub fn media_thumbnail_source_seed(source_id: &str) -> Result<(String, String), String> {
@@ -276,15 +362,68 @@ pub(crate) fn media_thumbnail_is_current(source: &Path) -> bool {
         .is_some_and(|(thumb_mtime, media_mtime)| thumb_mtime >= media_mtime)
 }
 pub(crate) fn ensure_video_thumbnail(source: &Path) -> Option<String> {
-    fs::metadata(source).ok()?;
-    let output = video_thumbnail_path(source)?;
-    let thumbs_dir = output.parent()?;
-    fs::create_dir_all(thumbs_dir).ok()?;
-    let source_name = source.file_name()?.to_string_lossy();
+    match ensure_video_thumbnail_result(source) {
+        VideoThumbnailEnsureResult::Ready(path) => Some(path),
+        VideoThumbnailEnsureResult::InvalidMedia { .. }
+        | VideoThumbnailEnsureResult::Failed { .. } => None,
+    }
+}
+
+/// Gera thumb de vídeo e classifica o resultado: pronto, mídia inválida
+/// (sem stream visual) ou falha de ferramenta com detalhe (stderr/ffmpeg).
+fn ensure_video_thumbnail_result(source: &Path) -> VideoThumbnailEnsureResult {
+    if fs::metadata(source).is_err() {
+        return VideoThumbnailEnsureResult::Failed {
+            detail: format!("Source media is missing: {}", source.display()),
+        };
+    }
+    let Some(output) = video_thumbnail_path(source) else {
+        return VideoThumbnailEnsureResult::Failed {
+            detail: format!(
+                "Could not derive thumbnail path for '{}'.",
+                source.display()
+            ),
+        };
+    };
+    let Some(thumbs_dir) = output.parent().map(Path::to_path_buf) else {
+        return VideoThumbnailEnsureResult::Failed {
+            detail: format!(
+                "Could not resolve .thumbs directory for '{}'.",
+                source.display()
+            ),
+        };
+    };
+    if let Err(error) = fs::create_dir_all(&thumbs_dir) {
+        return VideoThumbnailEnsureResult::Failed {
+            detail: format!(
+                "Failed to create thumbnail directory '{}': {error}",
+                thumbs_dir.display()
+            ),
+        };
+    }
+    let source_name = source
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "media".to_string());
     if media_thumbnail_is_current(source) {
-        return Some(output.to_string_lossy().to_string());
+        return VideoThumbnailEnsureResult::Ready(output.to_string_lossy().to_string());
     }
     let _ = fs::remove_file(&output);
+
+    // Sem stream de vídeo: mídia online/local inválida ou só áudio — warning +
+    // revisão manual (não conta como falha de pipeline).
+    if media_lacks_video_stream(source) {
+        return VideoThumbnailEnsureResult::InvalidMedia {
+            reason: "No video stream (invalid or non-visual media). Manual check recommended."
+                .to_string(),
+        };
+    }
+
+    let Some(ffmpeg) = media_tool_runtime::ffmpeg_executable() else {
+        return VideoThumbnailEnsureResult::Failed {
+            detail: "FFmpeg is not available on PATH or as a managed runtime.".to_string(),
+        };
+    };
 
     static TEMP_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let sequence = TEMP_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -295,10 +434,11 @@ pub(crate) fn ensure_video_thumbnail(source: &Path) -> Option<String> {
     ));
     // -ss antes do -i (seek rápido); vídeos mais curtos que o seek não emitem
     // frame algum, então tenta 1s e cai para o 1º frame.
-    let ffmpeg = media_tool_runtime::ffmpeg_executable()?;
+    let mut last_detail = String::from("FFmpeg did not produce a thumbnail frame.");
     for seek in ["1", "0"] {
         let mut command = Command::new(&ffmpeg);
         configure_background_command(&mut command);
+        media_tool_runtime::configure_tool_path(&mut command);
         let result = command
             .arg("-hide_banner")
             .arg("-loglevel")
@@ -316,26 +456,100 @@ pub(crate) fn ensure_video_thumbnail(source: &Path) -> Option<String> {
             .arg("4")
             .arg(&temp_output)
             .output();
-        let ok = result.map(|out| out.status.success()).unwrap_or(false);
-        if ok
-            && fs::metadata(&temp_output)
-                .map(|meta| meta.len() > 0)
-                .unwrap_or(false)
-        {
-            // Outra geração concorrente pode ter vencido; qualquer jpg completo
-            // é equivalente para a mesma mídia.
-            if output.is_file() || fs::rename(&temp_output, &output).is_err() {
-                let _ = fs::remove_file(&temp_output);
+        match result {
+            Ok(out) => {
+                let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+                let ok = out.status.success()
+                    && fs::metadata(&temp_output)
+                        .map(|meta| meta.len() > 0)
+                        .unwrap_or(false);
+                if ok {
+                    // Outra geração concorrente pode ter vencido; qualquer jpg completo
+                    // é equivalente para a mesma mídia.
+                    if output.is_file() || fs::rename(&temp_output, &output).is_err() {
+                        let _ = fs::remove_file(&temp_output);
+                    }
+                    if output.is_file() {
+                        return VideoThumbnailEnsureResult::Ready(
+                            output.to_string_lossy().to_string(),
+                        );
+                    }
+                    last_detail = format!(
+                        "FFmpeg wrote a temp frame (seek={seek}s) but the final thumb could not be published."
+                    );
+                } else {
+                    last_detail = if stderr.is_empty() {
+                        format!(
+                            "FFmpeg failed extracting frame at seek={seek}s (exit={}).",
+                            out.status
+                        )
+                    } else {
+                        format!("FFmpeg seek={seek}s: {stderr}")
+                    };
+                    // stderr típico de mídia sem stream de vídeo
+                    if is_no_video_stream_message(&last_detail) {
+                        let _ = fs::remove_file(&temp_output);
+                        return VideoThumbnailEnsureResult::InvalidMedia {
+                            reason: format!(
+                                "No extractable video frame ({last_detail}). Manual check recommended."
+                            ),
+                        };
+                    }
+                }
             }
-            if output.is_file() {
-                return Some(output.to_string_lossy().to_string());
+            Err(error) => {
+                last_detail = format!("Failed to spawn FFmpeg: {error}");
             }
         }
         let _ = fs::remove_file(&temp_output);
     }
     // Não deixa um jpg vazio/parcial envenenar o cache.
     let _ = fs::remove_file(&temp_output);
-    None
+    VideoThumbnailEnsureResult::Failed {
+        detail: last_detail,
+    }
+}
+
+/// `true` quando o arquivo existe e o ffprobe confirma **ausência** de stream de
+/// vídeo. `false` quando há stream de vídeo **ou** o probe não pôde decidir
+/// (falha de ferramenta) — nesse caso o caller ainda tenta o ffmpeg.
+fn media_lacks_video_stream(source: &Path) -> bool {
+    let Some(ffprobe) = media_tool_runtime::ffprobe_executable() else {
+        return false;
+    };
+    let mut command = Command::new(&ffprobe);
+    configure_background_command(&mut command);
+    media_tool_runtime::configure_tool_path(&mut command);
+    let Ok(output) = command
+        .args([
+            "-v",
+            "error",
+            "-select_streams",
+            "v",
+            "-show_entries",
+            "stream=codec_type",
+            "-of",
+            "csv=p=0",
+        ])
+        .arg(source)
+        .output()
+    else {
+        return false;
+    };
+    if !output.status.success() {
+        return false;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    !stdout
+        .lines()
+        .any(|line| line.trim().eq_ignore_ascii_case("video"))
+}
+
+fn is_no_video_stream_message(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("does not contain any stream")
+        || lower.contains("output file does not contain any stream")
+        || lower.contains("matches no streams")
 }
 const MEDIA_IMAGE_THUMB_MAX_DIMENSION: u32 = 480;
 const MEDIA_IMAGE_THUMB_JPEG_QUALITY: u8 = 80;
