@@ -312,16 +312,54 @@ export function SingleVideosPage() {
     [previewItems],
   )
   const closeLightbox = useCallback(() => setLightboxIndex(undefined), [])
-  const stepLightbox = useCallback(
+
+  /** Índices do 1º arquivo de cada vídeo na lista plana do lightbox. */
+  const videoStartIndices = useMemo(() => {
+    const starts: number[] = []
+    let lastId: string | undefined
+    previewItems.forEach((item, index) => {
+      if (item.video.id !== lastId) {
+        starts.push(index)
+        lastId = item.video.id
+      }
+    })
+    return starts
+  }, [previewItems])
+
+  const stepLightboxPost = useCallback(
+    (delta: number) => {
+      setLightboxIndex((current) => {
+        if (current === undefined || videoStartIndices.length === 0) return current
+        let pos = 0
+        for (let i = 0; i < videoStartIndices.length; i++) {
+          const start = videoStartIndices[i]!
+          const end = (videoStartIndices[i + 1] ?? previewItems.length) - 1
+          if (current >= start && current <= end) {
+            pos = i
+            break
+          }
+        }
+        const next = pos + delta
+        if (next < 0 || next >= videoStartIndices.length) return current
+        return videoStartIndices[next]!
+      })
+    },
+    [previewItems.length, videoStartIndices],
+  )
+
+  const stepLightboxSlide = useCallback(
     (delta: number) => {
       setLightboxIndex((current) => {
         if (current === undefined) return current
+        const item = previewItems[current]
+        if (!item) return current
         const next = current + delta
         if (next < 0 || next >= previewItems.length) return current
+        if (previewItems[next]?.video.id !== item.video.id) return current
         return next
       })
     },
-    [previewItems.length],
+    [previewItems],
   )
 
   const performDelete = useCallback(async () => {
@@ -427,6 +465,15 @@ export function SingleVideosPage() {
     activeItem && activeVideo
       ? activeVideo.files.findIndex((file) => file.absolutePath === activeItem.file.absolutePath)
       : -1
+  const activeVideoPos = useMemo(() => {
+    if (lightboxIndex === undefined) return -1
+    for (let i = 0; i < videoStartIndices.length; i++) {
+      const start = videoStartIndices[i]!
+      const end = (videoStartIndices[i + 1] ?? previewItems.length) - 1
+      if (lightboxIndex >= start && lightboxIndex <= end) return i
+    }
+    return -1
+  }, [lightboxIndex, videoStartIndices, previewItems.length])
   const activeTitle =
     activeVideo && activeVideo.files.length > 1 && activeFileIndex >= 0
       ? `${activeVideo.uploader ? `@${activeVideo.uploader}` : providerLabel(activeVideo.provider)} · ${activeFileIndex + 1} / ${activeVideo.files.length}`
@@ -694,10 +741,18 @@ export function SingleVideosPage() {
         <MediaLightbox
           fileAbsPath={activeItem.file.absolutePath}
           isVideo={isSingleVideoVideo(activeItem.file.mediaType)}
-          hasPrev={lightboxIndex! > 0}
-          hasNext={lightboxIndex! < previewItems.length - 1}
-          onPrev={() => stepLightbox(-1)}
-          onNext={() => stepLightbox(1)}
+          hasPrev={activeVideoPos > 0}
+          hasNext={activeVideoPos >= 0 && activeVideoPos < videoStartIndices.length - 1}
+          onPrev={() => stepLightboxPost(-1)}
+          onNext={() => stepLightboxPost(1)}
+          hasSlidePrev={activeFileIndex > 0}
+          hasSlideNext={
+            activeVideo.files.length > 1 &&
+            activeFileIndex >= 0 &&
+            activeFileIndex < activeVideo.files.length - 1
+          }
+          onSlidePrev={() => stepLightboxSlide(-1)}
+          onSlideNext={() => stepLightboxSlide(1)}
           onClose={closeLightbox}
           title={activeTitle}
           audioAbsPath={activeVideo.mediaType === 'slideshow' ? activeVideo.audioAbsolutePath : undefined}

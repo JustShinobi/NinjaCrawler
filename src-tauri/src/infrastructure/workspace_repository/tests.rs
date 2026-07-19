@@ -453,6 +453,25 @@ fn single_video_display_path_uses_requested_tiktok_photo_index() {
 }
 
 #[test]
+fn find_slideshow_audio_discovers_post_id_audio_next_to_images() {
+    let temp_dir = tempfile::tempdir().expect("temp dir");
+    let root = temp_dir.path();
+    let images = vec![MediaGalleryFile {
+        relative_path: "a_0.jpeg".to_string(),
+        absolute_path: root.join("a_0.jpeg").to_string_lossy().to_string(),
+        media_type: "image".to_string(),
+    }];
+    fs::write(root.join("7658099397019831573_audio.m4a"), b"audio").expect("audio");
+
+    let (relative, absolute) =
+        find_slideshow_audio(root, &images, Some("7658099397019831573"));
+    assert_eq!(relative.as_deref(), Some("7658099397019831573_audio.m4a"));
+    assert!(absolute
+        .as_deref()
+        .is_some_and(|path| path.ends_with("7658099397019831573_audio.m4a")));
+}
+
+#[test]
 fn single_video_slideshow_paths_exclude_audio_but_audio_is_discovered() {
     let temp_dir = tempfile::tempdir().expect("temp dir");
     let root = temp_dir.path();
@@ -633,6 +652,8 @@ fn extract_post_tombstone_keys_per_provider() {
         share_count: None,
         stats_updated_at: None,
         files: Vec::new(),
+        audio_relative_path: None,
+        audio_absolute_path: None,
     };
     // TikTok: usa o post id.
     assert_eq!(

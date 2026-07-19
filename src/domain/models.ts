@@ -604,6 +604,9 @@ export interface MediaGalleryPost {
   shareCount?: number
   statsUpdatedAt?: string
   files: MediaGalleryFile[]
+  /** Trilha sonora de slideshow/carrossel (TikTok photo-mode), quando presente em disco. */
+  audioRelativePath?: string
+  audioAbsolutePath?: string
 }
 
 export interface MigrationStatus {

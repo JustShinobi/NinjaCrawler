@@ -3027,6 +3027,8 @@ function parseSourceMediaGallery(raw: unknown, sourceId: string): SourceMediaGal
         absolutePath: stringValue(file, ['absolutePath', 'absolute_path'], ''),
         mediaType: stringValue(file, ['mediaType', 'media_type'], 'image'),
       })),
+      audioRelativePath: optionalStringValue(post, ['audioRelativePath', 'audio_relative_path']),
+      audioAbsolutePath: optionalStringValue(post, ['audioAbsolutePath', 'audio_absolute_path']),
     })),
   }
 }

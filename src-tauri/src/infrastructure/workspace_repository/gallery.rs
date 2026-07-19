@@ -2,6 +2,67 @@ use super::*;
 
 pub(super) const GALLERY_VIDEO_EXTS: [&str; 5] = ["mp4", "webm", "mkv", "mov", "m4v"];
 pub(super) const GALLERY_IMAGE_EXTS: [&str; 6] = ["jpg", "jpeg", "png", "webp", "heic", "gif"];
+/// Extensões de trilha sonora de slideshow (TikTok photo-mode / single videos).
+pub(super) const GALLERY_AUDIO_EXTS: [&str; 6] = ["mp3", "m4a", "wav", "opus", "aac", "mp4"];
+
+/// Localiza `<post_id>_audio.<ext>` ao lado das imagens do post (ou na raiz do
+/// perfil). Mesma convenção do Single Videos — o connector do perfil passa a
+/// preservar essa trilha em vez de descartá-la.
+pub(super) fn find_slideshow_audio(
+    profile_root: &Path,
+    files: &[MediaGalleryFile],
+    post_id: Option<&str>,
+) -> (Option<String>, Option<String>) {
+    let Some(post_id) = post_id.map(str::trim).filter(|value| !value.is_empty()) else {
+        return (None, None);
+    };
+    let prefix = format!("{post_id}_audio.");
+    let mut dirs: Vec<PathBuf> = vec![profile_root.to_path_buf()];
+    if let Some(first) = files.first() {
+        if let Some(parent) = Path::new(&first.absolute_path).parent() {
+            if parent != profile_root {
+                dirs.push(parent.to_path_buf());
+            }
+        }
+    }
+    for dir in dirs {
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
+        let mut matches: Vec<PathBuf> = entries
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| path.is_file())
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| {
+                        name.starts_with(&prefix)
+                            && path
+                                .extension()
+                                .and_then(|ext| ext.to_str())
+                                .map(|ext| {
+                                    GALLERY_AUDIO_EXTS.contains(&ext.to_ascii_lowercase().as_str())
+                                })
+                                .unwrap_or(false)
+                    })
+            })
+            .collect();
+        matches.sort();
+        if let Some(path) = matches.into_iter().next() {
+            let relative = path
+                .strip_prefix(profile_root)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            return (
+                Some(relative),
+                Some(path.to_string_lossy().to_string()),
+            );
+        }
+    }
+    (None, None)
+}
 /// Converte o prefixo de data dos nomes (`YYYY-MM-DD HH.MM.SS`, hora local) em
 /// unix. Retorna (unix, resto_do_nome_sem_prefixo).
 pub(super) fn strip_gallery_date_prefix(stem: &str) -> (Option<i64>, String) {
@@ -581,6 +642,17 @@ pub fn load_source_media_gallery(source_id: String) -> Result<SourceMediaGallery
                 } else {
                     acc.ledger_post_key.as_deref().or(acc.post_id.as_deref())
                 };
+                // Trilha de slideshow: só faz sentido em multi-imagem / photo-mode.
+                let (audio_relative_path, audio_absolute_path) =
+                    if !is_video && (media_type == "slideshow" || files.len() > 1) {
+                        find_slideshow_audio(
+                            &profile_root,
+                            &files,
+                            post_id_for_url.or(acc.post_id.as_deref()),
+                        )
+                    } else {
+                        (None, None)
+                    };
                 let post_url = build_post_url(
                     &provider,
                     &handle,
@@ -641,6 +713,8 @@ pub fn load_source_media_gallery(source_id: String) -> Result<SourceMediaGallery
                     share_count: stats.share_count,
                     stats_updated_at: stats.updated_at,
                     files,
+                    audio_relative_path,
+                    audio_absolute_path,
                 });
             }
         }

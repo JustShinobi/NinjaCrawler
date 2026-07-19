@@ -1052,6 +1052,34 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
     return items
   }, [sortedPosts])
 
+  /**
+   * Chave de agrupamento do lightbox: um carrossel = um grupo.
+   * - post multi-arquivo → agrupa por postId / 1º arquivo
+   * - postId compartilhado (mesmo que o gallery tenha fragmentado) → mesmo grupo
+   * - senão cada arquivo é um item vertical isolado
+   */
+  const lightboxGroupKey = useCallback((item: FlatItem): string => {
+    const postId = item.post.postId?.trim()
+    if (postId) return `pid:${postId}`
+    if (item.post.files.length > 1) return `files:${postKey(item.post)}`
+    return `file:${item.file.relativePath}`
+  }, [])
+
+  /** Faixas contíguas [start, end] na lista plana (um grupo = um “post” no eixo vertical). */
+  const lightboxGroups = useMemo(() => {
+    const groups: { key: string; start: number; end: number }[] = []
+    for (let i = 0; i < flatItems.length; i++) {
+      const key = lightboxGroupKey(flatItems[i]!)
+      const last = groups[groups.length - 1]
+      if (last && last.key === key) {
+        last.end = i
+      } else {
+        groups.push({ key, start: i, end: i })
+      }
+    }
+    return groups
+  }, [flatItems, lightboxGroupKey])
+
   const firstFlatIndexByPost = useMemo(() => {
     const map = new Map<MediaGalleryPost, number>()
     flatItems.forEach((item, index) => {
@@ -1073,16 +1101,48 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
   )
 
   const closeLightbox = useCallback(() => setLightboxIndex(undefined), [])
-  const stepLightbox = useCallback(
+
+  const findLightboxGroupIndex = useCallback(
+    (flatIndex: number): number => {
+      for (let i = 0; i < lightboxGroups.length; i++) {
+        const group = lightboxGroups[i]!
+        if (flatIndex >= group.start && flatIndex <= group.end) return i
+      }
+      return -1
+    },
+    [lightboxGroups],
+  )
+
+  /** ↑/↓: salta entre grupos (posts/carrosséis), sempre no 1º slide do alvo. */
+  const stepLightboxPost = useCallback(
+    (delta: number) => {
+      setLightboxIndex((current) => {
+        if (current === undefined || lightboxGroups.length === 0) return current
+        const groupPos = findLightboxGroupIndex(current)
+        if (groupPos < 0) return current
+        const nextPos = groupPos + delta
+        if (nextPos < 0 || nextPos >= lightboxGroups.length) return current
+        return lightboxGroups[nextPos]!.start
+      })
+    },
+    [findLightboxGroupIndex, lightboxGroups],
+  )
+
+  /** ←/→ em carrossel: slide anterior/próximo dentro do mesmo grupo. */
+  const stepLightboxSlide = useCallback(
     (delta: number) => {
       setLightboxIndex((current) => {
         if (current === undefined) return current
+        const groupPos = findLightboxGroupIndex(current)
+        if (groupPos < 0) return current
+        const group = lightboxGroups[groupPos]!
+        if (group.start === group.end) return current
         const next = current + delta
-        if (next < 0 || next >= flatItems.length) return current
+        if (next < group.start || next > group.end) return current
         return next
       })
     },
-    [flatItems.length],
+    [findLightboxGroupIndex, lightboxGroups],
   )
 
   // A lista encolheu (exclusão/refresh) e o índice estourou: gruda no último
@@ -1437,6 +1497,24 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
 
   const totalMedia = gallery?.posts.reduce((sum, post) => sum + post.files.length, 0) ?? 0
   const activeItem = lightboxIndex !== undefined ? flatItems[lightboxIndex] : undefined
+  /** Grupo (post/carrossel) ativo na lista plana do lightbox. */
+  const activeLightboxGroup = useMemo(() => {
+    if (lightboxIndex === undefined) return undefined
+    return lightboxGroups.find(
+      (group) => lightboxIndex >= group.start && lightboxIndex <= group.end,
+    )
+  }, [lightboxIndex, lightboxGroups])
+  const activeGroupPos = useMemo(() => {
+    if (lightboxIndex === undefined) return -1
+    return findLightboxGroupIndex(lightboxIndex)
+  }, [findLightboxGroupIndex, lightboxIndex])
+  const activeSlideIndex =
+    activeItem && activeLightboxGroup
+      ? lightboxIndex! - activeLightboxGroup.start
+      : 0
+  const activeSlideCount = activeLightboxGroup
+    ? activeLightboxGroup.end - activeLightboxGroup.start + 1
+    : 1
   // Album (não virtualizado) usa colunas auto-fill; o grid virtualizado fixa o
   // número de colunas (`--pv-cols`) para todas as linhas ficarem alinhadas.
   const gridStyle = { '--pv-thumb-min': `${gridMetrics.min}px` } as CSSProperties
@@ -2558,12 +2636,31 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
         <MediaLightbox
           fileAbsPath={activeItem.file.absolutePath}
           isVideo={isVideo(activeItem.file.mediaType)}
-          hasPrev={lightboxIndex! > 0}
-          hasNext={lightboxIndex! < flatItems.length - 1}
-          onPrev={() => stepLightbox(-1)}
-          onNext={() => stepLightbox(1)}
+          hasPrev={activeGroupPos > 0}
+          hasNext={activeGroupPos >= 0 && activeGroupPos < lightboxGroups.length - 1}
+          onPrev={() => stepLightboxPost(-1)}
+          onNext={() => stepLightboxPost(1)}
+          hasSlidePrev={activeSlideCount > 1 && activeSlideIndex > 0}
+          hasSlideNext={activeSlideCount > 1 && activeSlideIndex < activeSlideCount - 1}
+          onSlidePrev={() => stepLightboxSlide(-1)}
+          onSlideNext={() => stepLightboxSlide(1)}
           onClose={closeLightbox}
           title={activeItem.post.author ? `@${activeItem.post.author}` : gallery?.handle}
+          meta={[
+            activeItem.post.viewCount !== undefined
+              ? `${compactCount(activeItem.post.viewCount)} views`
+              : '',
+            activeSlideCount > 1 ? `${activeSlideIndex + 1}/${activeSlideCount}` : '',
+          ]
+            .filter(Boolean)
+            .join(' · ') || undefined}
+          audioAbsPath={
+            activeItem.post.mediaType === 'slideshow' ||
+            activeItem.post.files.length > 1 ||
+            activeSlideCount > 1
+              ? activeItem.post.audioAbsolutePath
+              : undefined
+          }
           actions={
             <>
               {isEphemeralStorySection(activeItem.post.section) ? null : (
