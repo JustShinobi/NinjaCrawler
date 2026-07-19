@@ -39,6 +39,8 @@ pub(super) fn load_gallery_media_ledger_links(
                             section,
                             captured_at: None,
                             downloaded_at: None,
+                            title: None,
+                            duration_seconds: None,
                         },
                     );
                 }
@@ -60,7 +62,8 @@ pub(super) fn load_gallery_media_ledger_links(
     }
 
     let Ok(mut statement) = connection.prepare(
-        "SELECT relative_path, media_section, provider_post_key, captured_at, first_seen_at
+        "SELECT relative_path, media_section, provider_post_key, captured_at, first_seen_at,
+                title, duration_seconds
          FROM provider_sync_media_ledger WHERE provider = ?1 AND source_id = ?2",
     ) else {
         return links;
@@ -72,11 +75,14 @@ pub(super) fn load_gallery_media_ledger_links(
             row.get::<_, Option<String>>(2)?,
             row.get::<_, Option<i64>>(3)?,
             row.get::<_, Option<String>>(4)?,
+            row.get::<_, Option<String>>(5)?,
+            row.get::<_, Option<i64>>(6)?,
         ))
     });
     if let Ok(rows) = rows {
         for row in rows.flatten() {
-            let (relative_path, section, post_key, captured_at, first_seen_at) = row;
+            let (relative_path, section, post_key, captured_at, first_seen_at, title, duration_seconds) =
+                row;
             links.insert(
                 relative_path.to_ascii_lowercase(),
                 GalleryMediaLedgerLink {
@@ -85,6 +91,8 @@ pub(super) fn load_gallery_media_ledger_links(
                     section,
                     captured_at,
                     downloaded_at: first_seen_at.as_deref().and_then(parse_rfc3339_unix),
+                    title,
+                    duration_seconds,
                 },
             );
         }

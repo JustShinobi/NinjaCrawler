@@ -1,4 +1,4 @@
-export type ProviderKey = 'instagram' | 'tiktok' | 'twitter'
+export type ProviderKey = 'instagram' | 'tiktok' | 'twitter' | 'youtube' | 'vsco'
 export type AuthMode = 'imported_session'
 export type AuthState = 'ready' | 'degraded' | 'expired'
 export type SourceKind = 'profile'
@@ -171,10 +171,42 @@ export interface TikTokSourceSyncOptions {
   userIdHint?: string
 }
 
+export interface YouTubeSourceSyncOptions {
+  getVideos?: boolean
+  getShorts?: boolean
+  downloadVideos?: boolean
+  separateVideoFolder?: boolean
+  useParsedVideoDate?: boolean
+  collectMediaStats?: boolean
+  abortOnLimit?: boolean
+  sleepTimerSecs?: number
+  temporary?: boolean
+  specialPath?: string
+  description?: string
+  color?: string
+  userIdHint?: string
+}
+
+export interface VscoSourceSyncOptions {
+  getGallery?: boolean
+  getJournal?: boolean
+  downloadImages?: boolean
+  downloadVideos?: boolean
+  separateVideoFolder?: boolean
+  useMd5Comparison?: boolean
+  temporary?: boolean
+  specialPath?: string
+  description?: string
+  color?: string
+  userIdHint?: string
+}
+
 export interface SourceSyncOptions {
   instagram?: InstagramSourceSyncOptions
   twitter?: TwitterSourceSyncOptions
   tiktok?: TikTokSourceSyncOptions
+  youtube?: YouTubeSourceSyncOptions
+  vsco?: VscoSourceSyncOptions
 }
 
 export interface RunSourceSyncOptions {
@@ -558,6 +590,10 @@ export interface MediaGalleryPost {
    */
   albums?: string[]
   posterPath?: string
+  /** Post title (YouTube today), from the sync media ledger. */
+  title?: string
+  /** Video duration in seconds (YouTube), from the sync media ledger. */
+  durationSeconds?: number
   viewCount?: number
   likeCount?: number
   commentCount?: number

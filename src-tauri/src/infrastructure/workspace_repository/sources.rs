@@ -748,6 +748,10 @@ pub(super) fn source_target_url(provider: &str, handle: &str) -> String {
         // O TikTok exige o `@` no path do perfil.
         "tiktok" => format!("https://www.tiktok.com/@{}", handle),
         "twitter" => format!("https://x.com/{}", handle),
+        // YouTube handles are stored without the leading `@`, but the channel
+        // URL requires it.
+        "youtube" => format!("https://www.youtube.com/@{}", handle),
+        "vsco" => format!("https://vsco.co/{}", handle),
         _ => handle.to_string(),
     }
 }

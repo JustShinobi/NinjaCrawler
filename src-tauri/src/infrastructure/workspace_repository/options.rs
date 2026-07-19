@@ -92,6 +92,16 @@ pub(crate) fn default_source_sync_options(provider: &str) -> SourceSyncOptions {
             tiktok: Some(normalize_tiktok_source_sync_options(None)),
             ..Default::default()
         }
+    } else if provider.eq_ignore_ascii_case("youtube") {
+        SourceSyncOptions {
+            youtube: Some(normalize_youtube_source_sync_options(None)),
+            ..Default::default()
+        }
+    } else if provider.eq_ignore_ascii_case("vsco") {
+        SourceSyncOptions {
+            vsco: Some(normalize_vsco_source_sync_options(None)),
+            ..Default::default()
+        }
     } else {
         SourceSyncOptions::default()
     }
@@ -119,9 +129,96 @@ pub(super) fn normalize_source_sync_options(
             tiktok: Some(normalize_tiktok_source_sync_options(options.tiktok.clone())),
             ..Default::default()
         }
+    } else if provider.eq_ignore_ascii_case("youtube") {
+        SourceSyncOptions {
+            youtube: Some(normalize_youtube_source_sync_options(options.youtube.clone())),
+            ..Default::default()
+        }
+    } else if provider.eq_ignore_ascii_case("vsco") {
+        SourceSyncOptions {
+            vsco: Some(normalize_vsco_source_sync_options(options.vsco.clone())),
+            ..Default::default()
+        }
     } else {
         SourceSyncOptions::default()
     }
+}
+/// Fills missing fields with the VSCO defaults, preserving persisted values.
+pub(super) fn normalize_vsco_source_sync_options(
+    options: Option<VscoSourceSyncOptions>,
+) -> VscoSourceSyncOptions {
+    let defaults = default_vsco_source_sync_options();
+    let mut merged = options.unwrap_or_else(default_vsco_source_sync_options);
+    merged.get_gallery = merged.get_gallery.or(defaults.get_gallery);
+    merged.get_journal = merged.get_journal.or(defaults.get_journal);
+    merged.download_images = merged.download_images.or(defaults.download_images);
+    merged.download_videos = merged.download_videos.or(defaults.download_videos);
+    merged.separate_video_folder = merged
+        .separate_video_folder
+        .or(defaults.separate_video_folder);
+    merged.use_md5_comparison = merged.use_md5_comparison.or(defaults.use_md5_comparison);
+    merged.temporary = merged.temporary.or(defaults.temporary);
+    merged.special_path = merged.special_path.or(defaults.special_path);
+    merged.description = merged.description.or(defaults.description);
+    merged.color = merged.color.or(defaults.color);
+    merged.user_id_hint = merged.user_id_hint.or(defaults.user_id_hint);
+    merged
+}
+pub(super) fn source_vsco_sync_options(source: &SourceProfile) -> VscoSourceSyncOptions {
+    normalize_source_sync_options(&source.provider, &source.sync_options)
+        .vsco
+        .unwrap_or_else(|| normalize_vsco_source_sync_options(None))
+}
+pub(super) fn source_vsco_sync_options_with_override(
+    source: &SourceProfile,
+    sync_options_override: Option<&SourceSyncOptions>,
+) -> VscoSourceSyncOptions {
+    if let Some(override_options) = sync_options_override.and_then(|options| options.vsco.clone()) {
+        return normalize_vsco_source_sync_options(Some(override_options));
+    }
+    source_vsco_sync_options(source)
+}
+/// Preenche campos ausentes com os defaults do YouTube, preservando os valores
+/// já persistidos.
+pub(super) fn normalize_youtube_source_sync_options(
+    options: Option<YouTubeSourceSyncOptions>,
+) -> YouTubeSourceSyncOptions {
+    let defaults = default_youtube_source_sync_options();
+    let mut merged = options.unwrap_or_else(default_youtube_source_sync_options);
+    merged.get_videos = merged.get_videos.or(defaults.get_videos);
+    merged.get_shorts = merged.get_shorts.or(defaults.get_shorts);
+    merged.download_videos = merged.download_videos.or(defaults.download_videos);
+    merged.separate_video_folder = merged
+        .separate_video_folder
+        .or(defaults.separate_video_folder);
+    merged.use_parsed_video_date = merged
+        .use_parsed_video_date
+        .or(defaults.use_parsed_video_date);
+    merged.collect_media_stats = merged.collect_media_stats.or(defaults.collect_media_stats);
+    merged.abort_on_limit = merged.abort_on_limit.or(defaults.abort_on_limit);
+    merged.sleep_timer_secs = merged.sleep_timer_secs.or(defaults.sleep_timer_secs);
+    merged.temporary = merged.temporary.or(defaults.temporary);
+    merged.special_path = merged.special_path.or(defaults.special_path);
+    merged.description = merged.description.or(defaults.description);
+    merged.color = merged.color.or(defaults.color);
+    merged.user_id_hint = merged.user_id_hint.or(defaults.user_id_hint);
+    merged
+}
+pub(super) fn source_youtube_sync_options(source: &SourceProfile) -> YouTubeSourceSyncOptions {
+    normalize_source_sync_options(&source.provider, &source.sync_options)
+        .youtube
+        .unwrap_or_else(|| normalize_youtube_source_sync_options(None))
+}
+pub(super) fn source_youtube_sync_options_with_override(
+    source: &SourceProfile,
+    sync_options_override: Option<&SourceSyncOptions>,
+) -> YouTubeSourceSyncOptions {
+    if let Some(override_options) =
+        sync_options_override.and_then(|options| options.youtube.clone())
+    {
+        return normalize_youtube_source_sync_options(Some(override_options));
+    }
+    source_youtube_sync_options(source)
 }
 /// Preenche campos ausentes com os defaults do TikTok (espelho do SCrawler),
 /// preservando os valores já persistidos.

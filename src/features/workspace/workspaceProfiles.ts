@@ -270,6 +270,18 @@ export function parseClipboardProfileSeed(rawText: string): ClipboardProfileSeed
     return createClipboardSeed('twitter', normalizeAtHandle(singleHandle))
   }
 
+  if (host === 'youtube.com' || host === 'youtu.be') {
+    const handleSegment = segments.find((segment) => segment.startsWith('@'))
+    if (handleSegment) {
+      return createClipboardSeed('youtube', handleSegment.slice(1))
+    }
+    return undefined
+  }
+
+  if (host === 'vsco.co' && singleHandle) {
+    return createClipboardSeed('vsco', singleHandle)
+  }
+
   return undefined
 }
 
@@ -294,6 +306,10 @@ export function buildSourceProfileUrl(source: Pick<SourceProfile, 'provider' | '
       return `https://www.tiktok.com/${normalizeAtHandle(handle)}/`
     case 'twitter':
       return `https://x.com/${normalizeAtHandle(handle).slice(1)}`
+    case 'youtube':
+      return `https://www.youtube.com/@${normalizeAtHandle(handle).slice(1)}`
+    case 'vsco':
+      return `https://vsco.co/${handle.trim().replace(/^\/+|\/+$/g, '')}`
     default:
       return undefined
   }

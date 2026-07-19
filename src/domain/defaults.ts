@@ -33,6 +33,24 @@ export const DEFAULT_PROVIDER_CATALOG: ProviderDescriptor[] = [
     defaultCapabilities: ['posts', 'media_timeline'],
     notes: 'Media timeline sync is session-backed in V1.',
   },
+  {
+    key: 'youtube',
+    displayName: 'YouTube',
+    authModes: ['imported_session'],
+    sourceKinds: ['profile'],
+    supportsMultipleAccounts: false,
+    defaultCapabilities: ['videos', 'shorts'],
+    notes: 'Channel videos and Shorts tabs are downloaded via yt-dlp.',
+  },
+  {
+    key: 'vsco',
+    displayName: 'VSCO',
+    authModes: ['imported_session'],
+    sourceKinds: ['profile'],
+    supportsMultipleAccounts: false,
+    defaultCapabilities: ['gallery', 'journal'],
+    notes: 'Profile gallery and journal sync is session-backed in V1.',
+  },
 ]
 
 export const DEFAULT_APP_SETTINGS: AppSetting[] = [

@@ -115,7 +115,7 @@ import type {
 } from '../domain/models'
 import { createEmptyWorkspaceSnapshot } from '../domain/workspaceSnapshot'
 
-const PROVIDER_KEYS: ProviderKey[] = ['instagram', 'tiktok', 'twitter']
+const PROVIDER_KEYS: ProviderKey[] = ['instagram', 'tiktok', 'twitter', 'youtube', 'vsco']
 const AUTH_MODES: AuthMode[] = ['imported_session']
 const AUTH_STATES: AuthState[] = ['ready', 'degraded', 'expired']
 const SOURCE_KINDS: SourceKind[] = ['profile']
@@ -2745,6 +2745,8 @@ function parseSourceMediaGallery(raw: unknown, sourceId: string): SourceMediaGal
         ? post.albums.filter((album): album is string => typeof album === 'string')
         : [],
       posterPath: optionalStringValue(post, ['posterPath', 'poster_path']),
+      title: optionalStringValue(post, ['title']),
+      durationSeconds: optionalNumberValue(post, ['durationSeconds', 'duration_seconds']),
       viewCount: optionalNumberValue(post, ['viewCount', 'view_count']),
       likeCount: optionalNumberValue(post, ['likeCount', 'like_count']),
       commentCount: optionalNumberValue(post, ['commentCount', 'comment_count']),

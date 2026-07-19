@@ -97,6 +97,22 @@ static TIKTOK_RUNTIME: StaticProviderRuntime = StaticProviderRuntime {
     }),
 };
 
+static YOUTUBE_RUNTIME: StaticProviderRuntime = StaticProviderRuntime {
+    key: "youtube",
+    display_name: "YouTube",
+    auth_modes: &["imported_session"],
+    supports_multi_account: true,
+    source_kinds: &["profile"],
+    default_capabilities: &["videos", "shorts"],
+    notes: "Internal connector: yt-dlp enumerates the channel and NinjaCrawler downloads media.",
+    source_sync: Some(SourceSyncRuntime {
+        tool_setting_key: "tool.yt-dlp.path",
+        default_executable: "yt-dlp",
+        argument_mode: SourceSyncArgumentMode::YtDlpDirectory,
+        degraded_capabilities: &[],
+    }),
+};
+
 static TWITTER_RUNTIME: StaticProviderRuntime = StaticProviderRuntime {
     key: "twitter",
     display_name: "X / Twitter",
@@ -113,8 +129,29 @@ static TWITTER_RUNTIME: StaticProviderRuntime = StaticProviderRuntime {
     }),
 };
 
-static PROVIDER_REGISTRY: [&dyn ProviderRuntime; 3] =
-    [&INSTAGRAM_RUNTIME, &TIKTOK_RUNTIME, &TWITTER_RUNTIME];
+static VSCO_RUNTIME: StaticProviderRuntime = StaticProviderRuntime {
+    key: "vsco",
+    display_name: "VSCO",
+    auth_modes: &["imported_session"],
+    supports_multi_account: false,
+    source_kinds: &["profile"],
+    default_capabilities: &["gallery"],
+    notes: "Internal connector: gallery-dl parses the gallery, NinjaCrawler downloads media.",
+    source_sync: Some(SourceSyncRuntime {
+        tool_setting_key: "tool.gallery-dl.path",
+        default_executable: "gallery-dl",
+        argument_mode: SourceSyncArgumentMode::GalleryDlDirectory,
+        degraded_capabilities: &[],
+    }),
+};
+
+static PROVIDER_REGISTRY: [&dyn ProviderRuntime; 5] = [
+    &INSTAGRAM_RUNTIME,
+    &TIKTOK_RUNTIME,
+    &YOUTUBE_RUNTIME,
+    &TWITTER_RUNTIME,
+    &VSCO_RUNTIME,
+];
 
 pub fn provider_runtime(provider: &str) -> Option<&'static dyn ProviderRuntime> {
     PROVIDER_REGISTRY
@@ -141,10 +178,12 @@ mod tests {
     #[test]
     fn provider_catalog_contains_supported_v1_runtimes() {
         let catalog = provider_catalog();
-        assert_eq!(catalog.len(), 3);
+        assert_eq!(catalog.len(), 5);
         assert!(catalog.iter().any(|provider| provider.key == "instagram"));
         assert!(catalog.iter().any(|provider| provider.key == "tiktok"));
+        assert!(catalog.iter().any(|provider| provider.key == "youtube"));
         assert!(catalog.iter().any(|provider| provider.key == "twitter"));
+        assert!(catalog.iter().any(|provider| provider.key == "vsco"));
     }
 
     #[test]

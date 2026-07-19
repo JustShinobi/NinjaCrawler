@@ -17,9 +17,14 @@ function parseInitialIntentFromQuery(): AccountsWindowIntent {
   const query = new URLSearchParams(window.location.search)
   const provider = query.get('initialProvider')
   const mode = query.get('initialMode')
-  const initialProvider = provider === 'instagram' || provider === 'tiktok' || provider === 'twitter'
-    ? provider
-    : undefined
+  const initialProvider =
+    provider === 'instagram'
+    || provider === 'tiktok'
+    || provider === 'twitter'
+    || provider === 'youtube'
+    || provider === 'vsco'
+      ? provider
+      : undefined
   const initialMode = mode === 'create' || mode === 'edit' ? mode : undefined
   const initialAccountId = query.get('initialAccountId')?.trim() || undefined
 

@@ -321,6 +321,23 @@ fn build_post_url_twitter_uses_status_id() {
 }
 
 #[test]
+fn build_post_url_vsco_uses_media_id() {
+    assert_eq!(
+        build_post_url(
+            "vsco",
+            "@someone",
+            Some("5f0000000000000000000001"),
+            false,
+            None
+        )
+        .as_deref(),
+        Some("https://vsco.co/someone/media/5f0000000000000000000001")
+    );
+    // Without an id there is no post link.
+    assert_eq!(build_post_url("vsco", "someone", None, false, None), None);
+}
+
+#[test]
 fn single_video_url_kind_routes_tiktok_photo_posts() {
     assert_eq!(
         single_video_url_kind(
@@ -608,6 +625,8 @@ fn extract_post_tombstone_keys_per_provider() {
         section: "timeline".to_string(),
         albums: Vec::new(),
         poster_path: None,
+        title: None,
+        duration_seconds: None,
         view_count: None,
         like_count: None,
         comment_count: None,

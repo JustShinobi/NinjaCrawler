@@ -163,6 +163,10 @@ const MIGRATIONS: &[(i64, &str)] = &[
         42,
         include_str!("../../migrations/0042_source_profile_stats.sql"),
     ),
+    (
+        43,
+        include_str!("../../migrations/0043_media_title_duration.sql"),
+    ),
 ];
 
 const PROVIDER_SYNC_RESUME_SCHEMA: &str =
@@ -646,7 +650,8 @@ mod tests {
                         applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
                      );
                      CREATE TABLE source_profiles (id TEXT PRIMARY KEY);
-                     INSERT INTO source_profiles(id) VALUES ('seed');",
+                     INSERT INTO source_profiles(id) VALUES ('seed');
+                     CREATE TABLE provider_sync_media_ledger (id INTEGER PRIMARY KEY);",
                 )
                 .expect("seed schema");
             // Marca todas menos a ÚLTIMA como aplicadas → só a última fica pendente.

@@ -19,6 +19,14 @@ export interface MediaCardProps {
   badge?: string
   /** Texto do overlay inferior (hora/data/@autor). */
   overlayText?: string
+  /** Modo feed YouTube: thumb 16:9 + rótulo (título/meta) abaixo do card. */
+  youtube?: boolean
+  /** Selo de duração no canto inferior direito do thumb (`M:SS`/`H:MM:SS`). */
+  durationBadge?: string
+  /** Título do vídeo, exibido abaixo do thumb no modo YouTube (2 linhas máx). */
+  captionTitle?: string
+  /** Linha secundária abaixo do título (views · data) no modo YouTube. */
+  captionMeta?: string
   selected: boolean
   selectMode: boolean
   onToggleSelect: (shiftKey: boolean) => void
@@ -48,6 +56,10 @@ export function MediaCard({
   slideshowCount,
   badge,
   overlayText,
+  youtube,
+  durationBadge,
+  captionTitle,
+  captionMeta,
   selected,
   selectMode,
   onToggleSelect,
@@ -68,7 +80,7 @@ export function MediaCard({
 
   return (
     <article
-      className={`profile-view-card${selected ? ' is-selected' : ''}${selectMode ? ' is-selecting' : ''}`}
+      className={`profile-view-card${youtube ? ' profile-view-card--youtube' : ''}${selected ? ' is-selected' : ''}${selectMode ? ' is-selecting' : ''}`}
       onContextMenu={onContextMenu}
     >
       <button
@@ -102,8 +114,21 @@ export function MediaCard({
           <span className="profile-view-badge" aria-hidden="true">▣ {slideshowCount}</span>
         ) : null}
         {badge ? <span className="profile-view-section" aria-hidden="true">{badge}</span> : null}
+        {durationBadge ? (
+          <span className="profile-view-duration" aria-hidden="true">{durationBadge}</span>
+        ) : null}
         <span className="profile-view-thumb-overlay" aria-hidden="true">{overlayText ?? ''}</span>
       </button>
+      {youtube && (captionTitle || captionMeta) ? (
+        <div className="profile-view-caption">
+          {captionTitle ? (
+            <span className="profile-view-caption-title" title={captionTitle}>{captionTitle}</span>
+          ) : null}
+          {captionMeta ? (
+            <span className="profile-view-caption-meta">{captionMeta}</span>
+          ) : null}
+        </div>
+      ) : null}
       {/* Ações por card só fora do modo seleção (durante a seleção o card é só
           alvo de clique, sem ruído de botões). */}
       {selectMode ? null : (
