@@ -644,6 +644,43 @@ fn extract_post_tombstone_keys_per_provider() {
 }
 
 #[test]
+fn deleted_post_keys_suppress_future_syncs_for_every_provider() {
+    let connection = Connection::open_in_memory().expect("in-memory database");
+    connection
+        .execute_batch(
+            "CREATE TABLE source_profiles (id TEXT PRIMARY KEY);
+             INSERT INTO source_profiles(id) VALUES ('source-1');",
+        )
+        .expect("source table");
+    ensure_provider_deleted_media_table(&connection).expect("deleted media table");
+    for (provider, post_key, post_code) in [
+        ("twitter", Some("12345"), None),
+        ("tiktok", Some("67890"), None),
+        ("instagram", None, Some("AbC_12")),
+    ] {
+        connection
+            .execute(
+                "INSERT INTO provider_deleted_media (
+                    provider, source_id, relative_path, media_section,
+                    provider_post_key, provider_post_code, deleted_at
+                 ) VALUES (?1, 'source-1', ?2, 'timeline', ?3, ?4, 'now')",
+                params![provider, format!("{provider}.mp4"), post_key, post_code],
+            )
+            .expect("tombstone");
+    }
+
+    assert!(load_provider_deleted_post_keys(&connection, "twitter", "source-1")
+        .expect("twitter keys")
+        .contains("12345"));
+    assert!(load_provider_deleted_post_keys(&connection, "tiktok", "source-1")
+        .expect("tiktok keys")
+        .contains("67890"));
+    assert!(load_instagram_deleted_post_keys(&connection, "source-1")
+        .expect("instagram keys")
+        .contains("abc_12"));
+}
+
+#[test]
 fn extract_instagram_post_code_preserves_casing_for_url() {
     let permalink = "https://www.instagram.com/p/CyAbC-1_x/";
     assert_eq!(

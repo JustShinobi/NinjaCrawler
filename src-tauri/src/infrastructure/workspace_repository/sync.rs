@@ -1208,8 +1208,12 @@ pub(super) fn execute_twitter_source_sync_with_connection(
     let executable =
         connector_runtime::resolve_connector_executable(connection, layout, "gallery-dl")?;
 
-    let ledger_post_keys =
+    let mut ledger_post_keys =
         load_provider_sync_post_ledger_keys(connection, "twitter", &context.source.id)?;
+    ledger_post_keys.extend(
+        load_provider_deleted_post_keys(connection, "twitter", &context.source.id)
+            .unwrap_or_default(),
+    );
     let ledger_media_keys =
         load_provider_sync_media_ledger_keys(connection, "twitter", &context.source.id)?;
     let existing_relative_paths = load_existing_relative_media_paths(&profile_root)
@@ -2233,8 +2237,12 @@ pub(super) fn execute_tiktok_source_sync_with_connection(
         );
     }
 
-    let ledger_post_keys =
+    let mut ledger_post_keys =
         load_provider_sync_post_ledger_keys(connection, "tiktok", &context.source.id)?;
+    ledger_post_keys.extend(
+        load_provider_deleted_post_keys(connection, "tiktok", &context.source.id)
+            .unwrap_or_default(),
+    );
     let ledger_media_keys =
         load_provider_sync_media_ledger_keys(connection, "tiktok", &context.source.id)?;
     let existing_relative_paths = load_existing_relative_media_paths(&profile_root);

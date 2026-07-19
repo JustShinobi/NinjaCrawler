@@ -2137,16 +2137,24 @@ fn load_instagram_deleted_post_keys(
     connection: &Connection,
     source_id: &str,
 ) -> Result<HashSet<String>, String> {
+    load_provider_deleted_post_keys(connection, "instagram", source_id)
+}
+
+fn load_provider_deleted_post_keys(
+    connection: &Connection,
+    provider: &str,
+    source_id: &str,
+) -> Result<HashSet<String>, String> {
     ensure_provider_deleted_media_table(connection)?;
     let mut statement = connection
         .prepare(
             "SELECT provider_post_key, provider_post_code
              FROM provider_deleted_media
-             WHERE provider = 'instagram' AND source_id = ?1",
+             WHERE provider = ?1 AND source_id = ?2",
         )
         .map_err(|error| error.to_string())?;
     let rows = statement
-        .query_map(params![source_id], |row| {
+        .query_map(params![provider, source_id], |row| {
             Ok((
                 row.get::<_, Option<String>>(0)?,
                 row.get::<_, Option<String>>(1)?,
@@ -2157,7 +2165,11 @@ fn load_instagram_deleted_post_keys(
     for row in rows {
         let (post_key, post_code) = row.map_err(|error| error.to_string())?;
         for value in [post_key, post_code].into_iter().flatten() {
-            let normalized = normalize_instagram_post_ledger_key(&value);
+            let normalized = if provider.eq_ignore_ascii_case("instagram") {
+                normalize_instagram_post_ledger_key(&value)
+            } else {
+                value.trim().to_ascii_lowercase()
+            };
             if !normalized.is_empty() {
                 keys.insert(normalized);
             }
