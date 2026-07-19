@@ -377,6 +377,15 @@ fn record_file_result(
             .as_mut()
             .filter(|job| job.source_id == source_id)
         {
+            let file_name = absolute
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| absolute.to_string_lossy().into_owned());
+            let post_url = workspace_repository::derive_review_item_post_url(
+                &active.provider,
+                &active.handle,
+                &file_name,
+            );
             match outcome {
                 workspace_repository::MediaThumbnailGenerationOutcome::Generated => {
                     active.generated += 1;
@@ -389,12 +398,10 @@ fn record_file_result(
                     active.review_items.push(MediaThumbnailReviewItem {
                         absolute_path: absolute.to_string_lossy().into_owned(),
                         relative_path: relative_media_path(profile_root, absolute),
-                        file_name: absolute
-                            .file_name()
-                            .map(|name| name.to_string_lossy().into_owned())
-                            .unwrap_or_else(|| absolute.to_string_lossy().into_owned()),
+                        file_name,
                         kind: "invalid_media".to_string(),
                         reason,
+                        post_url,
                     });
                 }
                 workspace_repository::MediaThumbnailGenerationOutcome::Failed { reason } => {
@@ -402,12 +409,10 @@ fn record_file_result(
                     active.review_items.push(MediaThumbnailReviewItem {
                         absolute_path: absolute.to_string_lossy().into_owned(),
                         relative_path: relative_media_path(profile_root, absolute),
-                        file_name: absolute
-                            .file_name()
-                            .map(|name| name.to_string_lossy().into_owned())
-                            .unwrap_or_else(|| absolute.to_string_lossy().into_owned()),
+                        file_name,
                         kind: "generation_failed".to_string(),
                         reason,
+                        post_url,
                     });
                 }
             }

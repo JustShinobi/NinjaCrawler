@@ -2163,6 +2163,12 @@ function normalizeMediaDedupeFile(value: unknown): MediaDedupeFile | null {
     width: optionalNumberValue(value, ['width']),
     height: optionalNumberValue(value, ['height']),
     durationMs: optionalNumberValue(value, ['durationMs', 'duration_ms']),
+    thumbnailPath: optionalStringValue(value, ['thumbnailPath', 'thumbnail_path']),
+    modifiedAt: optionalNumberValue(value, ['modifiedAt', 'modified_at', 'modifiedAtMs', 'modified_at_ms']),
+    bitrateKbps: optionalNumberValue(value, ['bitrateKbps', 'bitrate_kbps']),
+    videoCodec: optionalStringValue(value, ['videoCodec', 'video_codec']),
+    frameRate: optionalNumberValue(value, ['frameRate', 'frame_rate']),
+    audioSummary: optionalStringValue(value, ['audioSummary', 'audio_summary']),
   }
 }
 
@@ -2220,6 +2226,7 @@ function normalizeMediaDedupeJobStatus(raw: unknown): MediaDedupeJobStatus {
       : undefined,
     sourceScope: optionalStringValue(value, ['sourceScope', 'source_scope']),
     resourceProfile: enumValue(pick(value, 'resourceProfile', 'resource_profile'), ['quiet', 'balanced', 'fast'] as const, 'balanced'),
+    scanProfile: enumValue(pick(value, 'scanProfile', 'scan_profile'), ['recommended', 'ai', 'deep'] as const, 'recommended'),
     similarityScope: 'source',
     filesProcessed: numberValue(value, ['filesProcessed', 'files_processed'], 0),
     filesTotal: numberValue(value, ['filesTotal', 'files_total'], 0),

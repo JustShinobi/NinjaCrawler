@@ -157,6 +157,30 @@ pub(super) fn derive_post_metadata(
         index,
     })
 }
+/// Best-effort online post link for a single file name, used by the thumbnail
+/// review flow (invalid/failed media) where only the file name is available —
+/// no DB ledger lookup like the gallery does. Instagram shortcodes live only in
+/// the ledger, never in the file name, so Instagram review items get no link
+/// here; every other provider embeds its post id in the file name and resolves
+/// via the same `derive_post_metadata`/`build_post_url` the gallery uses.
+/// TODO: cover Instagram/Twitter too by looking up the ledger row for the file
+/// name when building review items, instead of relying on the file name alone.
+pub(crate) fn derive_review_item_post_url(
+    provider: &str,
+    handle: &str,
+    file_name: &str,
+) -> Option<String> {
+    // Twitter file names NEVER carry the status id (only the media key /
+    // autonumber), so a name-derived numeric token would build a WRONG
+    // `/status/` link — same rule the gallery applies (ledger/XML only).
+    if provider.eq_ignore_ascii_case("twitter") {
+        return None;
+    }
+    let derived = derive_post_metadata(provider, file_name, None)?;
+    let is_video = derived.media_type == "video";
+    build_post_url(provider, handle, derived.post_id.as_deref(), is_video, None)
+}
+
 pub(super) struct GalleryPostAcc {
     pub(super) post_id: Option<String>,
     pub(super) captured_at: Option<i64>,
