@@ -462,6 +462,10 @@ pub struct MediaGalleryPost {
     pub albums: Vec<String>,
     /// Caminho absoluto de uma miniatura/poster (cover do vídeo, quando houver).
     pub poster_path: Option<String>,
+    /// Título do post (YouTube hoje), do `provider_sync_media_ledger`.
+    pub title: Option<String>,
+    /// Duração em segundos (vídeos do YouTube), do `provider_sync_media_ledger`.
+    pub duration_seconds: Option<i64>,
     pub view_count: Option<i64>,
     pub like_count: Option<i64>,
     pub comment_count: Option<i64>,
@@ -549,6 +553,20 @@ pub struct AvatarThumbnailBatch {
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct MediaThumbnailReviewItem {
+    /// Absolute path of the media file on disk.
+    pub absolute_path: String,
+    /// Path relative to the source profile root (for `delete_source_media`).
+    pub relative_path: String,
+    pub file_name: String,
+    /// Machine-readable kind: `invalid_media` (no visual stream / corrupt) or
+    /// `generation_failed` (tooling/IO).
+    pub kind: String,
+    pub reason: String,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct MediaThumbnailQueueItem {
     pub source_id: String,
     pub provider: String,
@@ -562,8 +580,13 @@ pub struct MediaThumbnailQueueItem {
     pub generated: u32,
     pub skipped_existing: u32,
     pub failed: u32,
+    /// Non-visual/corrupt media that needs manual review (warning path).
+    pub invalid_media: u32,
     pub current_file: Option<String>,
     pub progress_percent: Option<u32>,
+    /// Accumulated during the run; copied into the finished result.
+    #[serde(default)]
+    pub review_items: Vec<MediaThumbnailReviewItem>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -577,6 +600,9 @@ pub struct MediaThumbnailQueueResult {
     pub generated: u32,
     pub skipped_existing: u32,
     pub failed: u32,
+    pub invalid_media: u32,
+    #[serde(default)]
+    pub review_items: Vec<MediaThumbnailReviewItem>,
     pub finished_at: String,
 }
 
@@ -1222,6 +1248,111 @@ pub fn default_tiktok_source_sync_options() -> TikTokSourceSyncOptions {
 
 #[derive(Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
+pub struct YouTubeSourceSyncOptions {
+    /// Channel tabs to enumerate. `videos` is the regular uploads tab; `shorts`
+    /// is the dedicated Shorts tab.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub get_videos: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub get_shorts: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub download_videos: Option<bool>,
+    /// Videos go to a `Video` subfolder (SCrawler SeparateVideoFolder).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub separate_video_folder: Option<bool>,
+    /// Adjusts the file date to the upload date (yt-dlp `--mtime`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub use_parsed_video_date: Option<bool>,
+    /// Captures view counts into the post ledger.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub collect_media_stats: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub abort_on_limit: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sleep_timer_secs: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub temporary: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub special_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+    /// Stable channel id (`channel_id`). Filled on sync and preserved between
+    /// upserts to detect duplicates.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_id_hint: Option<String>,
+}
+
+pub fn default_youtube_source_sync_options() -> YouTubeSourceSyncOptions {
+    YouTubeSourceSyncOptions {
+        get_videos: Some(true),
+        get_shorts: Some(false),
+        download_videos: Some(true),
+        separate_video_folder: Some(false),
+        use_parsed_video_date: Some(true),
+        collect_media_stats: Some(true),
+        abort_on_limit: Some(true),
+        sleep_timer_secs: Some(-1),
+        temporary: Some(false),
+        special_path: Some(String::new()),
+        description: Some(String::new()),
+        color: Some(String::new()),
+        user_id_hint: None,
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct VscoSourceSyncOptions {
+    /// Download the profile gallery (the main VSCO photo/video feed).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub get_gallery: Option<bool>,
+    /// Download the profile journal (long-form articles). Disabled by default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub get_journal: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub download_images: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub download_videos: Option<bool>,
+    /// Videos go to a `Video` subfolder (SCrawler SeparateVideoFolder).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub separate_video_folder: Option<bool>,
+    /// Discards byte-identical downloads by comparing the sha256.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub use_md5_comparison: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub temporary: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub special_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+    /// Stable numeric user id (`site_id`). Filled on sync and preserved between
+    /// upserts to detect duplicates.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_id_hint: Option<String>,
+}
+
+pub fn default_vsco_source_sync_options() -> VscoSourceSyncOptions {
+    VscoSourceSyncOptions {
+        get_gallery: Some(true),
+        get_journal: Some(false),
+        download_images: Some(true),
+        download_videos: Some(true),
+        separate_video_folder: Some(true),
+        use_md5_comparison: Some(false),
+        temporary: Some(false),
+        special_path: Some(String::new()),
+        description: Some(String::new()),
+        color: Some(String::new()),
+        user_id_hint: None,
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
 pub struct SourceSyncOptions {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub instagram: Option<InstagramSourceSyncOptions>,
@@ -1229,6 +1360,10 @@ pub struct SourceSyncOptions {
     pub twitter: Option<TwitterSourceSyncOptions>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tiktok: Option<TikTokSourceSyncOptions>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub youtube: Option<YouTubeSourceSyncOptions>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vsco: Option<VscoSourceSyncOptions>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]

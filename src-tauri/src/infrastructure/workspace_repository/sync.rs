@@ -48,14 +48,28 @@ pub(super) fn instagram_error_policy_settings(
     (exclude, log_skipped, tagged_limit)
 }
 
-pub(super) fn reconcile_tiktok_provider_ledgers_from_disk(
+/// Result of a bidirectional ledger ↔ disk reconcile for a TikTok source.
+#[derive(Debug, Default, Clone, Copy)]
+pub(super) struct TikTokLedgerReconcileStats {
+    pub recovered_from_disk: usize,
+    pub purged_media_rows: usize,
+    pub purged_post_rows: usize,
+}
+
+/// Two-way ledger reconcile before TikTok sync (and after partial delete-with-media):
+/// 1. purge media/post ledger rows whose files no longer exist on disk
+/// 2. recover on-disk files that are missing from the ledger
+///
+/// Without (1), a failed delete-with-media (disk wiped, profile still in DB) leaves
+/// post keys in the ledger and the connector skips every post as "already have it".
+pub(super) fn reconcile_tiktok_provider_ledgers(
     connection: &Connection,
     profile_root: &Path,
     account_id: &str,
     source_id: &str,
     source_handle: &str,
     timestamp: &str,
-) -> Result<usize, String> {
+) -> Result<TikTokLedgerReconcileStats, String> {
     // Purge liked media that earlier builds wrongly reconciled as "timeline".
     // Those rows share the physical file (and therefore the gallery's relative
     // path key) with the likes runtime's own "likes" row, so leaving them behind
@@ -64,6 +78,9 @@ pub(super) fn reconcile_tiktok_provider_ledgers_from_disk(
     // is untouched; if no likes row exists the gallery falls back to the on-disk
     // `Liked/` folder and still classifies it correctly.
     purge_reconciled_tiktok_liked_timeline_rows(connection, source_id)?;
+
+    let (purged_media_rows, purged_post_rows) =
+        purge_provider_ledgers_missing_on_disk(connection, "tiktok", source_id, profile_root)?;
 
     let files = collect_media_file_paths(profile_root)?;
     let mut observed_by_post: HashMap<String, twitter_connector::ObservedTwitterPost> =
@@ -107,34 +124,161 @@ pub(super) fn reconcile_tiktok_provider_ledgers_from_disk(
         });
     }
 
-    if recovered_media.is_empty() {
-        return Ok(0);
-    }
-
-    let mut observed_posts = observed_by_post.into_values().collect::<Vec<_>>();
-    observed_posts.sort_by(|left, right| left.provider_post_key.cmp(&right.provider_post_key));
-    upsert_provider_sync_post_ledger_entries(
-        connection,
-        "tiktok",
-        source_id,
-        account_id,
-        source_handle,
-        &observed_posts,
-        timestamp,
-    )?;
-    upsert_provider_sync_media_ledger_entries(
-        connection,
-        &ProviderSyncMediaScope {
-            provider: "tiktok",
+    let mut recovered_from_disk = 0usize;
+    if !recovered_media.is_empty() {
+        let mut observed_posts = observed_by_post.into_values().collect::<Vec<_>>();
+        observed_posts.sort_by(|left, right| left.provider_post_key.cmp(&right.provider_post_key));
+        upsert_provider_sync_post_ledger_entries(
+            connection,
+            "tiktok",
             source_id,
             account_id,
             source_handle,
-            profile_root,
+            &observed_posts,
             timestamp,
-        },
-        &recovered_media,
-    )?;
-    Ok(recovered_media.len())
+        )?;
+        upsert_provider_sync_media_ledger_entries(
+            connection,
+            &ProviderSyncMediaScope {
+                provider: "tiktok",
+                source_id,
+                account_id,
+                source_handle,
+                profile_root,
+                timestamp,
+            },
+            &recovered_media,
+        )?;
+        recovered_from_disk = recovered_media.len();
+    }
+
+    Ok(TikTokLedgerReconcileStats {
+        recovered_from_disk,
+        purged_media_rows,
+        purged_post_rows,
+    })
+}
+
+/// Drop media-ledger rows whose relative_path is gone from disk, then drop post-
+/// ledger keys that no longer have any media-ledger rows for this source.
+/// Returns `(purged_media_rows, purged_post_rows)`.
+pub(super) fn purge_provider_ledgers_missing_on_disk(
+    connection: &Connection,
+    provider: &str,
+    source_id: &str,
+    profile_root: &Path,
+) -> Result<(usize, usize), String> {
+    let provider = provider.to_ascii_lowercase();
+    let mut statement = connection
+        .prepare(
+            "SELECT relative_path, provider_post_key FROM provider_sync_media_ledger
+             WHERE provider = ?1 AND source_id = ?2",
+        )
+        .map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map(params![&provider, source_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+        })
+        .map_err(|error| error.to_string())?;
+
+    let mut stale_paths = Vec::new();
+    for row in rows {
+        let (relative_path, _post_key) = row.map_err(|error| error.to_string())?;
+        let normalized = relative_path.replace('\\', "/");
+        let abs = profile_root.join(normalized.trim_start_matches('/'));
+        if !abs.is_file() {
+            stale_paths.push(relative_path);
+        }
+    }
+
+    let mut purged_media = 0usize;
+    for relative_path in &stale_paths {
+        purged_media += connection
+            .execute(
+                "DELETE FROM provider_sync_media_ledger
+                 WHERE provider = ?1 AND source_id = ?2 AND relative_path = ?3",
+                params![&provider, source_id, relative_path],
+            )
+            .map_err(|error| error.to_string())? as usize;
+    }
+
+    // Post keys that still have at least one media-ledger row remain "known".
+    // Keys that lost every media row are stale (typical after partial with-media
+    // delete) and would block re-download forever if left behind.
+    let remaining_post_keys: HashSet<String> = {
+        let mut statement = connection
+            .prepare(
+                "SELECT DISTINCT provider_post_key FROM provider_sync_media_ledger
+                 WHERE provider = ?1 AND source_id = ?2
+                   AND provider_post_key IS NOT NULL
+                   AND TRIM(provider_post_key) != ''",
+            )
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map(params![&provider, source_id], |row| row.get::<_, String>(0))
+            .map_err(|error| error.to_string())?;
+        let mut keys = HashSet::new();
+        for row in rows {
+            let key = row.map_err(|error| error.to_string())?;
+            keys.insert(key);
+        }
+        keys
+    };
+
+    let all_post_keys: Vec<String> = {
+        let mut statement = connection
+            .prepare(
+                "SELECT provider_post_key FROM provider_sync_post_ledger
+                 WHERE provider = ?1 AND source_id = ?2",
+            )
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map(params![&provider, source_id], |row| row.get::<_, String>(0))
+            .map_err(|error| error.to_string())?;
+        let mut keys = Vec::new();
+        for row in rows {
+            keys.push(row.map_err(|error| error.to_string())?);
+        }
+        keys
+    };
+
+    let mut purged_posts = 0usize;
+    for post_key in all_post_keys {
+        if remaining_post_keys.contains(&post_key) {
+            continue;
+        }
+        // If the post id still has a matching file on disk under a path that
+        // was never ledgered, keep the post key (disk recovery runs next).
+        // Otherwise purge so the next sync re-downloads.
+        let keep_for_disk = post_key_has_media_on_disk(profile_root, &post_key);
+        if keep_for_disk {
+            continue;
+        }
+        purged_posts += connection
+            .execute(
+                "DELETE FROM provider_sync_post_ledger
+                 WHERE provider = ?1 AND source_id = ?2 AND provider_post_key = ?3",
+                params![&provider, source_id, post_key],
+            )
+            .map_err(|error| error.to_string())? as usize;
+    }
+
+    Ok((purged_media, purged_posts))
+}
+
+fn post_key_has_media_on_disk(profile_root: &Path, post_key: &str) -> bool {
+    let needle = post_key.trim();
+    if needle.is_empty() || !profile_root.is_dir() {
+        return false;
+    }
+    collect_media_file_paths(profile_root)
+        .unwrap_or_default()
+        .into_iter()
+        .any(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.contains(needle))
+        })
 }
 
 /// Removes the bogus `media_section = "timeline"` rows that older builds wrote
@@ -1018,6 +1162,30 @@ pub(super) fn execute_source_sync_with_connection(
     if context.source.provider.eq_ignore_ascii_case("tiktok") {
         let account_settings = load_provider_account_settings_map(connection, &context.account.id)?;
         return execute_tiktok_source_sync_with_connection(
+            connection,
+            layout,
+            &context,
+            &account_settings,
+            trigger,
+            run_mode,
+            sync_options_override,
+        );
+    }
+    if context.source.provider.eq_ignore_ascii_case("youtube") {
+        let account_settings = load_provider_account_settings_map(connection, &context.account.id)?;
+        return execute_youtube_source_sync_with_connection(
+            connection,
+            layout,
+            &context,
+            &account_settings,
+            trigger,
+            run_mode,
+            sync_options_override,
+        );
+    }
+    if context.source.provider.eq_ignore_ascii_case("vsco") {
+        let account_settings = load_provider_account_settings_map(connection, &context.account.id)?;
+        return execute_vsco_source_sync_with_connection(
             connection,
             layout,
             &context,
@@ -2119,6 +2287,1018 @@ pub(super) fn format_twitter_disabled_media_suffix(
 /// Sync interno do TikTok: yt-dlp baixa os vídeos da timeline e o gallery-dl
 /// parseia os posts de fotos (slideshow), persistindo nos ledgers
 /// provider-neutral. Espelha o branch do Twitter.
+/// Persists the resolved YouTube `channel_id` into the source's sync options,
+/// without overwriting an already-known hint.
+pub(super) fn persist_youtube_user_id_hint(
+    connection: &Connection,
+    source_id: &str,
+    user_id: &str,
+    timestamp: &str,
+) -> Result<(), String> {
+    let user_id = user_id.trim();
+    if user_id.is_empty() {
+        return Ok(());
+    }
+    let Some(json) = connection
+        .query_row(
+            "SELECT sync_options_json FROM source_profiles WHERE id = ?1 AND deleted_at IS NULL",
+            params![source_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?
+    else {
+        return Ok(());
+    };
+    let mut options =
+        serde_json::from_str::<SourceSyncOptions>(&json).unwrap_or_else(|_| SourceSyncOptions {
+            youtube: Some(normalize_youtube_source_sync_options(None)),
+            ..Default::default()
+        });
+    let youtube = options
+        .youtube
+        .get_or_insert_with(|| normalize_youtube_source_sync_options(None));
+    if youtube
+        .user_id_hint
+        .as_deref()
+        .map(str::trim)
+        .map(|value| !value.is_empty())
+        .unwrap_or(false)
+    {
+        return Ok(());
+    }
+    youtube.user_id_hint = Some(user_id.to_string());
+    let serialized = serialize_source_sync_options("youtube", &options)?;
+    connection
+        .execute(
+            "UPDATE source_profiles SET sync_options_json = ?2, updated_at = ?3
+             WHERE id = ?1 AND deleted_at IS NULL",
+            params![source_id, serialized, timestamp],
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+/// Updates the YouTube post ledger with fresh view counts.
+pub(super) fn upsert_youtube_post_stats(
+    connection: &Connection,
+    source_id: &str,
+    observed_posts: &[youtube_connector::ObservedYouTubePost],
+    timestamp: &str,
+) -> Result<(), String> {
+    for post in observed_posts {
+        if post.view_count.is_none() {
+            continue;
+        }
+        connection
+            .execute(
+                "UPDATE provider_sync_post_ledger
+                 SET view_count = ?1, stats_updated_at = ?2
+                 WHERE provider = 'youtube' AND source_id = ?3
+                   AND provider_post_key = ?4",
+                params![
+                    post.view_count,
+                    timestamp,
+                    source_id,
+                    &post.provider_post_key,
+                ],
+            )
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+/// Writes the captured `title`/`duration_seconds` onto the freshly upserted
+/// media ledger rows (the shared media ledger upsert does not carry them).
+pub(super) fn upsert_youtube_media_metadata(
+    connection: &Connection,
+    source_id: &str,
+    downloaded_media: &[youtube_connector::DownloadedYouTubeMedia],
+    timestamp: &str,
+) -> Result<(), String> {
+    for media in downloaded_media {
+        if media.title.is_none() && media.duration_seconds.is_none() {
+            continue;
+        }
+        connection
+            .execute(
+                "UPDATE provider_sync_media_ledger
+                 SET title = COALESCE(?1, title),
+                     duration_seconds = COALESCE(?2, duration_seconds),
+                     last_seen_at = ?3
+                 WHERE provider = 'youtube' AND source_id = ?4
+                   AND provider_media_key = ?5",
+                params![
+                    media.title,
+                    media.duration_seconds,
+                    timestamp,
+                    source_id,
+                    media.provider_media_key.to_ascii_lowercase(),
+                ],
+            )
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+pub(super) fn execute_youtube_source_sync_with_connection(
+    connection: &Connection,
+    layout: &StorageLayout,
+    context: &SourceSyncContext,
+    settings: &HashMap<String, String>,
+    trigger: &str,
+    _run_mode: Option<&str>,
+    sync_options_override: Option<&SourceSyncOptions>,
+) -> Result<SourceSyncOutcome, String> {
+    let options = source_youtube_sync_options_with_override(&context.source, sync_options_override);
+    let started_at = now_timestamp();
+
+    let videos_enabled = options.get_videos.unwrap_or(true);
+    let shorts_enabled = options.get_shorts.unwrap_or(false);
+    if !videos_enabled && !shorts_enabled {
+        return Err(
+            "No YouTube sync section is enabled. Select Videos or Shorts.".to_string(),
+        );
+    }
+    let collect_media_stats = options.collect_media_stats.unwrap_or(true);
+
+    let handle = sanitize_source_handle("youtube", &context.source.handle)
+        .trim_start_matches('@')
+        .to_string();
+    if handle.is_empty() {
+        return Err("YouTube source handle is empty.".to_string());
+    }
+
+    let profile_root =
+        resolved_source_media_output_root_with_connection(connection, layout, &context.source)?;
+    fs::create_dir_all(&profile_root).map_err(|error| error.to_string())?;
+    cleanup_empty_media_artifacts(&profile_root)?;
+    let cache_root = layout
+        .cache_root
+        .join(format!("youtube-sync-{}", context.source.id));
+    fs::create_dir_all(&cache_root).map_err(|error| error.to_string())?;
+
+    // YouTube usually works without authentication; write a cookie file only if
+    // the session carries cookies (age-restricted / members content).
+    let cookie_file = cache_root.join("cookies.txt");
+    let parsed_session = parse_session_payload(&context.session_payload);
+    let user_agent = match &parsed_session {
+        Ok(session) => {
+            if !session.cookies.is_empty() {
+                write_netscape_cookie_file(&cookie_file, &session.cookies)?;
+            }
+            session.metadata.user_agent.clone()
+        }
+        Err(_) => None,
+    };
+    let user_agent = settings
+        .get("youtube.auth.userAgent")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .or(user_agent);
+
+    let yt_dlp_executable =
+        connector_runtime::resolve_connector_executable(connection, layout, "yt-dlp")?;
+
+    let ledger_post_keys =
+        load_provider_sync_post_ledger_keys(connection, "youtube", &context.source.id)?;
+    let ledger_media_keys =
+        load_provider_sync_media_ledger_keys(connection, "youtube", &context.source.id)?;
+    let existing_relative_paths = load_existing_relative_media_paths(&profile_root);
+
+    let request = youtube_connector::YouTubeConnectorRequest {
+        handle: handle.clone(),
+        yt_dlp_executable: PathBuf::from(&yt_dlp_executable),
+        cookie_file,
+        user_agent,
+        profile_root: profile_root.clone(),
+        cache_root,
+        sections: youtube_connector::YouTubeSectionSelection {
+            videos: videos_enabled,
+            shorts: shorts_enabled,
+        },
+        download_videos: options.download_videos.unwrap_or(true),
+        separate_video_folder: options.separate_video_folder.unwrap_or(false),
+        use_parsed_video_date: options.use_parsed_video_date.unwrap_or(true),
+        sleep_timer_secs: options.sleep_timer_secs.unwrap_or(-1),
+        abort_on_limit: options.abort_on_limit.unwrap_or(true),
+        collect_media_stats,
+        ledger_post_keys,
+        ledger_media_keys,
+        existing_relative_paths,
+        user_id_hint: options
+            .user_id_hint
+            .clone()
+            .filter(|value| !value.trim().is_empty()),
+    };
+
+    let cancel_token = register_source_sync_cancel_token(&context.source.id);
+    if cancel_token.load(Ordering::SeqCst) {
+        clear_source_sync_cancel_token(&context.source.id);
+        return Err("source sync cancelled by user".to_string());
+    }
+
+    source_sync_runtime::report_source_sync_progress(
+        &context.source.id,
+        Some(0),
+        Some("Starting download".to_string()),
+        Some("YouTube connector is preparing source sync.".to_string()),
+        true,
+        Some(0),
+    );
+
+    let is_first_sync = context.source.last_synced_at.is_none();
+    let dup_source_id = context.source.id.clone();
+    let execution = youtube_connector::run_profile_sync(
+        &request,
+        |progress| {
+            source_sync_runtime::report_source_sync_progress(
+                &context.source.id,
+                progress.progress_percent,
+                Some(progress.label),
+                Some(progress.detail),
+                progress.indeterminate,
+                progress.downloaded_items,
+            );
+        },
+        || cancel_token.load(Ordering::SeqCst),
+        |user_id| {
+            is_first_sync
+                && find_source_with_same_user_id(connection, "youtube", user_id, &dup_source_id)
+                    .ok()
+                    .flatten()
+                    .is_some()
+        },
+    );
+    clear_source_sync_cancel_token(&context.source.id);
+    let finished_at = now_timestamp();
+
+    let command_preview = format!(
+        "internal.youtube channel {} -> {}",
+        handle,
+        profile_root.display()
+    );
+
+    let outcome = match execution {
+        Ok(result) => {
+            if let Some(user_id) = result.duplicate_user_id.as_deref() {
+                if let Some(dup_outcome) = detect_duplicate_user_id_on_first_sync(
+                    connection,
+                    layout,
+                    context,
+                    user_id,
+                    "internal.youtube",
+                    command_preview.clone(),
+                ) {
+                    persist_source_sync_run(
+                        connection,
+                        context,
+                        &dup_outcome,
+                        trigger,
+                        &started_at,
+                        &finished_at,
+                    )?;
+                    source_sync_runtime::report_source_sync_progress(
+                        &context.source.id,
+                        Some(100),
+                        Some("Download cancelled".to_string()),
+                        Some(dup_outcome.summary.clone()),
+                        false,
+                        None,
+                    );
+                    return Ok(dup_outcome);
+                }
+            }
+
+            if result.profile_unavailable {
+                let problem_code = "youtube_profile_unavailable";
+                let problem_message = format!(
+                    "YouTube channel '@{}' (source id {}) is unavailable. The channel may have been renamed, deleted, terminated, or made private.",
+                    handle, context.source.id
+                );
+                let mark_error = set_source_sync_problem(
+                    connection,
+                    &context.source.id,
+                    problem_code,
+                    &problem_message,
+                    &finished_at,
+                    true,
+                );
+                let mut summary = format!("YouTube sync blocked: {problem_message}");
+                if let Err(mark_failure) = mark_error {
+                    summary.push_str(&format!(
+                        " Failed to persist source problem marker: {mark_failure}."
+                    ));
+                } else {
+                    log_runtime_event(
+                        layout,
+                        "sync.profile",
+                        "warning",
+                        RuntimeLogAnchor {
+                            account_id: Some(&context.account.id),
+                            provider: Some(&context.source.provider),
+                            source_id: Some(&context.source.id),
+                            source_handle: Some(&context.source.handle),
+                        },
+                        format!(
+                            "Marked source '{}' as '{}': {}",
+                            context.source.handle, problem_code, problem_message
+                        ),
+                        None,
+                    );
+                }
+                let outcome = SourceSyncOutcome {
+                    tool: "internal.youtube".to_string(),
+                    status: "failed".to_string(),
+                    summary: summary.clone(),
+                    command_preview: command_preview.clone(),
+                    manifest_summary_json: None,
+                    degraded_capabilities: Vec::new(),
+                    validation_error: Some(summary),
+                };
+                persist_source_sync_run(
+                    connection,
+                    context,
+                    &outcome,
+                    trigger,
+                    &started_at,
+                    &finished_at,
+                )?;
+                propagate_source_sync_account_health(connection, context, &outcome, &finished_at)?;
+                source_sync_runtime::report_source_sync_progress(
+                    &context.source.id,
+                    Some(100),
+                    Some("Channel unavailable".to_string()),
+                    Some(outcome.summary.clone()),
+                    false,
+                    None,
+                );
+                return Ok(outcome);
+            }
+
+            // The ledgers are provider-neutral; reuse the Twitter connector
+            // structs (same fields) just for the base insertion.
+            let observed_posts: Vec<twitter_connector::ObservedTwitterPost> = result
+                .observed_posts
+                .iter()
+                .map(|post| twitter_connector::ObservedTwitterPost {
+                    provider_post_key: post.provider_post_key.clone(),
+                    media_section: post.media_section.clone(),
+                })
+                .collect();
+            let downloaded_media: Vec<twitter_connector::DownloadedTwitterMedia> = result
+                .downloaded_media
+                .iter()
+                .map(|media| twitter_connector::DownloadedTwitterMedia {
+                    file_path: media.file_path.clone(),
+                    media_type: media.media_type.clone(),
+                    media_section: media.media_section.clone(),
+                    provider_media_key: media.provider_media_key.clone(),
+                    provider_post_key: media.provider_post_key.clone(),
+                    captured_at_timestamp: media.captured_at_timestamp,
+                    final_file_name: media.final_file_name.clone(),
+                })
+                .collect();
+            upsert_provider_sync_post_ledger_entries(
+                connection,
+                "youtube",
+                &context.source.id,
+                &context.account.id,
+                &handle,
+                &observed_posts,
+                &finished_at,
+            )?;
+            if collect_media_stats {
+                upsert_youtube_post_stats(
+                    connection,
+                    &context.source.id,
+                    &result.observed_posts,
+                    &finished_at,
+                )?;
+            }
+            upsert_provider_sync_media_ledger_entries(
+                connection,
+                &ProviderSyncMediaScope {
+                    provider: "youtube",
+                    source_id: &context.source.id,
+                    account_id: &context.account.id,
+                    source_handle: &handle,
+                    profile_root: &profile_root,
+                    timestamp: &finished_at,
+                },
+                &downloaded_media,
+            )?;
+            upsert_youtube_media_metadata(
+                connection,
+                &context.source.id,
+                &result.downloaded_media,
+                &finished_at,
+            )?;
+
+            if let Some(user_id) = result.resolved_user_id.as_deref() {
+                let _ = persist_youtube_user_id_hint(
+                    connection,
+                    &context.source.id,
+                    user_id,
+                    &finished_at,
+                );
+            }
+
+            if !context.source.profile_image_custom {
+                if let Some(avatar_path) = find_source_avatar(&profile_root) {
+                    let _ = update_source_profile_image(
+                        connection,
+                        layout,
+                        &context.source.id,
+                        &avatar_path,
+                        &finished_at,
+                    );
+                }
+            }
+
+            let downloaded = result.downloaded_media.len();
+            let stats_updated = result
+                .observed_posts
+                .iter()
+                .filter(|post| post.view_count.is_some())
+                .count();
+            connector_debug::append_current(
+                "internal.youtube",
+                "summary",
+                "manifest",
+                format!(
+                    "scanned_posts={} discovered_assets={} queued_assets={} downloaded_assets={} skipped_existing_posts={} skipped_existing_assets={} stats_updated={}",
+                    result.manifest_summary.normalized_post_count,
+                    result.manifest_summary.discovered_asset_count,
+                    result.manifest_summary.queued_asset_count,
+                    downloaded,
+                    result.manifest_summary.skipped_existing_post_count,
+                    result.manifest_summary.skipped_existing_asset_count,
+                    stats_updated,
+                ),
+            );
+            let mut summary =
+                format_download_success_summary("YouTube sync succeeded.", downloaded);
+            summary.push_str(&format_already_up_to_date_suffix(
+                result.manifest_summary.skipped_existing_post_count,
+            ));
+            if collect_media_stats && stats_updated > 0 {
+                summary.push_str(&format!(" Stats updated for {stats_updated} video(s)."));
+            }
+            if result.limit_aborted {
+                summary.push_str(" Rate limit reached; remaining videos were skipped.");
+            }
+            if !result.section_errors.is_empty() {
+                summary.push_str(" Warnings: ");
+                summary.push_str(&result.section_errors.join(" | "));
+            }
+
+            SourceSyncOutcome {
+                tool: "internal.youtube".to_string(),
+                status: "succeeded".to_string(),
+                summary,
+                command_preview,
+                manifest_summary_json: None,
+                degraded_capabilities: Vec::new(),
+                validation_error: None,
+            }
+        }
+        Err(error) => {
+            let cancelled_by_user = error
+                .trim()
+                .to_ascii_lowercase()
+                .contains("cancelled by user");
+            SourceSyncOutcome {
+                tool: "internal.youtube".to_string(),
+                status: if cancelled_by_user {
+                    "skipped".to_string()
+                } else {
+                    "failed".to_string()
+                },
+                summary: if cancelled_by_user {
+                    "YouTube sync cancelled by user.".to_string()
+                } else {
+                    format!("YouTube sync failed: {}", error)
+                },
+                command_preview,
+                manifest_summary_json: None,
+                degraded_capabilities: Vec::new(),
+                validation_error: if cancelled_by_user { None } else { Some(error) },
+            }
+        }
+    };
+
+    persist_source_sync_run(
+        connection,
+        context,
+        &outcome,
+        trigger,
+        &started_at,
+        &finished_at,
+    )?;
+    propagate_source_sync_account_health(connection, context, &outcome, &finished_at)?;
+    if outcome.status == "succeeded" {
+        if let Err(error) = clear_source_sync_problem(connection, &context.source.id, &finished_at)
+        {
+            log_runtime_event(
+                layout,
+                "sync.profile",
+                "warning",
+                RuntimeLogAnchor {
+                    account_id: Some(&context.account.id),
+                    provider: Some(&context.source.provider),
+                    source_id: Some(&context.source.id),
+                    source_handle: Some(&context.source.handle),
+                },
+                format!(
+                    "YouTube sync succeeded, but failed to clear source sync problem marker: {error}"
+                ),
+                Some(error),
+            );
+        }
+    }
+    source_sync_runtime::report_source_sync_progress(
+        &context.source.id,
+        Some(100),
+        Some(if outcome.status == "succeeded" {
+            "Download complete".to_string()
+        } else if outcome.status == "skipped" {
+            "Download skipped".to_string()
+        } else {
+            "Download failed".to_string()
+        }),
+        Some(outcome.summary.clone()),
+        false,
+        None,
+    );
+    Ok(outcome)
+}
+
+pub(super) fn persist_vsco_user_id_hint(
+    connection: &Connection,
+    source_id: &str,
+    user_id: &str,
+    timestamp: &str,
+) -> Result<(), String> {
+    let user_id = user_id.trim();
+    if user_id.is_empty() {
+        return Ok(());
+    }
+    let Some(json) = connection
+        .query_row(
+            "SELECT sync_options_json FROM source_profiles WHERE id = ?1 AND deleted_at IS NULL",
+            params![source_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?
+    else {
+        return Ok(());
+    };
+    let mut options =
+        serde_json::from_str::<SourceSyncOptions>(&json).unwrap_or_else(|_| SourceSyncOptions {
+            vsco: Some(normalize_vsco_source_sync_options(None)),
+            ..Default::default()
+        });
+    let vsco = options
+        .vsco
+        .get_or_insert_with(|| normalize_vsco_source_sync_options(None));
+    if vsco
+        .user_id_hint
+        .as_deref()
+        .map(str::trim)
+        .map(|value| !value.is_empty())
+        .unwrap_or(false)
+    {
+        return Ok(());
+    }
+    vsco.user_id_hint = Some(user_id.to_string());
+    let serialized = serialize_source_sync_options("vsco", &options)?;
+    connection
+        .execute(
+            "UPDATE source_profiles SET sync_options_json = ?2, updated_at = ?3
+             WHERE id = ?1 AND deleted_at IS NULL",
+            params![source_id, serialized, timestamp],
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+/// Executes the internal VSCO sync: gallery-dl parses the gallery/journal pages
+/// and NinjaCrawler downloads and catalogs the media, persisting posts/media in
+/// the provider-neutral ledgers. VSCO re-enumerates the whole gallery on every
+/// sync (no resume cursor), relying on the ledgers/disk to skip existing media.
+pub(super) fn execute_vsco_source_sync_with_connection(
+    connection: &Connection,
+    layout: &StorageLayout,
+    context: &SourceSyncContext,
+    settings: &HashMap<String, String>,
+    trigger: &str,
+    _run_mode: Option<&str>,
+    sync_options_override: Option<&SourceSyncOptions>,
+) -> Result<SourceSyncOutcome, String> {
+    let options = source_vsco_sync_options_with_override(&context.source, sync_options_override);
+    let started_at = now_timestamp();
+
+    let gallery_enabled = options.get_gallery.unwrap_or(true);
+    let journal_enabled = options.get_journal.unwrap_or(false);
+    if !gallery_enabled && !journal_enabled {
+        return Err("No VSCO sync section is enabled. Select Gallery or Journal.".to_string());
+    }
+
+    let handle = sanitize_source_handle("vsco", &context.source.handle)
+        .trim_start_matches('@')
+        .to_string();
+    if handle.is_empty() {
+        return Err("VSCO source handle is empty.".to_string());
+    }
+
+    let profile_root =
+        resolved_source_media_output_root_with_connection(connection, layout, &context.source)?;
+    fs::create_dir_all(&profile_root).map_err(|error| error.to_string())?;
+    cleanup_empty_media_artifacts(&profile_root)?;
+    let cache_root = layout
+        .cache_root
+        .join(format!("vsco-sync-{}", context.source.id));
+    fs::create_dir_all(&cache_root).map_err(|error| error.to_string())?;
+
+    // VSCO usually works without authentication; write a cookie file only if the
+    // session carries cookies (private profiles).
+    let cookie_file = cache_root.join("cookies.txt");
+    let parsed_session = parse_session_payload(&context.session_payload);
+    let user_agent = match &parsed_session {
+        Ok(session) => {
+            if !session.cookies.is_empty() {
+                write_netscape_cookie_file(&cookie_file, &session.cookies)?;
+            }
+            session.metadata.user_agent.clone()
+        }
+        Err(_) => None,
+    };
+    let user_agent = settings
+        .get("vsco.auth.userAgent")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .or(user_agent);
+
+    let executable =
+        connector_runtime::resolve_connector_executable(connection, layout, "gallery-dl")?;
+
+    let ledger_post_keys =
+        load_provider_sync_post_ledger_keys(connection, "vsco", &context.source.id)?;
+    let ledger_media_keys =
+        load_provider_sync_media_ledger_keys(connection, "vsco", &context.source.id)?;
+    let existing_relative_paths = load_existing_relative_media_paths(&profile_root)
+        .into_iter()
+        .filter_map(|file_name| vsco_connector::vsco_disk_asset_key(&file_name))
+        .collect();
+
+    let request = vsco_connector::VscoConnectorRequest {
+        handle: handle.clone(),
+        gallery_dl_executable: PathBuf::from(&executable),
+        cookie_file,
+        user_agent,
+        profile_root: profile_root.clone(),
+        cache_root,
+        sections: vsco_connector::VscoSectionSelection {
+            gallery: gallery_enabled,
+            journal: journal_enabled,
+        },
+        download_images: options.download_images.unwrap_or(true),
+        download_videos: options.download_videos.unwrap_or(true),
+        separate_video_folder: options.separate_video_folder.unwrap_or(true),
+        use_md5_comparison: options.use_md5_comparison.unwrap_or(false),
+        ledger_post_keys,
+        ledger_media_keys,
+        existing_relative_paths,
+        user_id_hint: options
+            .user_id_hint
+            .clone()
+            .filter(|value| !value.trim().is_empty()),
+    };
+
+    let cancel_token = register_source_sync_cancel_token(&context.source.id);
+    if cancel_token.load(Ordering::SeqCst) {
+        clear_source_sync_cancel_token(&context.source.id);
+        return Err("source sync cancelled by user".to_string());
+    }
+
+    source_sync_runtime::report_source_sync_progress(
+        &context.source.id,
+        Some(0),
+        Some("Starting download".to_string()),
+        Some("VSCO connector is preparing source sync.".to_string()),
+        true,
+        Some(0),
+    );
+
+    let is_first_sync = context.source.last_synced_at.is_none();
+    let dup_source_id = context.source.id.clone();
+    let execution = vsco_connector::run_profile_sync(
+        &request,
+        |progress| {
+            source_sync_runtime::report_source_sync_progress(
+                &context.source.id,
+                progress.progress_percent,
+                Some(progress.label),
+                Some(progress.detail),
+                progress.indeterminate,
+                progress.downloaded_items,
+            );
+        },
+        || cancel_token.load(Ordering::SeqCst),
+        |user_id| {
+            is_first_sync
+                && find_source_with_same_user_id(connection, "vsco", user_id, &dup_source_id)
+                    .ok()
+                    .flatten()
+                    .is_some()
+        },
+    );
+    clear_source_sync_cancel_token(&context.source.id);
+    let finished_at = now_timestamp();
+
+    let command_preview = format!(
+        "internal.vsco gallery={} journal={} profile {} -> {}",
+        gallery_enabled,
+        journal_enabled,
+        handle,
+        profile_root.display()
+    );
+
+    let outcome = match execution {
+        Ok(result) => {
+            if let Some(user_id) = result.duplicate_user_id.as_deref() {
+                if let Some(dup_outcome) = detect_duplicate_user_id_on_first_sync(
+                    connection,
+                    layout,
+                    context,
+                    user_id,
+                    "internal.vsco",
+                    command_preview.clone(),
+                ) {
+                    persist_source_sync_run(
+                        connection,
+                        context,
+                        &dup_outcome,
+                        trigger,
+                        &started_at,
+                        &finished_at,
+                    )?;
+                    source_sync_runtime::report_source_sync_progress(
+                        &context.source.id,
+                        Some(100),
+                        Some("Download cancelled".to_string()),
+                        Some(dup_outcome.summary.clone()),
+                        false,
+                        None,
+                    );
+                    return Ok(dup_outcome);
+                }
+            }
+
+            if result.profile_unavailable {
+                let problem_code = "vsco_profile_unavailable";
+                let problem_message = format!(
+                    "VSCO profile '{}' (source id {}) is unavailable. The profile may have been renamed, deleted, or made private.",
+                    handle, context.source.id
+                );
+                let mark_error = set_source_sync_problem(
+                    connection,
+                    &context.source.id,
+                    problem_code,
+                    &problem_message,
+                    &finished_at,
+                    true,
+                );
+                let mut summary = format!("VSCO sync blocked: {problem_message}");
+                if let Err(mark_failure) = mark_error {
+                    summary.push_str(&format!(
+                        " Failed to persist source problem marker: {mark_failure}."
+                    ));
+                } else {
+                    log_runtime_event(
+                        layout,
+                        "sync.profile",
+                        "warning",
+                        RuntimeLogAnchor {
+                            account_id: Some(&context.account.id),
+                            provider: Some(&context.source.provider),
+                            source_id: Some(&context.source.id),
+                            source_handle: Some(&context.source.handle),
+                        },
+                        format!(
+                            "Marked source '{}' as '{}': {}",
+                            context.source.handle, problem_code, problem_message
+                        ),
+                        None,
+                    );
+                }
+                let outcome = SourceSyncOutcome {
+                    tool: "internal.vsco".to_string(),
+                    status: "failed".to_string(),
+                    summary: summary.clone(),
+                    command_preview: command_preview.clone(),
+                    manifest_summary_json: None,
+                    degraded_capabilities: Vec::new(),
+                    validation_error: Some(summary),
+                };
+                persist_source_sync_run(
+                    connection,
+                    context,
+                    &outcome,
+                    trigger,
+                    &started_at,
+                    &finished_at,
+                )?;
+                propagate_source_sync_account_health(connection, context, &outcome, &finished_at)?;
+                source_sync_runtime::report_source_sync_progress(
+                    &context.source.id,
+                    Some(100),
+                    Some("Profile unavailable".to_string()),
+                    Some(outcome.summary.clone()),
+                    false,
+                    None,
+                );
+                return Ok(outcome);
+            }
+
+            // The ledgers are provider-neutral; reuse the Twitter connector
+            // structs (same fields) just for the base insertion.
+            let observed_posts: Vec<twitter_connector::ObservedTwitterPost> = result
+                .observed_posts
+                .iter()
+                .map(|post| twitter_connector::ObservedTwitterPost {
+                    provider_post_key: post.provider_post_key.clone(),
+                    media_section: post.media_section.clone(),
+                })
+                .collect();
+            let downloaded_media: Vec<twitter_connector::DownloadedTwitterMedia> = result
+                .downloaded_media
+                .iter()
+                .chain(result.deduplicated_media_aliases.iter())
+                .map(|media| twitter_connector::DownloadedTwitterMedia {
+                    file_path: media.file_path.clone(),
+                    media_type: media.media_type.clone(),
+                    media_section: media.media_section.clone(),
+                    provider_media_key: media.provider_media_key.clone(),
+                    provider_post_key: media.provider_post_key.clone(),
+                    captured_at_timestamp: media.captured_at_timestamp,
+                    final_file_name: media.final_file_name.clone(),
+                })
+                .collect();
+            upsert_provider_sync_post_ledger_entries(
+                connection,
+                "vsco",
+                &context.source.id,
+                &context.account.id,
+                &handle,
+                &observed_posts,
+                &finished_at,
+            )?;
+            upsert_provider_sync_media_ledger_entries(
+                connection,
+                &ProviderSyncMediaScope {
+                    provider: "vsco",
+                    source_id: &context.source.id,
+                    account_id: &context.account.id,
+                    source_handle: &handle,
+                    profile_root: &profile_root,
+                    timestamp: &finished_at,
+                },
+                &downloaded_media,
+            )?;
+
+            if let Some(user_id) = result.resolved_user_id.as_deref() {
+                let _ =
+                    persist_vsco_user_id_hint(connection, &context.source.id, user_id, &finished_at);
+            }
+
+            if !context.source.profile_image_custom {
+                if let Some(avatar_path) = find_source_avatar(&profile_root) {
+                    let _ = update_source_profile_image(
+                        connection,
+                        layout,
+                        &context.source.id,
+                        &avatar_path,
+                        &finished_at,
+                    );
+                }
+            }
+
+            let downloaded = result.downloaded_media.len();
+            connector_debug::append_current(
+                "internal.vsco",
+                "summary",
+                "manifest",
+                format!(
+                    "parsed_pages={} normalized_posts={} discovered_assets={} queued_assets={} downloaded_assets={} skipped_existing_posts={} skipped_existing_assets={} skipped_duplicates={}",
+                    result.manifest_summary.parsed_page_count,
+                    result.manifest_summary.normalized_post_count,
+                    result.manifest_summary.discovered_asset_count,
+                    result.manifest_summary.queued_asset_count,
+                    downloaded,
+                    result.manifest_summary.skipped_existing_post_count,
+                    result.manifest_summary.skipped_existing_asset_count,
+                    result.manifest_summary.skipped_duplicate_asset_count,
+                ),
+            );
+            let mut summary = format_download_success_summary("VSCO sync succeeded.", downloaded);
+            summary.push_str(&format_already_up_to_date_suffix(
+                result.manifest_summary.skipped_existing_post_count,
+            ));
+            if result.manifest_summary.skipped_duplicate_asset_count > 0 {
+                let count = result.manifest_summary.skipped_duplicate_asset_count;
+                summary.push_str(&format!(
+                    " {count} duplicate media {} reused from existing files.",
+                    if count == 1 { "item was" } else { "items were" }
+                ));
+            }
+            if !result.section_errors.is_empty() {
+                summary.push_str(" Warnings: ");
+                summary.push_str(&result.section_errors.join(" | "));
+            }
+
+            SourceSyncOutcome {
+                tool: "internal.vsco".to_string(),
+                status: "succeeded".to_string(),
+                summary,
+                command_preview,
+                manifest_summary_json: None,
+                degraded_capabilities: Vec::new(),
+                validation_error: None,
+            }
+        }
+        Err(error) => {
+            let cancelled_by_user = error
+                .trim()
+                .to_ascii_lowercase()
+                .contains("cancelled by user");
+            SourceSyncOutcome {
+                tool: "internal.vsco".to_string(),
+                status: if cancelled_by_user {
+                    "skipped".to_string()
+                } else {
+                    "failed".to_string()
+                },
+                summary: if cancelled_by_user {
+                    "VSCO sync cancelled by user.".to_string()
+                } else {
+                    format!("VSCO sync failed: {}", error)
+                },
+                command_preview,
+                manifest_summary_json: None,
+                degraded_capabilities: Vec::new(),
+                validation_error: if cancelled_by_user { None } else { Some(error) },
+            }
+        }
+    };
+
+    persist_source_sync_run(
+        connection,
+        context,
+        &outcome,
+        trigger,
+        &started_at,
+        &finished_at,
+    )?;
+    propagate_source_sync_account_health(connection, context, &outcome, &finished_at)?;
+    if outcome.status == "succeeded" {
+        if let Err(error) = clear_source_sync_problem(connection, &context.source.id, &finished_at) {
+            log_runtime_event(
+                layout,
+                "sync.profile",
+                "warning",
+                RuntimeLogAnchor {
+                    account_id: Some(&context.account.id),
+                    provider: Some(&context.source.provider),
+                    source_id: Some(&context.source.id),
+                    source_handle: Some(&context.source.handle),
+                },
+                format!(
+                    "VSCO sync succeeded, but failed to clear source sync problem marker: {error}"
+                ),
+                Some(error),
+            );
+        }
+    }
+    source_sync_runtime::report_source_sync_progress(
+        &context.source.id,
+        Some(100),
+        Some(if outcome.status == "succeeded" {
+            "Download complete".to_string()
+        } else if outcome.status == "skipped" {
+            "Download skipped".to_string()
+        } else {
+            "Download failed".to_string()
+        }),
+        Some(outcome.summary.clone()),
+        false,
+        None,
+    );
+    Ok(outcome)
+}
+
 pub(super) fn execute_tiktok_source_sync_with_connection(
     connection: &Connection,
     layout: &StorageLayout,
@@ -2211,7 +3391,7 @@ pub(super) fn execute_tiktok_source_sync_with_connection(
         String::new()
     };
 
-    let recovered_from_disk = reconcile_tiktok_provider_ledgers_from_disk(
+    let reconcile = reconcile_tiktok_provider_ledgers(
         connection,
         &profile_root,
         &context.account.id,
@@ -2219,7 +3399,10 @@ pub(super) fn execute_tiktok_source_sync_with_connection(
         &handle,
         &started_at,
     )?;
-    if recovered_from_disk > 0 {
+    if reconcile.recovered_from_disk > 0
+        || reconcile.purged_media_rows > 0
+        || reconcile.purged_post_rows > 0
+    {
         log_runtime_event(
             layout,
             "sync.ledger",
@@ -2231,7 +3414,10 @@ pub(super) fn execute_tiktok_source_sync_with_connection(
                 source_handle: Some(&context.source.handle),
             },
             format!(
-                "Recovered {recovered_from_disk} TikTok media ledger item(s) from existing files before sync."
+                "TikTok ledger reconcile: recovered {} from disk, purged {} missing media row(s) and {} stale post key(s).",
+                reconcile.recovered_from_disk,
+                reconcile.purged_media_rows,
+                reconcile.purged_post_rows
             ),
             None,
         );

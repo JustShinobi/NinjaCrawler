@@ -90,6 +90,8 @@ function providerLabel(value?: string): string {
   if (value === "instagram") return "Instagram";
   if (value === "tiktok") return "TikTok";
   if (value === "twitter") return "X / Twitter";
+  if (value === "youtube") return "YouTube";
+  if (value === "vsco") return "VSCO";
   return "Entire library";
 }
 
@@ -875,6 +877,8 @@ function Sources({
           <option value="instagram">Instagram</option>
           <option value="tiktok">TikTok</option>
           <option value="twitter">X / Twitter</option>
+          <option value="youtube">YouTube</option>
+          <option value="vsco">VSCO</option>
         </select>
         <span aria-live="polite" className="health-filter-count">
           <strong>{filtered.length.toLocaleString()}</strong> of{" "}
@@ -1255,7 +1259,9 @@ function Storage({
                               provider: provider as
                                 | "instagram"
                                 | "tiktok"
-                                | "twitter",
+                                | "twitter"
+                                | "youtube"
+                                | "vsco",
                             }),
                         resourceProfile,
                       },

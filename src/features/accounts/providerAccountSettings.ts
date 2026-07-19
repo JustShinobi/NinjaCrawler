@@ -3,6 +3,8 @@ import {
   createInstagramSourceSyncOptions,
   createTikTokSourceSyncOptions,
   createTwitterSourceSyncOptions,
+  createVscoSourceSyncOptions,
+  createYouTubeSourceSyncOptions,
 } from '../../domain/sourceSyncOptions'
 import type { ProviderAccountSettingValue, ProviderKey, SourceSyncOptions } from '../../domain/models'
 
@@ -185,6 +187,59 @@ const TIKTOK_SETTINGS_LAYOUT: ProviderAccountSettingsLayout = {
   ],
 }
 
+const YOUTUBE_SETTINGS_LAYOUT: ProviderAccountSettingsLayout = {
+  categories: [
+    { key: 'account', label: 'Paths', description: '' },
+    { key: 'defaults', label: 'New profile defaults', description: '' },
+    { key: 'authorization', label: 'Authorization', description: '' },
+    { key: 'download', label: 'Download', description: '' },
+    { key: 'timers', label: 'Timers', description: '' },
+  ],
+  fields: [
+    { key: 'youtube.account.mediaPath', category: 'account', label: 'Path', kind: 'text', placeholder: 'F:/SCrawler/Data/YouTube', defaultValue: '', mono: true },
+    { key: 'youtube.auth.useUserAgent', category: 'authorization', label: 'Use user agent', kind: 'toggle', defaultValue: 'true' },
+    { key: 'youtube.auth.userAgent', category: 'authorization', label: 'User agent', kind: 'textarea', defaultValue: '', advanced: true, mono: true },
+
+    { key: 'youtube.defaults.labels', category: 'defaults', label: 'Default labels', kind: 'text', placeholder: 'reference, priority', defaultValue: '' },
+    { key: 'youtube.defaults.readyForDownload', category: 'defaults', label: 'Ready for download by default', kind: 'toggle', defaultValue: 'true' },
+    { key: 'youtube.defaults.getVideos', category: 'defaults', label: 'Get Videos', tooltip: 'youtube.com/@<handle>/videos', kind: 'toggle', defaultValue: 'true' },
+    { key: 'youtube.defaults.getShorts', category: 'defaults', label: 'Get Shorts', tooltip: 'youtube.com/@<handle>/shorts', kind: 'toggle', defaultValue: 'false' },
+    { key: 'youtube.defaults.downloadVideos', category: 'defaults', label: 'Download videos', tooltip: 'Videos are fetched with yt-dlp.', kind: 'toggle', defaultValue: 'true' },
+    { key: 'youtube.defaults.separateVideoFolder', category: 'defaults', label: 'Separate video folder', tooltip: 'Download videos into a "Video" subfolder.', kind: 'toggle', defaultValue: 'false' },
+    { key: 'youtube.defaults.temporary', category: 'defaults', label: 'Temporary', kind: 'toggle', defaultValue: 'false' },
+
+    { key: 'youtube.defaults.useParsedVideoDate', category: 'download', label: 'Use video date as file date', kind: 'toggle', defaultValue: 'true' },
+    { key: 'youtube.defaults.collectMediaStats', category: 'download', label: 'Collect media stats', tooltip: 'Captures view counts into the post ledger.', kind: 'toggle', defaultValue: 'true' },
+    { key: 'youtube.defaults.abortOnLimit', category: 'download', label: 'Abort on limit', kind: 'toggle', defaultValue: 'true' },
+    { key: 'youtube.defaults.sleepTimerSecs', category: 'timers', label: 'Sleep timer (s)', tooltip: 'Seconds between sections. -1 disables.', kind: 'number', defaultValue: '-1' },
+  ],
+}
+
+const VSCO_SETTINGS_LAYOUT: ProviderAccountSettingsLayout = {
+  categories: [
+    { key: 'account', label: 'Paths', description: '' },
+    { key: 'defaults', label: 'New profile defaults', description: '' },
+    { key: 'authorization', label: 'Authorization', description: '' },
+    { key: 'download', label: 'Download', description: '' },
+  ],
+  fields: [
+    { key: 'vsco.account.mediaPath', category: 'account', label: 'Path', kind: 'text', placeholder: 'F:/SCrawler/Data/VSCO', defaultValue: '', mono: true },
+    { key: 'vsco.auth.useUserAgent', category: 'authorization', label: 'Use user agent', kind: 'toggle', defaultValue: 'true' },
+    { key: 'vsco.auth.userAgent', category: 'authorization', label: 'User agent', kind: 'textarea', defaultValue: '', advanced: true, mono: true },
+
+    { key: 'vsco.defaults.labels', category: 'defaults', label: 'Default labels', kind: 'text', placeholder: 'reference, priority', defaultValue: '' },
+    { key: 'vsco.defaults.readyForDownload', category: 'defaults', label: 'Ready for download by default', kind: 'toggle', defaultValue: 'true' },
+    { key: 'vsco.defaults.getGallery', category: 'defaults', label: 'Get Gallery', tooltip: 'vsco.co/<handle>/gallery', kind: 'toggle', defaultValue: 'true' },
+    { key: 'vsco.defaults.getJournal', category: 'defaults', label: 'Get Journal', tooltip: 'vsco.co/<handle>/journal', kind: 'toggle', defaultValue: 'false' },
+    { key: 'vsco.defaults.downloadImages', category: 'defaults', label: 'Download images', kind: 'toggle', defaultValue: 'true' },
+    { key: 'vsco.defaults.downloadVideos', category: 'defaults', label: 'Download videos', kind: 'toggle', defaultValue: 'true' },
+    { key: 'vsco.defaults.separateVideoFolder', category: 'defaults', label: 'Separate video folder', tooltip: 'Download videos into a "Video" subfolder.', kind: 'toggle', defaultValue: 'true' },
+    { key: 'vsco.defaults.temporary', category: 'defaults', label: 'Temporary', kind: 'toggle', defaultValue: 'false' },
+
+    { key: 'vsco.defaults.useMd5Comparison', category: 'download', label: 'Use MD5 comparison', kind: 'toggle', defaultValue: 'false' },
+  ],
+}
+
 export function getProviderAccountSettingsLayout(provider: ProviderKey): ProviderAccountSettingsLayout | undefined {
   if (provider === 'instagram') {
     return INSTAGRAM_SETTINGS_LAYOUT
@@ -196,6 +251,14 @@ export function getProviderAccountSettingsLayout(provider: ProviderKey): Provide
 
   if (provider === 'tiktok') {
     return TIKTOK_SETTINGS_LAYOUT
+  }
+
+  if (provider === 'youtube') {
+    return YOUTUBE_SETTINGS_LAYOUT
+  }
+
+  if (provider === 'vsco') {
+    return VSCO_SETTINGS_LAYOUT
   }
 
   return undefined
@@ -342,6 +405,46 @@ export function extractSourceDefaultsFromAccountSettings(
           abortOnLimit: parseOptionalToggle(draft['tiktok.defaults.abortOnLimit']),
           sleepTimerSecs: parseOptionalNumber(draft['tiktok.defaults.sleepTimerSecs']),
           temporary: parseOptionalToggle(draft['tiktok.defaults.temporary']),
+        }),
+      },
+    }
+  }
+
+  if (provider === 'youtube') {
+    const readyValue = draft['youtube.defaults.readyForDownload']
+    return {
+      labels: splitLabels(draft['youtube.defaults.labels']),
+      readyForDownload: readyValue === 'true' ? true : readyValue === 'false' ? false : undefined,
+      syncOptions: {
+        youtube: createYouTubeSourceSyncOptions({
+          getVideos: parseOptionalToggle(draft['youtube.defaults.getVideos']),
+          getShorts: parseOptionalToggle(draft['youtube.defaults.getShorts']),
+          downloadVideos: parseOptionalToggle(draft['youtube.defaults.downloadVideos']),
+          separateVideoFolder: parseOptionalToggle(draft['youtube.defaults.separateVideoFolder']),
+          useParsedVideoDate: parseOptionalToggle(draft['youtube.defaults.useParsedVideoDate']),
+          collectMediaStats: parseOptionalToggle(draft['youtube.defaults.collectMediaStats']),
+          abortOnLimit: parseOptionalToggle(draft['youtube.defaults.abortOnLimit']),
+          sleepTimerSecs: parseOptionalNumber(draft['youtube.defaults.sleepTimerSecs']),
+          temporary: parseOptionalToggle(draft['youtube.defaults.temporary']),
+        }),
+      },
+    }
+  }
+
+  if (provider === 'vsco') {
+    const readyValue = draft['vsco.defaults.readyForDownload']
+    return {
+      labels: splitLabels(draft['vsco.defaults.labels']),
+      readyForDownload: readyValue === 'true' ? true : readyValue === 'false' ? false : undefined,
+      syncOptions: {
+        vsco: createVscoSourceSyncOptions({
+          getGallery: parseOptionalToggle(draft['vsco.defaults.getGallery']),
+          getJournal: parseOptionalToggle(draft['vsco.defaults.getJournal']),
+          downloadImages: parseOptionalToggle(draft['vsco.defaults.downloadImages']),
+          downloadVideos: parseOptionalToggle(draft['vsco.defaults.downloadVideos']),
+          separateVideoFolder: parseOptionalToggle(draft['vsco.defaults.separateVideoFolder']),
+          useMd5Comparison: parseOptionalToggle(draft['vsco.defaults.useMd5Comparison']),
+          temporary: parseOptionalToggle(draft['vsco.defaults.temporary']),
         }),
       },
     }

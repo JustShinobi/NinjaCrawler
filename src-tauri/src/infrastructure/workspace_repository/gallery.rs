@@ -52,6 +52,17 @@ pub(super) fn build_post_url(
             )
         }),
         "twitter" => post_id.map(|post_id| format!("https://x.com/{handle}/status/{post_id}")),
+        // YouTube uses the video id. Shorts get their dedicated `/shorts/` URL
+        // when the post_code carries the "shorts" section marker.
+        "youtube" => post_id.map(|post_id| {
+            if post_code.map(str::trim) == Some("shorts") {
+                format!("https://www.youtube.com/shorts/{post_id}")
+            } else {
+                format!("https://www.youtube.com/watch?v={post_id}")
+            }
+        }),
+        // VSCO links a single media item by its id under the profile.
+        "vsco" => post_id.map(|post_id| format!("https://vsco.co/{handle}/media/{post_id}")),
         // Instagram usa o shortcode (case-sensitive) reconstruído pelo ledger;
         // sem ele o link cai para o perfil.
         "instagram" => post_code
@@ -168,6 +179,9 @@ pub(super) struct GalleryPostAcc {
     pub(super) ledger_post_code: Option<String>,
     pub(super) ledger_section: Option<String>,
     pub(super) ledger_captured_at: Option<i64>,
+    /// Título e duração (segundos) do post, do ledger (YouTube hoje).
+    pub(super) title: Option<String>,
+    pub(super) duration_seconds: Option<i64>,
 }
 /// Post link metadata joined from the per-provider media ledger, keyed by the
 /// (lowercased) relative path of each downloaded file.
@@ -180,6 +194,9 @@ pub(super) struct GalleryMediaLedgerLink {
     /// `first_seen_at` do ledger em unix — quando o app baixou/viu a mídia
     /// pela 1ª vez. Serve de eixo "Download Date" na ordenação.
     pub(super) downloaded_at: Option<i64>,
+    /// Título do post (YouTube) e duração em segundos (vídeos), do ledger.
+    pub(super) title: Option<String>,
+    pub(super) duration_seconds: Option<i64>,
 }
 #[derive(Default, Clone)]
 pub(super) struct GalleryPostStats {
@@ -470,6 +487,8 @@ pub fn load_source_media_gallery(source_id: String) -> Result<SourceMediaGallery
                     ledger_post_code: None,
                     ledger_section: None,
                     ledger_captured_at: None,
+                    title: None,
+                    duration_seconds: None,
                 }
             });
             entry.files.push((derived.index, file));
@@ -519,6 +538,14 @@ pub fn load_source_media_gallery(source_id: String) -> Result<SourceMediaGallery
                 }
                 if entry.ledger_captured_at.is_none() {
                     entry.ledger_captured_at = link.captured_at;
+                }
+                if entry.title.is_none() {
+                    if let Some(title) = link.title.filter(|value| !value.trim().is_empty()) {
+                        entry.title = Some(title);
+                    }
+                }
+                if entry.duration_seconds.is_none() {
+                    entry.duration_seconds = link.duration_seconds;
                 }
             }
             // Twitter: o status id não está no nome nem (para mídia antiga) no
@@ -606,6 +633,8 @@ pub fn load_source_media_gallery(source_id: String) -> Result<SourceMediaGallery
                     section,
                     albums,
                     poster_path,
+                    title: acc.title,
+                    duration_seconds: acc.duration_seconds,
                     view_count: stats.view_count,
                     like_count: stats.like_count,
                     comment_count: stats.comment_count,
@@ -673,6 +702,23 @@ pub(super) fn extract_post_tombstone_keys(
             post.post_url
                 .as_deref()
                 .and_then(|url| url_segment_after(url, "/p/")),
+        ),
+        "youtube" => (
+            post.post_id.clone().or_else(|| {
+                post.post_url.as_deref().and_then(|url| {
+                    url_segment_after(url, "watch?v=")
+                        .or_else(|| url_segment_after(url, "/shorts/"))
+                })
+            }),
+            None,
+        ),
+        "vsco" => (
+            post.post_id.clone().or_else(|| {
+                post.post_url
+                    .as_deref()
+                    .and_then(|url| url_segment_after(url, "/media/"))
+            }),
+            None,
         ),
         _ => (None, None),
     }

@@ -17,6 +17,7 @@ use uuid::Uuid;
 
 use crate::domain::models::{
     default_tiktok_source_sync_options, default_twitter_source_sync_options,
+    default_vsco_source_sync_options, default_youtube_source_sync_options,
 };
 use crate::domain::models::{
     AccountSyncRun, AppSetting, AppSettingUpsert, AvatarThumbnail, AvatarThumbnailBatch,
@@ -36,14 +37,15 @@ use crate::domain::models::{
     SourceAvailabilityCheckResult, SourceMediaGallery, SourceProfile, SourceProfileDeleteMode,
     SourceProfileUpsert, SourceSyncOptions, SourceSyncRun, SyncPlan, SyncPlanRun,
     SyncPlanTargetPreview, SyncPlanTargetPreviewInput, SyncPlanTargetPreviewSource, SyncPlanUpsert,
-    TikTokSourceSyncOptions, TwitterSourceSyncOptions, WorkspaceSnapshot,
+    TikTokSourceSyncOptions, TwitterSourceSyncOptions, VscoSourceSyncOptions, WorkspaceSnapshot,
+    YouTubeSourceSyncOptions,
 };
 use crate::infrastructure::runtime_log::RuntimeLogAnchor;
 use crate::infrastructure::storage::StorageLayout;
 use crate::infrastructure::{
     connector_debug, connector_runtime, database, instagram_connector, media_tool_runtime, runtime_log,
     session_secret_store, source_sync_runtime, storage, tiktok_connector, tiktok_likes_runtime,
-    twitter_connector,
+    twitter_connector, vsco_connector, youtube_connector,
 };
 use crate::providers;
 

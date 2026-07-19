@@ -304,6 +304,16 @@ function compactCount(value: number): string {
   }).format(value)
 }
 
+/** Formata uma duração em segundos como `M:SS` (ou `H:MM:SS` acima de 1h). */
+function formatDuration(totalSeconds: number): string {
+  const total = Math.max(0, Math.floor(totalSeconds))
+  const hours = Math.floor(total / 3600)
+  const minutes = Math.floor((total % 3600) / 60)
+  const seconds = total % 60
+  const pad = (value: number) => value.toString().padStart(2, '0')
+  return hours > 0 ? `${hours}:${pad(minutes)}:${pad(seconds)}` : `${minutes}:${pad(seconds)}`
+}
+
 /** Identificador estável de um post para seleção (o 1º arquivo é único por post). */
 function postKey(post: MediaGalleryPost): string {
   return post.files[0]?.relativePath ?? post.postId ?? ''
@@ -361,6 +371,14 @@ function sectionLabel(provider: ProviderKey, section: string): string {
       return 'Reposts'
     case 'video':
       return 'Videos'
+    case 'videos':
+      return 'Videos'
+    case 'shorts':
+      return 'Shorts'
+    case 'gallery':
+      return 'Gallery'
+    case 'journal':
+      return 'Journal'
     default:
       return section.charAt(0).toUpperCase() + section.slice(1)
   }
@@ -381,6 +399,12 @@ function sortSections(sections: string[]): string[] {
 const GRID_GAP_PX = 8.8
 /** Miniatura tem aspect-ratio 3/4, então altura = largura × 4/3. */
 const THUMB_ASPECT = 4 / 3
+/** No modo YouTube o thumb é 16:9, então altura = largura × 9/16. */
+const YOUTUBE_THUMB_ASPECT = 9 / 16
+/** Tiles do YouTube são mais largos que o grid padrão (feed 16:9). */
+const YOUTUBE_THUMB_SCALE = 1.7
+/** Altura do rótulo abaixo do thumb no modo YouTube (título 2 linhas + meta). */
+const YOUTUBE_CAPTION_HEIGHT = 62
 /** Altura estimada do cabeçalho de dia (o measure real ajusta depois). */
 const DAY_HEADER_ESTIMATE = 44
 /** Linhas extras montadas fora da viewport, para rolagem sem flashes. */
@@ -432,7 +456,10 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
   const [sortDir, setSortDir] = useState<SortDir>(readStoredSortDir)
   // Só o TikTok coleta contagem de views hoje; nos demais providers o eixo
   // Popularity fica oculto e uma preferência persistida cai em Creation date.
-  const popularitySortAvailable = gallery?.provider === 'tiktok'
+  const popularitySortAvailable =
+    gallery?.provider === 'tiktok' || gallery?.provider === 'youtube'
+  // YouTube renderiza um feed estilo YT (tiles 16:9 + título/duração/views).
+  const isYoutube = gallery?.provider === 'youtube'
   const effectiveSortField: SortField =
     !popularitySortAvailable && sortField === 'popularity' ? 'creation' : sortField
   // Ação pontual (TikTok): enfileira um sync que re-coleta stats da mídia já
@@ -896,12 +923,17 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
   // Colunas pela densidade (thumbs com largura fixa, alinhados à esquerda —
   // poucos itens não esticam para preencher a janela).
   const gridMetrics = useMemo(() => {
-    const min = DENSITY_STEPS[densityIndex]
+    const base = DENSITY_STEPS[densityIndex]
+    // O feed do YouTube usa tiles mais largos (16:9) com um rótulo abaixo.
+    const min = isYoutube ? Math.round(base * YOUTUBE_THUMB_SCALE) : base
+    const rowHeight = isYoutube
+      ? Math.round(min * YOUTUBE_THUMB_ASPECT + YOUTUBE_CAPTION_HEIGHT + GRID_GAP_PX)
+      : Math.round(min * THUMB_ASPECT + GRID_GAP_PX)
     const width = containerWidth
-    if (width <= 0) return { cols: 1, rowHeight: Math.round(min * THUMB_ASPECT + GRID_GAP_PX) }
+    if (width <= 0) return { cols: 1, min, rowHeight }
     const cols = Math.max(1, Math.floor((width + GRID_GAP_PX) / (min + GRID_GAP_PX)))
-    return { cols, rowHeight: Math.round(min * THUMB_ASPECT + GRID_GAP_PX) }
-  }, [containerWidth, densityIndex])
+    return { cols, min, rowHeight }
+  }, [containerWidth, densityIndex, isYoutube])
 
   // Achata o conteúdo do modo atual (grid, day ou user) em linhas virtuais.
   // Nos modos agrupados, cada grupo gera um cabeçalho + N fileiras de cards.
@@ -1407,9 +1439,9 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
   const activeItem = lightboxIndex !== undefined ? flatItems[lightboxIndex] : undefined
   // Album (não virtualizado) usa colunas auto-fill; o grid virtualizado fixa o
   // número de colunas (`--pv-cols`) para todas as linhas ficarem alinhadas.
-  const gridStyle = { '--pv-thumb-min': `${DENSITY_STEPS[densityIndex]}px` } as CSSProperties
+  const gridStyle = { '--pv-thumb-min': `${gridMetrics.min}px` } as CSSProperties
   const virtualGridStyle = {
-    '--pv-thumb-min': `${DENSITY_STEPS[densityIndex]}px`,
+    '--pv-thumb-min': `${gridMetrics.min}px`,
     '--pv-cols': gridMetrics.cols,
   } as CSSProperties
   const sortFieldLabel =
@@ -1512,9 +1544,31 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
     const allowVideoThumb = !isVirtualized || (thumbsUnavailable && !isScrolling)
     const video = isVideo(post.mediaType === 'video' ? 'video' : thumb.mediaType)
     const selected = selectedKeys.has(postKey(post))
+    // YouTube: badge de duração no thumb + rótulo abaixo (título, views, data).
+    const durationBadge =
+      isYoutube && post.durationSeconds ? formatDuration(post.durationSeconds) : undefined
+    const captionTitle = isYoutube ? post.title || undefined : undefined
+    const captionMeta = isYoutube
+      ? [
+          post.viewCount !== undefined ? `${compactCount(post.viewCount)} views` : '',
+          post.capturedAt
+            ? new Date(post.capturedAt * 1000).toLocaleDateString(undefined, {
+                year: 'numeric',
+                month: 'short',
+                day: 'numeric',
+              })
+            : '',
+        ]
+          .filter(Boolean)
+          .join(' · ')
+      : undefined
     return (
       <MediaCard
         key={key}
+        youtube={isYoutube}
+        durationBadge={durationBadge}
+        captionTitle={captionTitle}
+        captionMeta={captionMeta}
         posterAbsPath={posterSrc}
         // Se um jpg derivado estiver corrompido/inacessível, o MediaCard cai
         // para o próprio vídeo apenas naquele card; não deixa ícone quebrado.
@@ -1534,7 +1588,9 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
             : undefined
         }
         overlayText={
-          [
+          isYoutube
+            ? undefined
+            : [
             post.viewCount !== undefined ? `${compactCount(post.viewCount)} views` : '',
             post.capturedAt
               ? new Date(post.capturedAt * 1000).toLocaleTimeString(undefined, {

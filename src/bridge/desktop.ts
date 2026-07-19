@@ -125,7 +125,7 @@ import type {
 } from '../domain/models'
 import { createEmptyWorkspaceSnapshot } from '../domain/workspaceSnapshot'
 
-const PROVIDER_KEYS: ProviderKey[] = ['instagram', 'tiktok', 'twitter']
+const PROVIDER_KEYS: ProviderKey[] = ['instagram', 'tiktok', 'twitter', 'youtube', 'vsco']
 const AUTH_MODES: AuthMode[] = ['imported_session']
 const AUTH_STATES: AuthState[] = ['ready', 'degraded', 'expired']
 const SOURCE_KINDS: SourceKind[] = ['profile']
@@ -3015,6 +3015,8 @@ function parseSourceMediaGallery(raw: unknown, sourceId: string): SourceMediaGal
         ? post.albums.filter((album): album is string => typeof album === 'string')
         : [],
       posterPath: optionalStringValue(post, ['posterPath', 'poster_path']),
+      title: optionalStringValue(post, ['title']),
+      durationSeconds: optionalNumberValue(post, ['durationSeconds', 'duration_seconds']),
       viewCount: optionalNumberValue(post, ['viewCount', 'view_count']),
       likeCount: optionalNumberValue(post, ['likeCount', 'like_count']),
       commentCount: optionalNumberValue(post, ['commentCount', 'comment_count']),
@@ -3097,6 +3099,24 @@ export async function enqueueMediaThumbnailGeneration(
 
 export async function loadMediaThumbnailQueueStatus(): Promise<MediaThumbnailQueueStatus> {
   return invoke<MediaThumbnailQueueStatus>('media_thumbnail_queue_status')
+}
+
+/**
+ * Move reviewed invalid/unthumbnailable media to the Recycle Bin, tombstone the
+ * post in the ledger (won't re-download), and clear matching review items from
+ * the thumbnail queue result.
+ */
+export async function resolveMediaThumbnailReview(
+  sourceId: string,
+  relativePaths: string[],
+): Promise<MediaThumbnailQueueStatus> {
+  return invoke<MediaThumbnailQueueStatus>(
+    'resolve_media_thumbnail_review',
+    buildInvokeArgs(
+      { sourceId, relativePaths },
+      { source_id: sourceId, relative_paths: relativePaths },
+    ),
+  )
 }
 
 export async function openSingleVideosWindow(): Promise<void> {

@@ -1022,4 +1022,43 @@ describe('loadSourceMediaGallery', () => {
     expect(gallery.followerCount).toBeUndefined()
     expect(gallery.isVerified).toBe(false)
   })
+
+  it('maps YouTube title/duration/views for gallery posts (camelCase and snake_case)', async () => {
+    invokeMock.mockResolvedValueOnce({
+      sourceId: 'yt-1',
+      provider: 'youtube',
+      handle: '@creator',
+      profileUrl: 'https://www.youtube.com/@creator',
+      posts: [
+        {
+          postId: 'dQw4w9WgXcQ',
+          mediaType: 'video',
+          section: 'videos',
+          title: 'My best video ever',
+          durationSeconds: 754,
+          viewCount: 1_234_567,
+          files: [{ relativePath: 'v.mp4', absolutePath: 'S:/yt/v.mp4', mediaType: 'video' }],
+        },
+        {
+          post_id: 'abc12345678',
+          media_type: 'video',
+          section: 'shorts',
+          title: 'A quick short',
+          duration_seconds: 42,
+          view_count: 9000,
+          files: [{ relative_path: 's.mp4', absolute_path: 'S:/yt/s.mp4', media_type: 'video' }],
+        },
+      ],
+    })
+
+    const desktop = await import('./desktop')
+    const gallery = await desktop.loadSourceMediaGallery('yt-1')
+
+    expect(gallery.posts[0].title).toBe('My best video ever')
+    expect(gallery.posts[0].durationSeconds).toBe(754)
+    expect(gallery.posts[0].viewCount).toBe(1_234_567)
+    expect(gallery.posts[1].title).toBe('A quick short')
+    expect(gallery.posts[1].durationSeconds).toBe(42)
+    expect(gallery.posts[1].viewCount).toBe(9000)
+  })
 })

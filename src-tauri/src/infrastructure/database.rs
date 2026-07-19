@@ -187,6 +187,10 @@ const MIGRATIONS: &[(i64, &str)] = &[
         48,
         include_str!("../../migrations/0048_media_dedupe_source_scope.sql"),
     ),
+    (
+        49,
+        include_str!("../../migrations/0049_media_title_duration.sql"),
+    ),
 ];
 
 const PROVIDER_SYNC_RESUME_SCHEMA: &str =
@@ -786,7 +790,8 @@ mod tests {
             "CREATE TABLE schema_migrations (
                 version INTEGER PRIMARY KEY,
                 applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-             );",
+             );
+             CREATE TABLE provider_sync_media_ledger (id INTEGER PRIMARY KEY);",
         )
         .expect("migration ledger");
         for version in 1..=43 {
@@ -840,7 +845,8 @@ mod tests {
                 version INTEGER PRIMARY KEY,
                 applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
              );
-             CREATE TABLE source_profiles (id TEXT PRIMARY KEY);",
+             CREATE TABLE source_profiles (id TEXT PRIMARY KEY);
+             CREATE TABLE provider_sync_media_ledger (id INTEGER PRIMARY KEY);",
         )
         .expect("legacy base schema");
         raw.execute_batch(include_str!(
@@ -906,7 +912,8 @@ mod tests {
                 version INTEGER PRIMARY KEY,
                 applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
              );
-             CREATE TABLE source_profiles (id TEXT PRIMARY KEY);",
+             CREATE TABLE source_profiles (id TEXT PRIMARY KEY);
+             CREATE TABLE provider_sync_media_ledger (id INTEGER PRIMARY KEY);",
         )
         .expect("legacy base schema");
         raw.execute_batch(include_str!(
@@ -963,7 +970,8 @@ mod tests {
                         applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
                      );
                      CREATE TABLE source_profiles (id TEXT PRIMARY KEY);
-                     INSERT INTO source_profiles(id) VALUES ('seed');",
+                     INSERT INTO source_profiles(id) VALUES ('seed');
+                     CREATE TABLE provider_sync_media_ledger (id INTEGER PRIMARY KEY);",
                 )
                 .expect("seed schema");
             // Marca todas menos a ÚLTIMA como aplicadas → só a última fica pendente.

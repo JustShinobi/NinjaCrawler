@@ -1609,7 +1609,7 @@ fn normalize_provider_scope(provider: Option<String>) -> Result<Option<String>, 
     if provider.is_empty() || provider == "all" {
         return Ok(None);
     }
-    if !matches!(provider.as_str(), "instagram" | "tiktok" | "twitter") {
+    if crate::providers::provider_runtime(&provider).is_none() {
         return Err(format!(
             "Unsupported media cleanup provider scope: {provider}."
         ));

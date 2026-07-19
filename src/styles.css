@@ -4682,6 +4682,14 @@ p {
   background: linear-gradient(180deg, #2f6f8c, #184055);
 }
 
+.provider-youtube {
+  background: linear-gradient(180deg, #ff0000, #a30000);
+}
+
+.provider-vsco {
+  background: linear-gradient(180deg, #4a4a4a, #1a1a1a);
+}
+
 .page-grid {
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
@@ -6171,6 +6179,68 @@ p {
 
 .thumbnail-queue-recent small {
   color: var(--text-muted);
+}
+
+.thumbnail-review-panel {
+  margin-top: 0.55rem;
+  padding: 0.55rem 0.65rem;
+  border: 1px solid var(--accent-line);
+  border-radius: 10px;
+  background: var(--accent-soft);
+  display: grid;
+  gap: 0.45rem;
+}
+
+.thumbnail-review-lead {
+  margin: 0;
+  font-size: 0.82rem;
+  color: var(--ink-soft);
+  line-height: 1.35;
+}
+
+.thumbnail-review-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.35rem;
+  max-height: 10rem;
+  overflow: auto;
+}
+
+.thumbnail-review-list li {
+  display: grid;
+  gap: 0.1rem;
+  padding: 0.3rem 0.35rem;
+  border-radius: 6px;
+  background: rgba(255, 253, 249, 0.72);
+}
+
+.thumbnail-review-list code {
+  font-family: var(--font-data);
+  font-size: 0.78rem;
+  color: var(--ink);
+  word-break: break-all;
+}
+
+.thumbnail-review-kind {
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--accent);
+}
+
+.thumbnail-review-list small {
+  color: var(--muted);
+  font-size: 0.74rem;
+  line-height: 1.3;
+}
+
+.thumbnail-review-delete {
+  justify-self: start;
+  color: var(--danger);
+  border-color: color-mix(in srgb, var(--danger) 35%, var(--line));
 }
 
 @media (max-width: 680px) {
@@ -10052,6 +10122,16 @@ textarea.accounts-field-mono {
 .source-editor-shell-provider-twitter {
   --source-editor-provider-accent: #3c78c5;
   --source-editor-provider-wash: rgba(60, 120, 197, 0.14);
+}
+
+.source-editor-shell-provider-youtube {
+  --source-editor-provider-accent: #ff0000;
+  --source-editor-provider-wash: rgba(255, 0, 0, 0.14);
+}
+
+.source-editor-shell-provider-vsco {
+  --source-editor-provider-accent: #4a4a4a;
+  --source-editor-provider-wash: rgba(74, 74, 74, 0.14);
 }
 
 .source-editor-section {
@@ -14736,6 +14816,57 @@ textarea.accounts-field-mono {
    top-left selection checkbox so the two never overlap. */
 .profile-view-badge { top: 0.35rem; right: 0.35rem; }
 .profile-view-section { bottom: 0.35rem; left: 0.35rem; z-index: 1; }
+
+/* YouTube feed: wide 16:9 thumbnail with a title/meta caption underneath. */
+.profile-view-card--youtube .profile-view-thumb {
+  aspect-ratio: 16 / 9;
+}
+
+/* Duration pill, bottom-right of the thumbnail (like YouTube). */
+.profile-view-duration {
+  position: absolute;
+  bottom: 0.35rem;
+  right: 0.35rem;
+  padding: 0.05rem 0.3rem;
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.82);
+  color: #fff;
+  font-family: var(--font-data);
+  font-size: 0.62rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  pointer-events: none;
+  z-index: 1;
+  font-feature-settings: "zero" 1, "tnum" 1;
+  font-variant-numeric: tabular-nums slashed-zero;
+}
+
+.profile-view-caption {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  padding: 0.4rem 0.15rem 0.1rem;
+}
+
+.profile-view-caption-title {
+  font-size: 0.78rem;
+  line-height: 1.25;
+  font-weight: 600;
+  color: var(--text);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.profile-view-caption-meta {
+  font-size: 0.7rem;
+  color: var(--muted);
+  font-family: var(--font-data);
+  font-feature-settings: "zero" 1, "tnum" 1;
+  font-variant-numeric: tabular-nums slashed-zero;
+}
 
 .profile-view-thumb-overlay {
   position: absolute;

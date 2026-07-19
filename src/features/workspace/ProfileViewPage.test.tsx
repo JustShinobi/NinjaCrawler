@@ -143,6 +143,41 @@ function tiktokMixedFixture(): SourceMediaGallery {
   } as SourceMediaGallery
 }
 
+// YouTube: vídeos com título/duração/views para exercitar o feed estilo YT.
+function youtubeFixture(): SourceMediaGallery {
+  const day = Math.floor(Date.parse('2026-05-19T12:00:00Z') / 1000)
+  return {
+    sourceId: 'yt-1',
+    provider: 'youtube',
+    handle: 'creator',
+    profileUrl: 'https://www.youtube.com/@creator',
+    posts: [
+      {
+        postId: 'dQw4w9WgXcQ',
+        postUrl: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ',
+        capturedAt: day,
+        mediaType: 'video',
+        section: 'videos',
+        title: 'My best video ever',
+        durationSeconds: 754,
+        viewCount: 1_234_567,
+        files: [{ relativePath: 'v.mp4', absolutePath: 'S:/yt/v.mp4', mediaType: 'video' }],
+      },
+      {
+        postId: 'abcdefghijk',
+        postUrl: 'https://www.youtube.com/shorts/abcdefghijk',
+        capturedAt: day - 1000,
+        mediaType: 'video',
+        section: 'shorts',
+        title: 'A quick short',
+        durationSeconds: 42,
+        viewCount: 9000,
+        files: [{ relativePath: 's.mp4', absolutePath: 'S:/yt/s.mp4', mediaType: 'video' }],
+      },
+    ],
+  } as SourceMediaGallery
+}
+
 /** Ordem (por id abreviado) das miniaturas montadas, na sequência do DOM. */
 function thumbOrder(container: HTMLElement): string[] {
   return Array.from(container.querySelectorAll('.profile-view-thumb img')).map(
@@ -869,5 +904,32 @@ describe('ProfileViewPage', () => {
     fireEvent.click(screen.getByRole('button', { name: /advanced filters/i }))
     fireEvent.click(screen.getByLabelText(/carousels \/ slideshows only/i))
     expect(screen.getAllByRole('button', { name: /open preview/i }).length).toBe(1)
+  })
+
+  it('renders the YouTube feed tiles with title, duration badge and views', async () => {
+    bridgeMocks.loadSourceMediaGallery.mockResolvedValue(youtubeFixture())
+    const { container } = render(<ProfileViewPage initialSourceId="yt-1" />)
+    await screen.findByRole('heading', { name: /creator/i })
+
+    // YouTube cards carry the dedicated feed modifier class.
+    await waitFor(() => {
+      expect(container.querySelectorAll('.profile-view-card--youtube').length).toBe(2)
+    })
+    // Titles show up beneath the thumbnail.
+    expect(screen.getByText('My best video ever')).toBeTruthy()
+    expect(screen.getByText('A quick short')).toBeTruthy()
+    // Duration badge: 754s → 12:34, 42s → 0:42.
+    expect(screen.getByText('12:34')).toBeTruthy()
+    expect(screen.getByText('0:42')).toBeTruthy()
+    // Meta line carries compact views (locale-agnostic: format the same way).
+    const compact = (value: number) =>
+      new Intl.NumberFormat(undefined, { notation: 'compact', maximumFractionDigits: 1 }).format(
+        value,
+      )
+    const captions = Array.from(container.querySelectorAll('.profile-view-caption-meta')).map(
+      (node) => node.textContent ?? '',
+    )
+    expect(captions.some((text) => text.includes(`${compact(1_234_567)} views`))).toBe(true)
+    expect(captions.some((text) => text.includes(`${compact(9000)} views`))).toBe(true)
   })
 })

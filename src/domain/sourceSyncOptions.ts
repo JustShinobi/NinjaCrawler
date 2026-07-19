@@ -9,6 +9,8 @@ import type {
   SourceSyncOptions,
   TikTokSourceSyncOptions,
   TwitterSourceSyncOptions,
+  VscoSourceSyncOptions,
+  YouTubeSourceSyncOptions,
 } from './models'
 
 type InstagramSourceSyncPresetOverrides = Partial<Omit<InstagramSourceSyncPreset, 'sections'>> & {
@@ -279,6 +281,76 @@ export function createTikTokSourceSyncOptions(
   }
 }
 
+// Espelho dos defaults do módulo YouTube: aba de vídeos ligada, shorts
+// desligada, download via yt-dlp com data do post aplicada ao arquivo.
+export const DEFAULT_YOUTUBE_SOURCE_SYNC_OPTIONS: YouTubeSourceSyncOptions = {
+  getVideos: true,
+  getShorts: false,
+  downloadVideos: true,
+  separateVideoFolder: false,
+  useParsedVideoDate: true,
+  collectMediaStats: true,
+  abortOnLimit: true,
+  sleepTimerSecs: -1,
+  temporary: false,
+  specialPath: '',
+  description: '',
+  color: '',
+}
+
+export function createYouTubeSourceSyncOptions(
+  overrides?: Partial<YouTubeSourceSyncOptions> | null,
+): YouTubeSourceSyncOptions {
+  return {
+    getVideos: overrides?.getVideos ?? DEFAULT_YOUTUBE_SOURCE_SYNC_OPTIONS.getVideos,
+    getShorts: overrides?.getShorts ?? DEFAULT_YOUTUBE_SOURCE_SYNC_OPTIONS.getShorts,
+    downloadVideos: overrides?.downloadVideos ?? DEFAULT_YOUTUBE_SOURCE_SYNC_OPTIONS.downloadVideos,
+    separateVideoFolder: overrides?.separateVideoFolder ?? DEFAULT_YOUTUBE_SOURCE_SYNC_OPTIONS.separateVideoFolder,
+    useParsedVideoDate: overrides?.useParsedVideoDate ?? DEFAULT_YOUTUBE_SOURCE_SYNC_OPTIONS.useParsedVideoDate,
+    collectMediaStats: overrides?.collectMediaStats ?? DEFAULT_YOUTUBE_SOURCE_SYNC_OPTIONS.collectMediaStats,
+    abortOnLimit: overrides?.abortOnLimit ?? DEFAULT_YOUTUBE_SOURCE_SYNC_OPTIONS.abortOnLimit,
+    sleepTimerSecs: overrides?.sleepTimerSecs ?? DEFAULT_YOUTUBE_SOURCE_SYNC_OPTIONS.sleepTimerSecs,
+    temporary: overrides?.temporary ?? DEFAULT_YOUTUBE_SOURCE_SYNC_OPTIONS.temporary,
+    specialPath: normalizedTextValue(overrides?.specialPath),
+    description: overrides?.description ?? DEFAULT_YOUTUBE_SOURCE_SYNC_OPTIONS.description,
+    color: overrides?.color ?? DEFAULT_YOUTUBE_SOURCE_SYNC_OPTIONS.color,
+    userIdHint: overrides?.userIdHint,
+  }
+}
+
+// Espelho dos defaults do módulo VSCO: galeria ligada, journal desligado,
+// imagens e vídeos baixados, vídeos separados em subpasta.
+export const DEFAULT_VSCO_SOURCE_SYNC_OPTIONS: VscoSourceSyncOptions = {
+  getGallery: true,
+  getJournal: false,
+  downloadImages: true,
+  downloadVideos: true,
+  separateVideoFolder: true,
+  useMd5Comparison: false,
+  temporary: false,
+  specialPath: '',
+  description: '',
+  color: '',
+}
+
+export function createVscoSourceSyncOptions(
+  overrides?: Partial<VscoSourceSyncOptions> | null,
+): VscoSourceSyncOptions {
+  return {
+    getGallery: overrides?.getGallery ?? DEFAULT_VSCO_SOURCE_SYNC_OPTIONS.getGallery,
+    getJournal: overrides?.getJournal ?? DEFAULT_VSCO_SOURCE_SYNC_OPTIONS.getJournal,
+    downloadImages: overrides?.downloadImages ?? DEFAULT_VSCO_SOURCE_SYNC_OPTIONS.downloadImages,
+    downloadVideos: overrides?.downloadVideos ?? DEFAULT_VSCO_SOURCE_SYNC_OPTIONS.downloadVideos,
+    separateVideoFolder: overrides?.separateVideoFolder ?? DEFAULT_VSCO_SOURCE_SYNC_OPTIONS.separateVideoFolder,
+    useMd5Comparison: overrides?.useMd5Comparison ?? DEFAULT_VSCO_SOURCE_SYNC_OPTIONS.useMd5Comparison,
+    temporary: overrides?.temporary ?? DEFAULT_VSCO_SOURCE_SYNC_OPTIONS.temporary,
+    specialPath: normalizedTextValue(overrides?.specialPath),
+    description: overrides?.description ?? DEFAULT_VSCO_SOURCE_SYNC_OPTIONS.description,
+    color: overrides?.color ?? DEFAULT_VSCO_SOURCE_SYNC_OPTIONS.color,
+    userIdHint: overrides?.userIdHint,
+  }
+}
+
 export function createSourceSyncOptions(
   provider: ProviderKey,
   overrides?: SourceSyncOptions | null,
@@ -298,6 +370,18 @@ export function createSourceSyncOptions(
   if (provider === 'tiktok') {
     return {
       tiktok: createTikTokSourceSyncOptions(overrides?.tiktok),
+    }
+  }
+
+  if (provider === 'youtube') {
+    return {
+      youtube: createYouTubeSourceSyncOptions(overrides?.youtube),
+    }
+  }
+
+  if (provider === 'vsco') {
+    return {
+      vsco: createVscoSourceSyncOptions(overrides?.vsco),
     }
   }
 
@@ -335,6 +419,28 @@ export function resolveTwitterSourceSyncOptions(
   }
 
   return createTwitterSourceSyncOptions(syncOptions?.twitter)
+}
+
+export function resolveYouTubeSourceSyncOptions(
+  provider: ProviderKey,
+  syncOptions?: SourceSyncOptions | null,
+): YouTubeSourceSyncOptions | undefined {
+  if (provider !== 'youtube') {
+    return undefined
+  }
+
+  return createYouTubeSourceSyncOptions(syncOptions?.youtube)
+}
+
+export function resolveVscoSourceSyncOptions(
+  provider: ProviderKey,
+  syncOptions?: SourceSyncOptions | null,
+): VscoSourceSyncOptions | undefined {
+  if (provider !== 'vsco') {
+    return undefined
+  }
+
+  return createVscoSourceSyncOptions(syncOptions?.vsco)
 }
 
 function parseGlobalPresetSettingValue(

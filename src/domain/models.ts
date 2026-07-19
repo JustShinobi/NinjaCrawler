@@ -1,4 +1,4 @@
-export type ProviderKey = 'instagram' | 'tiktok' | 'twitter'
+export type ProviderKey = 'instagram' | 'tiktok' | 'twitter' | 'youtube' | 'vsco'
 export type AuthMode = 'imported_session'
 export type AuthState = 'ready' | 'degraded' | 'expired'
 export type SourceKind = 'profile'
@@ -175,10 +175,42 @@ export interface TikTokSourceSyncOptions {
   userIdHint?: string
 }
 
+export interface YouTubeSourceSyncOptions {
+  getVideos?: boolean
+  getShorts?: boolean
+  downloadVideos?: boolean
+  separateVideoFolder?: boolean
+  useParsedVideoDate?: boolean
+  collectMediaStats?: boolean
+  abortOnLimit?: boolean
+  sleepTimerSecs?: number
+  temporary?: boolean
+  specialPath?: string
+  description?: string
+  color?: string
+  userIdHint?: string
+}
+
+export interface VscoSourceSyncOptions {
+  getGallery?: boolean
+  getJournal?: boolean
+  downloadImages?: boolean
+  downloadVideos?: boolean
+  separateVideoFolder?: boolean
+  useMd5Comparison?: boolean
+  temporary?: boolean
+  specialPath?: string
+  description?: string
+  color?: string
+  userIdHint?: string
+}
+
 export interface SourceSyncOptions {
   instagram?: InstagramSourceSyncOptions
   twitter?: TwitterSourceSyncOptions
   tiktok?: TikTokSourceSyncOptions
+  youtube?: YouTubeSourceSyncOptions
+  vsco?: VscoSourceSyncOptions
 }
 
 export interface RunSourceSyncOptions {
@@ -562,6 +594,10 @@ export interface MediaGalleryPost {
    */
   albums?: string[]
   posterPath?: string
+  /** Post title (YouTube today), from the sync media ledger. */
+  title?: string
+  /** Video duration in seconds (YouTube), from the sync media ledger. */
+  durationSeconds?: number
   viewCount?: number
   likeCount?: number
   commentCount?: number
@@ -601,6 +637,15 @@ export interface SourceMediaGallery {
     statsUpdatedAt?: string
 }
 
+export interface MediaThumbnailReviewItem {
+  absolutePath: string
+  relativePath: string
+  fileName: string
+  /** `invalid_media` (no visual stream / corrupt) or `generation_failed`. */
+  kind: 'invalid_media' | 'generation_failed' | string
+  reason: string
+}
+
 export interface MediaThumbnailQueueItem {
   sourceId: string
   provider: ProviderKey
@@ -614,19 +659,30 @@ export interface MediaThumbnailQueueItem {
   generated: number
   skippedExisting: number
   failed: number
+  invalidMedia: number
   currentFile?: string
   progressPercent?: number
+  reviewItems?: MediaThumbnailReviewItem[]
 }
 
 export interface MediaThumbnailQueueResult {
   sourceId: string
   provider: ProviderKey
   handle: string
-  status: 'succeeded' | 'failed'
+  /**
+   * Terminal job status from the thumbnail runtime:
+   * - `succeeded` — finished with no invalid media / generation failures
+   * - `warning` — finished with invalid media and/or partial generation issues (manual review)
+   * - `failed` — hard failure (fatal error, or only generation failures with no progress)
+   * - `skipped` — cancelled mid-run (e.g. profile delete-with-media releasing file locks)
+   */
+  status: 'succeeded' | 'warning' | 'failed' | 'skipped'
   summary: string
   generated: number
   skippedExisting: number
   failed: number
+  invalidMedia: number
+  reviewItems: MediaThumbnailReviewItem[]
   finishedAt: string
 }
 

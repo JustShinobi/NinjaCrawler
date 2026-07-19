@@ -15,6 +15,7 @@ import {
   openWorkspaceHealthWindow,
   pauseSourceSyncProvider,
   reorderSourceSyncProviderQueue,
+  resolveMediaThumbnailReview,
   resumeSourceSyncProvider,
   runSourceSync,
   loadSingleVideoQueueStatus,
@@ -32,6 +33,7 @@ import type {
   SourceSyncQueueRecentResult,
   SourceSyncQueueStatus,
   MediaThumbnailQueueStatus,
+  MediaThumbnailReviewItem,
   MediaPathMigrationQueueStatus,
   MediaDedupeJobStatus,
   SchedulerGroup,
@@ -80,6 +82,10 @@ interface QueueResultTask {
   summary: string
   finishedAt: string
   error?: string
+  /** Thumbnail jobs only: invalid/corrupt media for manual review. */
+  reviewItems?: MediaThumbnailReviewItem[]
+  invalidMedia?: number
+  generationFailed?: number
 }
 
 interface ProviderLane {
@@ -347,6 +353,7 @@ export function SourceSyncQueueWindowPage() {
   const [maintenanceOpen, setMaintenanceOpen] = useState(false)
   const [maintenanceError, setMaintenanceError] = useState<string>()
   const [cancellingMigrations, setCancellingMigrations] = useState(false)
+  const [resolvingReviewKey, setResolvingReviewKey] = useState<string>()
   const maintenanceButtonRef = useRef<HTMLButtonElement>(null)
 
   const refreshQueueStatus = useCallback(async (silent = false) => {
@@ -416,6 +423,30 @@ export function SourceSyncQueueWindowPage() {
         return thumbnailScopeValue ? [thumbnailScopeValue] : []
     }
   }, [librarySources, thumbnailScope, thumbnailScopeValue])
+
+  const handleResolveThumbnailReview = async (
+    taskKey: string,
+    sourceId: string,
+    items: MediaThumbnailReviewItem[],
+  ) => {
+    const relativePaths = items
+      .map((item) => item.relativePath)
+      .filter((path) => path.trim().length > 0)
+    if (relativePaths.length === 0) return
+    setResolvingReviewKey(taskKey)
+    try {
+      setThumbnailStatus(await resolveMediaThumbnailReview(sourceId, relativePaths))
+      setError(undefined)
+    } catch (resolveError) {
+      setError(
+        resolveError instanceof Error
+          ? resolveError.message
+          : 'Failed to move invalid media to the Recycle Bin.',
+      )
+    } finally {
+      setResolvingReviewKey(undefined)
+    }
+  }
 
   const handleQueueThumbnails = async () => {
     if (thumbnailTargetIds.length === 0) return
@@ -510,9 +541,16 @@ export function SourceSyncQueueWindowPage() {
   }, [])
 
   useEffect(() => {
-    const timer = window.setInterval(() => void refreshQueueStatus(true), 1200)
+    // Poll faster while a delete is running so stage/file progress stays live
+    // even if a few IPC events are coalesced.
+    const hasActiveDelete =
+      deleteStatus.runningCount > 0 || deleteStatus.queuedCount > 0
+    const timer = window.setInterval(
+      () => void refreshQueueStatus(true),
+      hasActiveDelete ? 400 : 1200,
+    )
     return () => window.clearInterval(timer)
-  }, [refreshQueueStatus])
+  }, [refreshQueueStatus, deleteStatus.runningCount, deleteStatus.queuedCount])
 
   useEffect(() => {
     const timer = window.setInterval(() => void refreshAvatars(), 30_000)
@@ -638,17 +676,33 @@ export function SourceSyncQueueWindowPage() {
           finishedAt: result.finishedAt,
           error: result.error,
         })),
-        ...(thumbnailStatus?.recentResults ?? []).map((result): QueueResultTask => ({
-          key: `thumbnail-result-${result.sourceId}-${result.finishedAt}`,
-          sourceId: result.sourceId,
-          provider: result.provider,
-          providerLabel: providerDisplayName(result.provider),
-          handle: result.handle,
-          operation: 'Thumbnail',
-          status: result.status,
-          summary: `${result.generated} generated · ${result.skippedExisting} existing · ${result.failed} failed`,
-          finishedAt: result.finishedAt,
-        })),
+        ...(thumbnailStatus?.recentResults ?? []).map((result): QueueResultTask => {
+          const invalidMedia = result.invalidMedia ?? 0
+          const generationFailed = result.failed ?? 0
+          const reviewItems = result.reviewItems ?? []
+          const summaryParts = [
+            `${result.generated} generated`,
+            `${result.skippedExisting} existing`,
+          ]
+          if (invalidMedia > 0) summaryParts.push(`${invalidMedia} invalid`)
+          if (generationFailed > 0) summaryParts.push(`${generationFailed} failed`)
+          return {
+            key: `thumbnail-result-${result.sourceId}-${result.finishedAt}`,
+            sourceId: result.sourceId,
+            provider: result.provider,
+            providerLabel: providerDisplayName(result.provider),
+            handle: result.handle,
+            operation: 'Thumbnail',
+            status: result.status,
+            summary: result.summary?.trim()
+              ? result.summary
+              : summaryParts.join(' · '),
+            finishedAt: result.finishedAt,
+            reviewItems,
+            invalidMedia,
+            generationFailed,
+          }
+        }),
       ].sort((left, right) => Date.parse(right.finishedAt) - Date.parse(left.finishedAt)),
     [deleteStatus.recentResults, migrationStatus?.recentResults, syncStatus.recentResults, singleVideoStatus?.recentResults, thumbnailStatus?.recentResults],
   )
@@ -954,10 +1008,21 @@ export function SourceSyncQueueWindowPage() {
     const isDragging = dragState?.jobKey === jobKey && dragState.provider === task.provider
     const isDropTarget = dropTargetKey === jobKey && dragState !== null && dragState.jobKey !== jobKey
     const progressMeta = [
-      task.progressLabel ?? (task.operation === 'Delete' ? 'Processing' : 'Downloading'),
+      task.progressLabel
+        ?? (task.operation === 'Delete'
+          ? task.state === 'queued'
+            ? 'Queued for delete'
+            : 'Deleting…'
+          : 'Downloading'),
       ...detailBits,
-      task.progressPercent !== undefined && !task.progressIndeterminate ? `${task.progressPercent}%` : null,
-      `running ${elapsed(task.startedAt ?? task.queuedAt, now)}`,
+      task.progressPercent !== undefined && !task.progressIndeterminate
+        ? `${task.progressPercent}%`
+        : null,
+      task.state === 'running'
+        ? `running ${elapsed(task.startedAt ?? task.queuedAt, now)}`
+        : task.state === 'queued'
+          ? `waiting ${elapsed(task.queuedAt, now)}`
+          : null,
     ]
       .filter(Boolean)
       .join(' · ')
@@ -1130,7 +1195,11 @@ export function SourceSyncQueueWindowPage() {
         {thumbnailStatus?.active ? <article className="maintenance-job">
           <div className="maintenance-job-heading"><span className="queue-tag">Thumbnails</span><strong>{thumbnailStatus.active.handle}</strong><span className="queue-data">{thumbnailStatus.active.filesProcessed}/{thumbnailStatus.active.filesTotal} files</span></div>
           <div aria-label={`${thumbnailStatus.active.handle} thumbnail generation`} aria-valuemax={100} aria-valuemin={0} aria-valuenow={thumbnailStatus.active.progressPercent ?? 0} className="queue-status-progress-track" role="progressbar"><div className="queue-status-progress-fill" style={{ width: `${thumbnailStatus.active.progressPercent ?? 0}%` }} /></div>
-          <small title={thumbnailStatus.active.currentFile}>Generating missing thumbnails · {thumbnailStatus.active.generated} generated · {thumbnailStatus.active.skippedExisting} existing · {thumbnailStatus.active.failed} failed</small>
+          <small title={thumbnailStatus.active.currentFile}>
+            Generating missing thumbnails · {thumbnailStatus.active.generated} generated · {thumbnailStatus.active.skippedExisting} existing
+            {(thumbnailStatus.active.invalidMedia ?? 0) > 0 ? ` · ${thumbnailStatus.active.invalidMedia} invalid` : ''}
+            {thumbnailStatus.active.failed > 0 ? ` · ${thumbnailStatus.active.failed} failed` : ''}
+          </small>
         </article> : null}
         {dedupeRunning || dedupeQueued ? <article className="maintenance-job">
           <div className="maintenance-job-heading"><span className="queue-tag">Media cleanup</span><strong>{dedupeStatus?.state === 'applying' ? 'Applying reviewed changes' : dedupeStatus?.stage === 'perceptual_scan' ? 'Comparing similar media' : 'Scanning library'}</strong><span className="queue-data">{dedupeStatus?.stage === 'perceptual_scan' ? `${dedupeStatus.perceptualSourcesProcessed}/${dedupeStatus.perceptualSourcesTotal} sources` : `${dedupeStatus?.filesProcessed.toLocaleString()}/${dedupeStatus?.filesTotal.toLocaleString()} files`}</span></div>
@@ -1437,6 +1506,44 @@ export function SourceSyncQueueWindowPage() {
                     </small>
                     <p className="queue-recent-summary">{task.summary}</p>
                     {task.error ? <p className="queue-recent-error">{task.error}</p> : null}
+                    {task.operation === 'Thumbnail' && (task.reviewItems?.length ?? 0) > 0 ? (
+                      <div className="thumbnail-review-panel">
+                        <p className="thumbnail-review-lead">
+                          Manual check recommended
+                          {task.invalidMedia ? ` · ${task.invalidMedia} invalid media` : ''}
+                          {task.generationFailed ? ` · ${task.generationFailed} generation failure(s)` : ''}
+                          . Remove only after confirming the online post is also broken.
+                        </p>
+                        <ul className="thumbnail-review-list">
+                          {(task.reviewItems ?? []).map((item) => (
+                            <li key={`${task.key}-${item.relativePath}`}>
+                              <code title={item.absolutePath}>{item.fileName}</code>
+                              <span className="thumbnail-review-kind">
+                                {item.kind === 'invalid_media' ? 'invalid media' : 'generation failed'}
+                              </span>
+                              <small title={item.reason}>{item.reason}</small>
+                            </li>
+                          ))}
+                        </ul>
+                        <button
+                          className="ghost-button profile-view-delete thumbnail-review-delete"
+                          disabled={resolvingReviewKey === task.key}
+                          onClick={() =>
+                            void handleResolveThumbnailReview(
+                              task.key,
+                              task.sourceId,
+                              task.reviewItems ?? [],
+                            )
+                          }
+                          type="button"
+                          title="Move listed files to the Recycle Bin and mark posts so they are not re-downloaded"
+                        >
+                          {resolvingReviewKey === task.key
+                            ? 'Moving to Recycle Bin…'
+                            : 'Move invalid media to Recycle Bin'}
+                        </button>
+                      </div>
+                    ) : null}
                   </div>
                   {task.operation === 'Sync' && task.status === 'failed' ? (
                     <button
