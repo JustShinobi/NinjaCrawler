@@ -7140,6 +7140,15 @@ p {
   padding: 0 0.72rem 0.72rem;
 }
 
+/* Body of the outer "Scan details" disclosure: stacks the semantics note,
+   nested engine/tools disclosure, per-source jobs, and stat cards with the
+   same rhythm the cleanup panel used before these were collapsed into it. */
+.health-scan-details-body {
+  display: grid;
+  gap: 0.75rem;
+  padding-top: 0.1rem;
+}
+
 .health-runtime-row {
   display: flex;
   align-items: center;
@@ -7395,51 +7404,83 @@ p {
   }
 }
 
-.health-dedupe-groups details {
-  border: 1px solid var(--border-subtle);
-  border-radius: 6px;
-  background: var(--bg-panel);
+.health-dedupe-empty {
+  padding: 0.6rem 0;
+  color: var(--muted);
+  font-size: 0.82rem;
 }
 
-.health-dedupe-groups summary {
-  display: flex;
-  justify-content: space-between;
-  padding: 0.55rem;
-  cursor: pointer;
-}
-
-.health-dedupe-groups details ul {
-  padding: 0 0.55rem 0.5rem;
-}
-
-.health-similar-group {
+/* VDF-style unified duplicate group card: header row with index/count/size/
+   badge, then one row per file (thumb, name+path, duration, resolution,
+   size, match %, selection). Shared by exact and similar groups. */
+.health-dedupe-group {
   padding: 0.7rem;
   border: 1px solid var(--border-subtle);
   border-radius: 7px;
+  background: var(--bg-panel);
+  display: grid;
+  gap: 0.55rem;
 }
 
-.health-similar-files {
+.health-dedupe-group-header {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+}
+
+.health-dedupe-group-index {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-family: var(--font-data);
+  font-size: 0.78rem;
+}
+
+.health-dedupe-group-heading {
+  flex: 1 1 auto;
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 0.05rem;
+  min-width: 0;
+}
+
+.health-dedupe-group-heading small {
+  color: var(--muted);
+  font-size: 0.76rem;
+}
+
+.health-dedupe-match-badge {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+.health-dedupe-compare-button,
+.health-dedupe-keepbest-button {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+.health-dedupe-rows {
+  display: grid;
+  gap: 0.35rem;
+}
+
+.health-dedupe-row {
+  display: grid;
+  grid-template-columns:
+    64px minmax(0, 1fr) 64px 90px 64px 96px 108px 76px 84px 56px auto;
+  align-items: center;
   gap: 0.6rem;
-  margin-top: 0.65rem;
-}
-
-.health-similar-file {
-  display: grid;
-  gap: 0.25rem;
-  padding: 0.45rem;
-  border: 2px solid var(--border-subtle);
+  padding: 0.35rem;
+  border: 1px solid transparent;
   border-radius: 6px;
+  background: var(--panel-alt);
 }
 
-.health-similar-file.is-keep { border-color: #3d9959; }
-.health-similar-file.is-remove { border-color: #c64d4d; opacity: 0.78; }
+.health-dedupe-row.is-keep { border-color: #3d9959; }
+.health-dedupe-row.is-remove { border-color: #c64d4d; opacity: 0.78; }
 
-.health-similar-file img,
-.health-video-placeholder {
-  width: 100%;
-  height: 104px;
+.health-dedupe-row-thumb {
+  width: 64px;
+  height: 64px;
   border-radius: 4px;
   object-fit: cover;
   background: var(--bg-muted, #222);
@@ -7449,14 +7490,342 @@ p {
   display: grid;
   place-items: center;
   color: #fff;
-  font-size: 0.72rem;
+  font-size: 0.62rem;
   font-weight: 700;
 }
 
-.health-similar-file > strong {
+.health-dedupe-row-name {
+  display: grid;
+  gap: 0.05rem;
+  min-width: 0;
+}
+
+.health-dedupe-row-name-line {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  min-width: 0;
+}
+
+.health-dedupe-row-name-line > strong {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* VDF-style "BEST" badge: marks the highest-quality file in a group
+   (resolution › bitrate › size › newest). Distinct from the match-percent
+   pill so it reads as a quality signal rather than a similarity score. */
+.health-dedupe-best-badge {
+  flex: 0 0 auto;
+  display: inline-block;
+  margin-left: 0.4rem;
+  padding: 0.08rem 0.4rem;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--success, #2b7140) 22%, transparent);
+  color: var(--success-text, #2b7140);
+  font-family: var(--font-mono);
+  font-size: 0.6rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  white-space: nowrap;
+}
+
+.health-dedupe-row-name > small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+
+.health-dedupe-row-col {
+  color: var(--muted);
+  font-family: var(--font-data);
+  font-size: 0.78rem;
+  text-align: right;
+  white-space: nowrap;
+}
+
+.health-dedupe-row-selection {
+  display: flex;
+  gap: 0.6rem;
+  flex: 0 0 auto;
+  white-space: nowrap;
+  font-size: 0.78rem;
+}
+
+.health-dedupe-row-selection-placeholder {
+  min-width: 1px;
+}
+
+@media (max-width: 860px) {
+  .health-dedupe-row {
+    grid-template-columns: 48px minmax(0, 1fr) auto;
+  }
+
+  .health-dedupe-row-col {
+    display: none;
+  }
+}
+
+/* Phase 2 results toolbar: sort/filter/auto-select controls above the unified
+   duplicate list. Mirrors the input/select styling used in .health-filter-bar. */
+.health-dedupe-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 0.55rem;
+  padding: 0.55rem 0.1rem 0.75rem;
+  border-bottom: 1px solid var(--line);
+  margin-bottom: 0.2rem;
+}
+
+.health-dedupe-toolbar-field {
+  display: grid;
+  gap: 0.22rem;
+  min-width: 0;
+}
+
+.health-dedupe-toolbar-field-grow {
+  flex: 1 1 180px;
+}
+
+.health-dedupe-toolbar-field > span {
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.health-dedupe-toolbar-field input,
+.health-dedupe-toolbar-field select {
+  min-height: 32px;
+  padding: 0.4rem 0.5rem;
+  border: 1px solid var(--line-strong);
+  border-radius: 7px;
+  background: var(--surface-input);
+  color: var(--ink);
+}
+
+.health-dedupe-toolbar-field input[type="number"] {
+  width: 5.5rem;
+}
+
+.health-dedupe-sort-control {
+  display: flex;
+  gap: 0.3rem;
+}
+
+.health-dedupe-sort-direction {
+  min-height: 32px;
+  padding: 0.2rem 0.55rem;
+  line-height: 1;
+}
+
+.health-dedupe-toolbar-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding-bottom: 0.4rem;
+  color: var(--muted);
+  font-size: 0.78rem;
+  white-space: nowrap;
+}
+
+/* Minimum similarity range slider: replaces the old raw "min match %" number
+   input with a labeled slider so the semantics read clearly to non-experts. */
+.health-dedupe-toolbar-field-slider {
+  min-width: 180px;
+}
+
+.health-dedupe-toolbar-field-label-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.health-dedupe-toolbar-slider-value {
+  color: var(--ink);
+  font-family: var(--font-data);
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: normal;
+  text-transform: none;
+}
+
+.health-dedupe-toolbar-field-slider input[type="range"] {
+  width: 100%;
+  min-height: 32px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  accent-color: var(--accent);
+}
+
+/* Sticky status bar summarizing the currently-visible (post-filter) results. */
+.health-dedupe-footer-bar {
+  position: sticky;
+  bottom: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.9rem;
+  padding: 0.55rem 0.75rem;
+  margin-top: 0.3rem;
+  border: 1px solid var(--border-subtle);
+  border-radius: 7px;
+  background: var(--panel-alt);
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.health-dedupe-footer-bar strong {
+  color: var(--ink);
+  font-family: var(--font-data);
+}
+
+/* Compact rows: smaller thumb, single line (path hidden), tighter grid. */
+.health-dedupe-rows.is-compact {
+  gap: 0.2rem;
+}
+
+.health-dedupe-row.is-compact {
+  grid-template-columns: 34px minmax(0, 1fr) 64px 90px 76px 56px auto;
+  padding: 0.2rem 0.35rem;
+}
+
+.health-dedupe-row.is-compact .health-dedupe-row-thumb {
+  width: 34px;
+  height: 34px;
+}
+
+@media (max-width: 860px) {
+  .health-dedupe-row.is-compact {
+    grid-template-columns: 34px minmax(0, 1fr) auto;
+  }
+}
+
+/* Compare view: full-screen backdrop + a scrollable side-by-side grid, one
+   card per file in the group (large preview + full metadata + Keep/Recycle). */
+.health-dedupe-compare-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: grid;
+  place-items: center;
+  padding: 2rem;
+  background: rgba(0, 0, 0, 0.6);
+}
+
+.health-dedupe-compare-modal {
+  display: grid;
+  gap: 0.85rem;
+  width: min(1200px, 100%);
+  max-height: 90vh;
+  padding: 1rem 1.1rem;
+  overflow: hidden;
+  border: 1px solid var(--border-subtle);
+  border-radius: 10px;
+  background: var(--bg-panel);
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.35);
+}
+
+.health-dedupe-compare-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.health-dedupe-compare-header h3 {
+  margin: 0.1rem 0 0;
+}
+
+.health-dedupe-compare-close {
+  flex: 0 0 auto;
+  min-width: 32px;
+  min-height: 32px;
+  border: 1px solid var(--line-strong);
+  border-radius: 7px;
+  background: var(--surface-input);
+  color: var(--ink);
+  cursor: pointer;
+}
+
+.health-dedupe-compare-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 0.85rem;
+  overflow-y: auto;
+  padding-right: 0.2rem;
+}
+
+.health-dedupe-compare-item {
+  display: grid;
+  gap: 0.5rem;
+  align-content: start;
+  padding: 0.6rem;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  background: var(--panel-alt);
+}
+
+.health-dedupe-compare-item.is-keep { border-color: #3d9959; }
+.health-dedupe-compare-item.is-remove { border-color: #c64d4d; opacity: 0.78; }
+
+.health-dedupe-compare-preview {
+  display: grid;
+  place-items: center;
+  min-height: 200px;
+  border-radius: 6px;
+  background: var(--bg-muted, #222);
+  overflow: hidden;
+}
+
+.health-dedupe-compare-preview img,
+.health-dedupe-compare-preview video {
+  max-width: 100%;
+  max-height: 320px;
+  object-fit: contain;
+}
+
+.health-dedupe-compare-meta {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 0.15rem 0.6rem;
+  margin: 0;
+  font-size: 0.78rem;
+}
+
+.health-dedupe-compare-meta dt {
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  align-self: start;
+}
+
+.health-dedupe-compare-meta dd {
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-data);
+}
+
+.health-dedupe-compare-readonly {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.76rem;
+}
+
+.health-dedupe-compare-selection {
+  font-size: 0.82rem;
 }
 
 .health-empty {

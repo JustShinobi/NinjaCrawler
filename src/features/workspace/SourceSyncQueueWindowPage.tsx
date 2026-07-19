@@ -12,6 +12,7 @@ import {
   loadSourceSyncQueueStatus,
   loadWorkspaceSnapshot,
   openConnectorDebugWindow,
+  openExternalTarget,
   openWorkspaceHealthWindow,
   pauseSourceSyncProvider,
   reorderSourceSyncProviderQueue,
@@ -613,6 +614,14 @@ export function SourceSyncQueueWindowPage() {
       setError(undefined)
     } catch (retryError) {
       setError(retryError instanceof Error ? retryError.message : `Failed to retry '${sourceId}'.`)
+    }
+  }, [])
+
+  const handleOpenReviewItemPost = useCallback(async (postUrl: string) => {
+    try {
+      await openExternalTarget(postUrl)
+    } catch (openError) {
+      setError(openError instanceof Error ? openError.message : 'Failed to open the online post.')
     }
   }, [])
 
@@ -1522,6 +1531,16 @@ export function SourceSyncQueueWindowPage() {
                                 {item.kind === 'invalid_media' ? 'invalid media' : 'generation failed'}
                               </span>
                               <small title={item.reason}>{item.reason}</small>
+                              {item.postUrl ? (
+                                <button
+                                  className="ghost-button thumbnail-review-open-post"
+                                  onClick={() => void handleOpenReviewItemPost(item.postUrl!)}
+                                  type="button"
+                                  title="Open the original online post to confirm it's also broken"
+                                >
+                                  Open online post
+                                </button>
+                              ) : null}
                             </li>
                           ))}
                         </ul>

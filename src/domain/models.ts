@@ -644,6 +644,8 @@ export interface MediaThumbnailReviewItem {
   /** `invalid_media` (no visual stream / corrupt) or `generation_failed`. */
   kind: 'invalid_media' | 'generation_failed' | string
   reason: string
+  /** Best-effort link to the original online post, for manual confirmation before deleting. */
+  postUrl?: string
 }
 
 export interface MediaThumbnailQueueItem {
@@ -1143,6 +1145,19 @@ export interface MediaDedupeFile {
   width?: number
   height?: number
   durationMs?: number
+  /** Absolute path to an already-generated library thumbnail, when one exists. */
+  thumbnailPath?: string
+  /** File modification time in epoch ms, when known (VDF-derived candidates omit it). */
+  modifiedAt?: number
+  /** Container bitrate in kb/s, from ffprobe. Videos only; probed lazily in the
+   * background — undefined until the probe catches up. */
+  bitrateKbps?: number
+  /** Video stream codec name (e.g. "h264"), from ffprobe. */
+  videoCodec?: string
+  /** Video stream frame rate in frames/second, from ffprobe. */
+  frameRate?: number
+  /** Human-readable audio stream summary (e.g. "aac (stereo)"), or "No audio". */
+  audioSummary?: string
 }
 
 export interface MediaDedupeGroup {
@@ -1208,6 +1223,7 @@ export interface MediaDedupeJobStatus {
   providerScope?: ProviderKey
   sourceScope?: string
   resourceProfile: MediaDedupeResourceProfile
+  scanProfile: MediaDedupeScanProfile
   similarityScope: 'source'
   filesProcessed: number
   filesTotal: number
@@ -1233,9 +1249,18 @@ export interface MediaDedupeScanInput {
   provider?: ProviderKey
   sourceId?: string
   resourceProfile?: MediaDedupeResourceProfile
+  scanProfile?: MediaDedupeScanProfile
 }
 
 export type MediaDedupeResourceProfile = 'quiet' | 'balanced' | 'fast'
+
+/**
+ * Scan depth, mapped onto Video Duplicate Finder's GUI scan presets:
+ * - `recommended` → "Edited & altered copies" (percent 92 + flip + ignore black/white frames)
+ * - `ai` → adds the ONNX neural-embedding passes (finds crops/re-edits/clips, visual only)
+ * - `deep` → also adds audio-fingerprint partial clip detection (slowest first scan)
+ */
+export type MediaDedupeScanProfile = 'recommended' | 'ai' | 'deep'
 
 export interface MediaDedupeSimilarSelection {
   groupId: string

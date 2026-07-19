@@ -180,6 +180,36 @@ pub(crate) struct VdfSourcePaths {
     pub result_path: PathBuf,
 }
 
+/// Scan depth, mapped onto VDF's GUI "scan profile" presets (VDF.GUI ScanProfiles.cs).
+/// `Recommended` mirrors the GUI default "Edited & altered copies" preset (percent 92 +
+/// horizontal-flip + ignore black/white frames, grayscale frame sampling). `AiScan` and
+/// `Deep` layer the ONNX neural-embedding passes (and, for Deep, audio-fingerprint partial
+/// clip detection) on top. The VDF CLI cannot set flip/ignore-black/ignore-white as flags,
+/// so those three knobs are supplied through a `--settings` JSON file written per source.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum VdfScanProfile {
+    Recommended,
+    AiScan,
+    Deep,
+}
+
+impl VdfScanProfile {
+    pub(crate) fn parse(value: &str) -> Self {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "ai" | "ai_scan" | "aiscan" => Self::AiScan,
+            "deep" | "deep_clean" | "deepclean" => Self::Deep,
+            _ => Self::Recommended,
+        }
+    }
+}
+
+/// The scan knobs that VDF only exposes through a settings JSON file (never as CLI flags).
+/// Shared by every profile we run (the GUI's Edited/AI/Deep presets all enable these three).
+const VDF_PROFILE_SETTINGS_JSON: &str =
+    r#"{"CompareHorizontallyFlipped":true,"IgnoreBlackPixels":true,"IgnoreWhitePixels":true}"#;
+
+const VDF_PROFILE_SETTINGS_FILE: &str = "ninjacrawler-scan-settings.json";
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct VdfRunOptions {
     pub hashing_parallelism: usize,
@@ -231,8 +261,17 @@ pub(crate) fn source_paths(scan_id: &str, source_id: &str) -> Result<VdfSourcePa
     })
 }
 
-pub(crate) fn settings_fingerprint() -> String {
-    let value = "schema=source-directory-v2;percent=96;threshold=5;include_images=false;use_phash=true;partial_clip=false";
+/// Cache-invalidation fingerprint for a scan profile. Bumped to schema v3 when the invocation
+/// was recalibrated to the GUI "Edited & altered copies" preset (percent 96 -> 92, grayscale
+/// frame sampling instead of pHash, plus flip + ignore black/white via the settings JSON).
+/// The profile is part of the string so switching depth invalidates cached candidates and
+/// forces VDF to re-run instead of reusing a shallower/deeper scan's results.
+pub(crate) fn settings_fingerprint(profile: VdfScanProfile) -> String {
+    let value = match profile {
+        VdfScanProfile::Recommended => "schema=source-directory-v3;profile=recommended;percent=92;threshold=5;grayscale=true;flip=true;ignore_black=true;ignore_white=true;include_images=false;partial_clip=false;ai=false;ai_partial=false",
+        VdfScanProfile::AiScan => "schema=source-directory-v3;profile=ai;percent=92;threshold=5;grayscale=true;flip=true;ignore_black=true;ignore_white=true;include_images=false;partial_clip=false;ai=true;ai_partial=true",
+        VdfScanProfile::Deep => "schema=source-directory-v3;profile=deep;percent=92;threshold=5;grayscale=true;flip=true;ignore_black=true;ignore_white=true;include_images=false;partial_clip=true;ai=true;ai_partial=true",
+    };
     format!("{:x}", Sha256::digest(value.as_bytes()))
 }
 
@@ -240,6 +279,7 @@ pub(crate) fn run_source_scan(
     source_path: &Path,
     paths: &VdfSourcePaths,
     options: VdfRunOptions,
+    profile: VdfScanProfile,
     cancel: &AtomicBool,
     mut progress: impl FnMut(VdfProgress),
 ) -> Result<Vec<crate::infrastructure::workspace_repository::MediaDedupeVdfCandidateOwned>, String>
@@ -257,9 +297,18 @@ pub(crate) fn run_source_scan(
     if paths.result_path.exists() {
         fs::remove_file(&paths.result_path).map_err(|error| error.to_string())?;
     }
+    // The horizontal-flip and ignore-black/white knobs of the "Edited & altered" preset are
+    // not exposed as CLI flags; VDF only reads them from a settings JSON file (--settings).
+    let settings_file = paths.database_dir.join(VDF_PROFILE_SETTINGS_FILE);
+    fs::write(&settings_file, VDF_PROFILE_SETTINGS_JSON).map_err(|error| {
+        format!(
+            "Failed to stage the VDF scan settings at '{}': {error}",
+            settings_file.display()
+        )
+    })?;
     let mut command = Command::new(executable);
     media_tool_runtime::configure_tool_path(&mut command);
-    configure_scan_command(&mut command, source_path, paths, options);
+    configure_scan_command(&mut command, source_path, paths, options, profile, &settings_file);
     command
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -350,7 +399,13 @@ fn configure_scan_command(
     source_path: &Path,
     paths: &VdfSourcePaths,
     options: VdfRunOptions,
+    profile: VdfScanProfile,
+    settings_file: &Path,
 ) {
+    // Calibrated to VDF's GUI "Edited & altered copies" preset (the recommended one): percent
+    // 92 (not the CLI default 96), grayscale frame sampling (no --use-phash, matching the GUI
+    // default algorithm), and flip + ignore-black/white supplied via --settings. Explicit flags
+    // override values from the settings file, so percent/threshold/parallelism stay authoritative.
     command
         .arg("scan-and-compare")
         .arg("--include")
@@ -361,11 +416,25 @@ fn configure_scan_command(
         .arg(source_path.join("cover"))
         .arg("--db")
         .arg(&paths.database_dir)
-        .args(["--percent", "96", "--threshold", "5", "--parallelism"])
+        .arg("--settings")
+        .arg(settings_file)
+        .args(["--percent", "92", "--threshold", "5", "--parallelism"])
         .arg(options.hashing_parallelism.to_string())
         .arg("--matching-parallelism")
-        .arg(options.matching_parallelism.to_string())
-        .args(["--use-phash", "--format", "json", "--output"])
+        .arg(options.matching_parallelism.to_string());
+    // Deeper profiles add the ONNX neural passes (and, for Deep, audio-fingerprint partial
+    // clip detection). VDF downloads the AI components (~100 MB) headlessly on first use.
+    match profile {
+        VdfScanProfile::Recommended => {}
+        VdfScanProfile::AiScan => {
+            command.args(["--ai-matching", "--ai-partial"]);
+        }
+        VdfScanProfile::Deep => {
+            command.args(["--ai-matching", "--ai-partial", "--partial-clip-detection"]);
+        }
+    }
+    command
+        .args(["--format", "json", "--output"])
         .arg(&paths.result_path);
 }
 
@@ -624,12 +693,15 @@ mod tests {
             database_dir: database_dir.clone(),
             result_path: temp.path().join("result.json"),
         };
+        let settings_file = temp.path().join("scan-settings.json");
         let mut command = Command::new("vdf-cli.exe");
         configure_scan_command(
             &mut command,
             &source,
             &paths,
             VdfRunOptions::for_capacity("balanced", 8, 1),
+            VdfScanProfile::Recommended,
+            &settings_file,
         );
         let arguments = command
             .get_args()
@@ -641,6 +713,75 @@ mod tests {
         assert!(arguments
             .windows(2)
             .any(|pair| pair == ["--parallelism", "4"]));
+        // Recalibrated to the GUI "Edited & altered copies" preset.
+        assert!(arguments
+            .windows(2)
+            .any(|pair| pair == ["--percent", "92"]));
+        // Grayscale frame sampling matches the GUI default (pHash is no longer forced on).
+        assert!(!arguments.iter().any(|value| value == "--use-phash"));
+        // Flip + ignore black/white come from the settings JSON, not flags.
+        let settings_index = arguments
+            .iter()
+            .position(|value| value == "--settings")
+            .unwrap();
+        assert_eq!(PathBuf::from(&arguments[settings_index + 1]), settings_file);
+        // Recommended profile stays classic-only: no AI or audio passes.
+        assert!(!arguments.iter().any(|value| value == "--ai-matching"));
+        assert!(!arguments.iter().any(|value| value == "--partial-clip-detection"));
+    }
+
+    #[test]
+    fn ai_and_deep_profiles_add_their_passes() {
+        let temp = tempfile::tempdir().expect("temp");
+        let source = temp.path().join("source");
+        let database_dir = temp.path().join("database");
+        let paths = VdfSourcePaths {
+            database_dir: database_dir.clone(),
+            result_path: temp.path().join("result.json"),
+        };
+        let settings_file = temp.path().join("scan-settings.json");
+
+        let collect = |profile: VdfScanProfile| {
+            let mut command = Command::new("vdf-cli.exe");
+            configure_scan_command(
+                &mut command,
+                &source,
+                &paths,
+                VdfRunOptions::for_capacity("balanced", 8, 1),
+                profile,
+                &settings_file,
+            );
+            command
+                .get_args()
+                .map(|value| value.to_string_lossy().to_string())
+                .collect::<Vec<_>>()
+        };
+
+        let ai = collect(VdfScanProfile::AiScan);
+        assert!(ai.iter().any(|value| value == "--ai-matching"));
+        assert!(ai.iter().any(|value| value == "--ai-partial"));
+        assert!(!ai.iter().any(|value| value == "--partial-clip-detection"));
+
+        let deep = collect(VdfScanProfile::Deep);
+        assert!(deep.iter().any(|value| value == "--ai-matching"));
+        assert!(deep.iter().any(|value| value == "--ai-partial"));
+        assert!(deep.iter().any(|value| value == "--partial-clip-detection"));
+    }
+
+    #[test]
+    fn scan_profile_parses_and_fingerprints_are_distinct() {
+        assert_eq!(VdfScanProfile::parse("recommended"), VdfScanProfile::Recommended);
+        assert_eq!(VdfScanProfile::parse("AI"), VdfScanProfile::AiScan);
+        assert_eq!(VdfScanProfile::parse("deep_clean"), VdfScanProfile::Deep);
+        assert_eq!(VdfScanProfile::parse("nonsense"), VdfScanProfile::Recommended);
+
+        let recommended = settings_fingerprint(VdfScanProfile::Recommended);
+        let ai = settings_fingerprint(VdfScanProfile::AiScan);
+        let deep = settings_fingerprint(VdfScanProfile::Deep);
+        assert_ne!(recommended, ai);
+        assert_ne!(ai, deep);
+        assert_ne!(recommended, deep);
+        assert_eq!(recommended.len(), 64);
     }
 
     #[test]

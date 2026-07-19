@@ -563,6 +563,12 @@ pub struct MediaThumbnailReviewItem {
     /// `generation_failed` (tooling/IO).
     pub kind: String,
     pub reason: String,
+    /// Best-effort link to the original online post, so the user can confirm
+    /// it's also broken before deleting the local file. Absent when the
+    /// provider/file name don't allow deriving it (e.g. Instagram shortcodes
+    /// aren't recoverable from the file name alone).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub post_url: Option<String>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -1622,6 +1628,25 @@ pub struct MediaDedupeFile {
     pub width: Option<u32>,
     pub height: Option<u32>,
     pub duration_ms: Option<u64>,
+    /// Absolute path to an already-generated library thumbnail (`.thumbs/<file>.jpg`)
+    /// beside the source file, when one exists. Resolution only — never generates a
+    /// thumbnail here; the media thumbnail queue owns generation.
+    pub thumbnail_path: Option<String>,
+    /// File modification time in epoch milliseconds, when known. Used for the
+    /// "Keep oldest" / "Keep newest" auto-select actions. VDF-derived candidates
+    /// don't carry this and leave it `None`.
+    pub modified_at_ms: Option<i64>,
+    /// Container bitrate in kb/s, from ffprobe. Videos only; probed lazily in the
+    /// background (see `media_metadata_probe`) so this is `None` until the probe
+    /// catches up (or forever, when ffprobe is unavailable/the file isn't a video).
+    pub bitrate_kbps: Option<u64>,
+    /// Video stream codec name (e.g. "h264"), from ffprobe.
+    pub video_codec: Option<String>,
+    /// Video stream frame rate in frames/second, from ffprobe.
+    pub frame_rate: Option<f64>,
+    /// Human-readable audio stream summary (e.g. "aac (stereo)"), or "No audio"
+    /// when the probe found no audio stream. `None` until probed.
+    pub audio_summary: Option<String>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -1697,6 +1722,7 @@ pub struct MediaDedupeJobStatus {
     pub provider_scope: Option<String>,
     pub source_scope: Option<String>,
     pub resource_profile: String,
+    pub scan_profile: String,
     pub similarity_scope: String,
     pub files_processed: u64,
     pub files_total: u64,
@@ -1724,6 +1750,7 @@ pub struct MediaDedupeScanInput {
     pub provider: Option<String>,
     pub source_id: Option<String>,
     pub resource_profile: Option<String>,
+    pub scan_profile: Option<String>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]

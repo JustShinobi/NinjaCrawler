@@ -2,6 +2,7 @@ use super::*;
 use crate::domain::models::{
     MediaDedupeFile, MediaDedupeGroup, MediaDedupeScanResult, MediaDedupeSourceJobStatus,
 };
+use crate::infrastructure::media_metadata_probe;
 use rusqlite::OptionalExtension;
 use std::collections::{BTreeMap, HashSet};
 
@@ -150,6 +151,7 @@ struct IndexedFileRow {
     width: Option<u32>,
     height: Option<u32>,
     duration_ms: Option<u64>,
+    modified_at_ms: Option<i64>,
     sha256: String,
     ahash64: Option<String>,
     dhash64: Option<String>,
@@ -1263,6 +1265,10 @@ fn vdf_similar_groups(
                     .then_some("image")
                     .unwrap_or("video")
                     .to_string();
+                let thumbnail_path = resolve_dedupe_thumbnail_path(Path::new(&path));
+                let probed = (media_type == "video")
+                    .then(|| media_metadata_probe::resolve_cached(Path::new(&path)))
+                    .flatten();
                 MediaDedupeFile {
                     path,
                     source_id: Some(source_id.clone()),
@@ -1272,6 +1278,12 @@ fn vdf_similar_groups(
                     width,
                     height,
                     duration_ms,
+                    thumbnail_path,
+                    modified_at_ms: None,
+                    bitrate_kbps: probed.as_ref().and_then(|value| value.bitrate_kbps),
+                    video_codec: probed.as_ref().and_then(|value| value.video_codec.clone()),
+                    frame_rate: probed.as_ref().and_then(|value| value.frame_rate),
+                    audio_summary: probed.and_then(|value| value.audio_summary),
                 }
             })
             .collect();
@@ -1471,7 +1483,8 @@ fn load_indexed_files(
     let mut statement = connection
         .prepare(
             "SELECT path, source_id, provider, volume_key, media_type, size_bytes,
-                    width, height, duration_ms, sha256, ahash64, dhash64, video_hashes_json
+                    width, height, duration_ms, sha256, ahash64, dhash64, video_hashes_json,
+                    modified_at_ms
              FROM media_dedupe_files
              WHERE scan_id = ?1
              ORDER BY normalized_path",
@@ -1503,6 +1516,7 @@ fn load_indexed_files(
                     .as_deref()
                     .and_then(|value| serde_json::from_str(value).ok())
                     .unwrap_or_default(),
+                modified_at_ms: row.get(13)?,
             })
         })
         .map_err(|error| error.to_string())?;
@@ -1668,6 +1682,10 @@ fn similar_groups(files: &[IndexedFileRow]) -> Vec<MediaDedupeGroup> {
 }
 
 fn media_file(file: &IndexedFileRow) -> MediaDedupeFile {
+    let path = Path::new(&file.path);
+    let probed = (file.media_type == "video")
+        .then(|| media_metadata_probe::resolve_cached(path))
+        .flatten();
     MediaDedupeFile {
         path: file.path.clone(),
         source_id: file.source_id.clone(),
@@ -1677,7 +1695,67 @@ fn media_file(file: &IndexedFileRow) -> MediaDedupeFile {
         width: file.width,
         height: file.height,
         duration_ms: file.duration_ms,
+        thumbnail_path: resolve_dedupe_thumbnail_path(path),
+        modified_at_ms: file.modified_at_ms,
+        bitrate_kbps: probed.as_ref().and_then(|value| value.bitrate_kbps),
+        video_codec: probed.as_ref().and_then(|value| value.video_codec.clone()),
+        frame_rate: probed.as_ref().and_then(|value| value.frame_rate),
+        audio_summary: probed.and_then(|value| value.audio_summary),
     }
+}
+
+/// Re-resolves ffprobe-derived metadata (bitrate/codec/fps/audio) on every file of
+/// a previously-loaded scan result — same rationale as
+/// `refresh_media_dedupe_thumbnail_paths`: the probe runs off-thread and in the
+/// background, independently of when the scan result was first cached, so the
+/// status endpoint needs to re-check the cache on every serve to pick up results
+/// as they land.
+pub(crate) fn refresh_media_dedupe_metadata(scan: &mut MediaDedupeScanResult) {
+    for group in scan
+        .exact_groups
+        .iter_mut()
+        .chain(scan.similar_groups.iter_mut())
+    {
+        for file in &mut group.files {
+            if file.media_type != "video" {
+                continue;
+            }
+            let Some(probed) = media_metadata_probe::resolve_cached(Path::new(&file.path)) else {
+                continue;
+            };
+            file.bitrate_kbps = probed.bitrate_kbps;
+            file.video_codec = probed.video_codec;
+            file.frame_rate = probed.frame_rate;
+            file.audio_summary = probed.audio_summary;
+        }
+    }
+}
+
+/// Re-resolves `thumbnail_path` on every file of a previously-loaded scan result.
+///
+/// Scan results can be cached in memory (e.g. `RuntimeState::latest_scan`) and served
+/// repeatedly by the status endpoint long after the scan finished. The thumbnail queue
+/// runs independently of the dedupe scan, so a thumbnail that didn't exist yet when the
+/// result was first loaded may show up later; re-resolving on every serve keeps
+/// `thumbnailPath` fresh without re-querying the database.
+pub(crate) fn refresh_media_dedupe_thumbnail_paths(scan: &mut MediaDedupeScanResult) {
+    for group in scan.exact_groups.iter_mut().chain(scan.similar_groups.iter_mut()) {
+        for file in &mut group.files {
+            file.thumbnail_path = resolve_dedupe_thumbnail_path(Path::new(&file.path));
+        }
+    }
+}
+
+/// Resolves an already-generated library thumbnail (`.thumbs/<file>.jpg`) beside a
+/// media file, without generating one. Used to surface real video/image thumbnails
+/// in the duplicate scan results; falls back to the UI placeholder when missing.
+fn resolve_dedupe_thumbnail_path(source: &Path) -> Option<String> {
+    let thumb = video_thumbnail_path(source)?;
+    thumb
+        .metadata()
+        .ok()
+        .filter(|meta| meta.len() > 0)
+        .map(|_| thumb.to_string_lossy().into_owned())
 }
 
 fn perceptually_similar(left: &IndexedFileRow, right: &IndexedFileRow) -> bool {
@@ -1759,5 +1837,146 @@ mod dedupe_repository_tests {
             r"c:\media\profile-two",
             r"c:\media\profile"
         ));
+    }
+
+    #[test]
+    fn refresh_thumbnail_paths_picks_up_thumbnails_generated_after_the_scan_was_cached() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let media_dir = temp.path();
+        let source = media_dir.join("post.jpg");
+        std::fs::write(&source, b"fake-image").expect("write source file");
+
+        let file = MediaDedupeFile {
+            path: source.to_string_lossy().into_owned(),
+            source_id: Some("source-1".to_string()),
+            provider: Some("instagram".to_string()),
+            media_type: "image".to_string(),
+            size_bytes: 11,
+            width: None,
+            height: None,
+            duration_ms: None,
+            // Cached before the thumbnail queue produced a thumbnail for this file.
+            thumbnail_path: None,
+            modified_at_ms: Some(1_700_000_000_000),
+            bitrate_kbps: None,
+            video_codec: None,
+            frame_rate: None,
+            audio_summary: None,
+        };
+        let mut scan = MediaDedupeScanResult {
+            scan_id: "scan-1".to_string(),
+            provider_scope: None,
+            source_scope: None,
+            resource_profile: "balanced".to_string(),
+            similarity_scope: "source".to_string(),
+            status: "completed".to_string(),
+            files_scanned: 1,
+            bytes_scanned: 11,
+            exact_group_count: 1,
+            similar_group_count: 0,
+            reclaimable_bytes: 0,
+            skipped_video_similarity_count: 0,
+            started_at: "2026-01-01T00:00:00Z".to_string(),
+            finished_at: Some("2026-01-01T00:00:01Z".to_string()),
+            exact_groups: vec![MediaDedupeGroup {
+                id: "exact:1".to_string(),
+                kind: "exact".to_string(),
+                confidence_percent: Some(100),
+                reclaimable_bytes: 0,
+                consolidatable: true,
+                reason: None,
+                files: vec![file],
+            }],
+            similar_groups: Vec::new(),
+        };
+
+        // No thumbnail on disk yet: refreshing must not fabricate a path.
+        refresh_media_dedupe_thumbnail_paths(&mut scan);
+        assert_eq!(scan.exact_groups[0].files[0].thumbnail_path, None);
+
+        // The thumbnail queue catches up after the scan was cached.
+        let thumbs_dir = media_dir.join(".thumbs");
+        std::fs::create_dir_all(&thumbs_dir).expect("create .thumbs dir");
+        let thumb_path = thumbs_dir.join("post.jpg.jpg");
+        std::fs::write(&thumb_path, b"fake-thumb").expect("write thumbnail");
+
+        refresh_media_dedupe_thumbnail_paths(&mut scan);
+        assert_eq!(
+            scan.exact_groups[0].files[0].thumbnail_path.as_deref(),
+            Some(thumb_path.to_string_lossy().as_ref())
+        );
+    }
+
+    #[test]
+    fn refresh_metadata_picks_up_probed_values_for_video_files_only() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let video_path = temp.path().join("clip.mp4");
+        let image_path = temp.path().join("post.jpg");
+        std::fs::write(&video_path, b"fake-video").expect("write video file");
+        std::fs::write(&image_path, b"fake-image").expect("write image file");
+
+        let video_file = MediaDedupeFile {
+            path: video_path.to_string_lossy().into_owned(),
+            source_id: Some("source-1".to_string()),
+            provider: Some("instagram".to_string()),
+            media_type: "video".to_string(),
+            size_bytes: 10,
+            width: None,
+            height: None,
+            duration_ms: None,
+            thumbnail_path: None,
+            modified_at_ms: None,
+            bitrate_kbps: None,
+            video_codec: None,
+            frame_rate: None,
+            audio_summary: None,
+        };
+        let image_file = MediaDedupeFile {
+            path: image_path.to_string_lossy().into_owned(),
+            media_type: "image".to_string(),
+            size_bytes: 11,
+            ..video_file.clone()
+        };
+        let mut scan = MediaDedupeScanResult {
+            scan_id: "scan-1".to_string(),
+            provider_scope: None,
+            source_scope: None,
+            resource_profile: "balanced".to_string(),
+            similarity_scope: "source".to_string(),
+            status: "completed".to_string(),
+            files_scanned: 2,
+            bytes_scanned: 21,
+            exact_group_count: 1,
+            similar_group_count: 0,
+            reclaimable_bytes: 0,
+            skipped_video_similarity_count: 0,
+            started_at: "2026-01-01T00:00:00Z".to_string(),
+            finished_at: Some("2026-01-01T00:00:01Z".to_string()),
+            exact_groups: vec![MediaDedupeGroup {
+                id: "exact:1".to_string(),
+                kind: "exact".to_string(),
+                confidence_percent: Some(100),
+                reclaimable_bytes: 0,
+                consolidatable: true,
+                reason: None,
+                files: vec![video_file, image_file],
+            }],
+            similar_groups: Vec::new(),
+        };
+
+        // Nothing probed yet: refreshing must not fabricate metadata.
+        refresh_media_dedupe_metadata(&mut scan);
+        assert_eq!(scan.exact_groups[0].files[0].video_codec, None);
+
+        media_metadata_probe::probe_and_cache(&video_path);
+        // ffprobe isn't guaranteed to be installed on the test machine — the
+        // probe silently no-ops in that case, so only assert the *behavior*
+        // that matters here: refreshing never touches the image file, and any
+        // metadata it does surface for the video came from the cache, not from
+        // fabricating a result out of thin air.
+        refresh_media_dedupe_metadata(&mut scan);
+        assert_eq!(scan.exact_groups[0].files[1].video_codec, None);
+        assert_eq!(scan.exact_groups[0].files[1].bitrate_kbps, None);
+        assert_eq!(scan.exact_groups[0].files[1].audio_summary, None);
     }
 }

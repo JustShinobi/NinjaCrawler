@@ -253,6 +253,40 @@ fn derive_post_metadata_tiktok_slideshow_groups_by_post() {
 }
 
 #[test]
+fn derive_review_item_post_url_resolves_tiktok_from_file_name() {
+    assert_eq!(
+        derive_review_item_post_url(
+            "tiktok",
+            "gaaby.tls",
+            "gaaby.tls_1775147243_7624199329925958920.mp4",
+        )
+        .as_deref(),
+        Some("https://www.tiktok.com/@gaaby.tls/video/7624199329925958920")
+    );
+}
+
+#[test]
+fn derive_review_item_post_url_is_none_for_instagram_file_names() {
+    // Instagram shortcodes only live in the ledger, never in the file name, so
+    // the file-name-only review path can't recover them — the review item
+    // simply has no link (front falls back to the profile).
+    assert_eq!(
+        derive_review_item_post_url("instagram", "someone", "2024-01-01 12.00.00 photo.jpg"),
+        None
+    );
+}
+
+#[test]
+fn derive_review_item_post_url_never_links_twitter_from_file_name() {
+    // Twitter file names carry the media key / autonumber, not the status id;
+    // a name-derived numeric token would build a WRONG /status/ link.
+    assert_eq!(
+        derive_review_item_post_url("twitter", "someone", "someone_1234567890123456789.mp4"),
+        None
+    );
+}
+
+#[test]
 fn build_post_url_tiktok_video_vs_photo_and_profile() {
     assert_eq!(
         build_post_url(
