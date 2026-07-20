@@ -65,7 +65,6 @@ mod paths;
 mod scheduler;
 mod settings;
 mod single_videos;
-mod slideshow_audio_repair;
 mod sources;
 mod sync;
 pub use accounts::*;
@@ -80,7 +79,6 @@ use paths::*;
 pub use scheduler::*;
 pub use settings::*;
 pub use single_videos::*;
-pub use slideshow_audio_repair::*;
 pub use sources::*;
 pub use sync::*;
 
