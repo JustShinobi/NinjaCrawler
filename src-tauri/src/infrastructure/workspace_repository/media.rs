@@ -18,7 +18,8 @@ pub(super) fn load_gallery_media_ledger_links(
     let mut links = HashMap::new();
     if provider.eq_ignore_ascii_case("instagram") {
         if let Ok(mut statement) = connection.prepare(
-            "SELECT relative_path, media_section, provider_post_code
+            "SELECT relative_path, media_section, provider_post_code, title, captured_at,
+                    first_seen_at
              FROM instagram_sync_media_ledger WHERE source_id = ?1",
         ) {
             let rows = statement.query_map(params![source_id], |row| {
@@ -26,20 +27,23 @@ pub(super) fn load_gallery_media_ledger_links(
                     row.get::<_, String>(0)?,
                     row.get::<_, Option<String>>(1)?,
                     row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<i64>>(4)?,
+                    row.get::<_, Option<String>>(5)?,
                 ))
             });
             if let Ok(rows) = rows {
                 for row in rows.flatten() {
-                    let (relative_path, section, post_code) = row;
+                    let (relative_path, section, post_code, title, captured_at, first_seen_at) = row;
                     links.insert(
                         relative_path.to_ascii_lowercase(),
                         GalleryMediaLedgerLink {
                             post_key: None,
                             post_code,
                             section,
-                            captured_at: None,
-                            downloaded_at: None,
-                            title: None,
+                            captured_at,
+                            downloaded_at: first_seen_at.as_deref().and_then(parse_rfc3339_unix),
+                            title,
                             duration_seconds: None,
                         },
                     );
@@ -540,9 +544,18 @@ fn media_lacks_video_stream(source: &Path) -> bool {
         return false;
     }
     let stdout = String::from_utf8_lossy(&output.stdout);
-    !stdout
-        .lines()
-        .any(|line| line.trim().eq_ignore_ascii_case("video"))
+    !ffprobe_csv_reports_video_stream(&stdout)
+}
+
+/// `csv=p=0` emite uma coluna extra vazia quando o stream carrega side data
+/// (ICC Profile, displaymatrix/rotação...), então a linha vira `video,` em vez
+/// de `video`. Comparar a linha inteira marcava esses vídeos — comuns em
+/// stories de celular — como mídia sem stream de vídeo. Compara por campo.
+pub(crate) fn ffprobe_csv_reports_video_stream(stdout: &str) -> bool {
+    stdout.lines().any(|line| {
+        line.split(',')
+            .any(|field| field.trim().eq_ignore_ascii_case("video"))
+    })
 }
 
 fn is_no_video_stream_message(message: &str) -> bool {
@@ -1051,6 +1064,8 @@ pub(super) fn ensure_instagram_sync_media_ledger_table(
                 media_section TEXT NOT NULL,
                 relative_path TEXT NOT NULL,
                 provider_post_code TEXT,
+                title TEXT,
+                captured_at INTEGER,
                 first_seen_at TEXT NOT NULL,
                 last_seen_at TEXT NOT NULL,
                 PRIMARY KEY (source_id, provider_media_key, media_type),
@@ -1173,6 +1188,11 @@ pub(super) fn upsert_instagram_media_ledger_entries(
             .as_deref()
             .map(str::trim)
             .filter(|value| !value.is_empty());
+        let title = media
+            .title
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
         connection
             .execute(
                 "INSERT INTO instagram_sync_media_ledger (
@@ -1184,10 +1204,12 @@ pub(super) fn upsert_instagram_media_ledger_entries(
                     media_section,
                     relative_path,
                     provider_post_code,
+                    title,
+                    captured_at,
                     first_seen_at,
                     last_seen_at
                  )
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?11)
                  ON CONFLICT(source_id, provider_media_key, media_type)
                  DO UPDATE SET
                     account_id = excluded.account_id,
@@ -1195,6 +1217,8 @@ pub(super) fn upsert_instagram_media_ledger_entries(
                     media_section = excluded.media_section,
                     relative_path = excluded.relative_path,
                     provider_post_code = COALESCE(excluded.provider_post_code, instagram_sync_media_ledger.provider_post_code),
+                    title = COALESCE(excluded.title, instagram_sync_media_ledger.title),
+                    captured_at = COALESCE(excluded.captured_at, instagram_sync_media_ledger.captured_at),
                     last_seen_at = excluded.last_seen_at",
                 params![
                     source_id,
@@ -1205,6 +1229,8 @@ pub(super) fn upsert_instagram_media_ledger_entries(
                     &media.media_section,
                     relative_path,
                     provider_post_code,
+                    title,
+                    media.captured_at_timestamp,
                     timestamp,
                 ],
             )
@@ -1291,7 +1317,15 @@ pub(super) struct InstagramFingerprintMedia<'a> {
     pub(super) media_section: &'a str,
     pub(super) file_path: &'a Path,
     pub(super) file_sha256: Option<&'a str>,
+    /// Perceptual fingerprint when the caller already computed it. Computing it
+    /// decodes the whole image, which must not happen while a write transaction
+    /// is open — bulk importers precompute it outside the transaction and pass
+    /// it here. `None` falls back to computing it inline.
+    pub(super) image_fingerprint: Option<&'a ImageFingerprint>,
 }
+
+/// `(width, height, ahash64, dhash64)` of an image.
+pub(super) type ImageFingerprint = (u32, u32, String, String);
 pub(super) fn upsert_instagram_media_fingerprint_row(
     connection: &Connection,
     scope: &InstagramFingerprintScope<'_>,
@@ -1309,9 +1343,12 @@ pub(super) fn upsert_instagram_media_fingerprint_row(
         media_section,
         file_path,
         file_sha256,
+        image_fingerprint,
     } = media;
     let relative_path = normalize_instagram_relative_media_path(profile_root, file_path);
-    let fingerprint = compute_instagram_media_fingerprint(file_path);
+    let fingerprint = image_fingerprint
+        .cloned()
+        .or_else(|| compute_instagram_media_fingerprint(file_path));
     let (width, height, ahash64, dhash64) = match fingerprint {
         Some((width, height, ahash64, dhash64)) => (
             Some(i64::from(width)),
@@ -1413,7 +1450,10 @@ pub(super) fn upsert_instagram_media_alias_entries(
             continue;
         }
 
-        let file_sha256 = compute_file_sha256(&media.file_path).ok();
+        let file_sha256 = media
+            .file_sha256
+            .clone()
+            .or_else(|| compute_file_sha256(&media.file_path).ok());
         let relative_path = normalize_instagram_relative_media_path(profile_root, &media.file_path);
         let aliases = collect_instagram_media_alias_rows(
             &media.provider_media_key,
@@ -1474,7 +1514,10 @@ pub(super) fn upsert_instagram_media_fingerprint_entries(
             continue;
         }
 
-        let file_sha256 = compute_file_sha256(&media.file_path).ok();
+        let file_sha256 = media
+            .file_sha256
+            .clone()
+            .or_else(|| compute_file_sha256(&media.file_path).ok());
         upsert_instagram_media_fingerprint_row(
             connection,
             &InstagramFingerprintScope {
@@ -1489,6 +1532,7 @@ pub(super) fn upsert_instagram_media_fingerprint_entries(
                 media_section: &media.media_section,
                 file_path: &media.file_path,
                 file_sha256: file_sha256.as_deref(),
+                image_fingerprint: None,
             },
         )?;
     }
@@ -1580,6 +1624,7 @@ pub(super) fn upsert_instagram_legacy_media_fingerprint_entries(
                 media_section: &record.media_section,
                 file_path: &record.file_path,
                 file_sha256: record.file_sha256.as_deref(),
+                image_fingerprint: record.image_fingerprint.as_ref(),
             },
         )?;
     }
