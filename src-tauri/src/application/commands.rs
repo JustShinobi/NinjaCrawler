@@ -11,8 +11,9 @@ use crate::domain::models::{
     RuntimeLogWindowIntent, RuntimeLogWindowStatus, SchedulerGroupUpsert, SchedulerSetUpsert,
     SetSyncPlanPauseInput, SkipSyncPlanInput, SourceAvailabilityCheckResult,
     SourceDeleteQueueStatus, SourceEditorWindowIntent, SourceProfileDeleteInput,
-    SourceProfileUpsert, SourceSyncQueueStatus, SyncPlanTargetPreview, SyncPlanTargetPreviewInput,
-    SyncPlanUpsert, WorkspaceHealthSnapshot, WorkspaceHealthWindowIntent, WorkspaceSnapshot,
+    SourceProfileUpsert, SourceSyncQueueStatus, SyncPlanTargetPreview,
+    SyncPlanTargetPreviewInput, SyncPlanUpsert, WorkspaceHealthSnapshot,
+    WorkspaceHealthWindowIntent, WorkspaceSnapshot,
 };
 use crate::infrastructure::{
     app_update, companion_install, connector_debug, connector_runtime, database, desktop_runtime,
@@ -117,20 +118,47 @@ pub fn open_backups_folder(app: tauri::AppHandle) -> Result<(), String> {
         .map_err(|error| format!("Could not open the backups folder: {error}"))
 }
 
+// Async: sync commands run on the main thread in Tauri, and this one does DB +
+// disk work (snapshot, media-root canonicalize) — every caller (window opens,
+// Profile View load, periodic refreshes) would freeze ALL windows for its
+// duration. `spawn_blocking` keeps the UI thread free.
 #[tauri::command]
-pub fn bootstrap_workspace(app: tauri::AppHandle) -> Result<WorkspaceSnapshot, String> {
-    connector_runtime::register_app_handle(&app);
-    let snapshot = publish_snapshot(&app, workspace_repository::bootstrap_workspace()?)?;
+pub async fn bootstrap_workspace(app: tauri::AppHandle) -> Result<WorkspaceSnapshot, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        connector_runtime::register_app_handle(&app);
+        let snapshot = workspace_repository::bootstrap_workspace()?;
+        // A secondary window booting with an identical snapshot must NOT trigger a
+        // broadcast: emitting the snapshot runs ExecuteScript on the native main
+        // thread for every webview, freezing all windows. `_if_changed` only emits
+        // when the snapshot actually differs from the last publication.
+        desktop_runtime::publish_workspace_runtime_if_changed(&app, &snapshot)?;
 
-    // Migrate profile pictures to Settings/ in background
-    let bg_app = app.clone();
-    std::thread::spawn(move || {
-        if let Ok(updated) = workspace_repository::migrate_profile_pictures_to_settings() {
-            let _ = publish_snapshot(&bg_app, updated);
-        }
-    });
+        // Migrate profile pictures to Settings/ in background
+        let bg_app = app.clone();
+        std::thread::spawn(move || {
+            if let Ok(updated) = workspace_repository::migrate_profile_pictures_to_settings() {
+                let _ = desktop_runtime::publish_workspace_runtime_if_changed(&bg_app, &updated);
+            }
+        });
 
-    Ok(snapshot)
+        Ok(snapshot)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+/// Cheap async pull for the workspace snapshot. Windows call this after
+/// receiving a "snapshot changed" ping instead of getting the full snapshot as
+/// the event payload. Returns the cached snapshot without recomputing when one
+/// is available; otherwise recomputes off the main thread.
+#[tauri::command]
+pub async fn get_workspace_snapshot() -> Result<WorkspaceSnapshot, String> {
+    if let Some(snapshot) = desktop_runtime::cached_workspace_snapshot() {
+        return Ok(snapshot);
+    }
+    tauri::async_runtime::spawn_blocking(workspace_repository::bootstrap_workspace)
+        .await
+        .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -138,6 +166,18 @@ pub async fn load_workspace_health() -> Result<WorkspaceHealthSnapshot, String> 
     tauri::async_runtime::spawn_blocking(workspace_repository::load_workspace_health)
         .await
         .map_err(|error| format!("Workspace health task failed: {error}"))?
+}
+
+/// Open a log under `%LOCALAPPDATA%/NinjaCrawler/logs` with the OS default editor.
+#[tauri::command]
+pub fn open_app_log_file(path: String) -> Result<(), String> {
+    workspace_repository::open_app_log_file(path)
+}
+
+/// Reveal the log in Explorer/Finder.
+#[tauri::command]
+pub fn reveal_app_log_file(path: String) -> Result<(), String> {
+    workspace_repository::reveal_app_log_file(path)
 }
 
 #[tauri::command]
@@ -853,6 +893,20 @@ pub fn list_single_videos() -> Result<Vec<crate::domain::models::SingleVideo>, S
 #[tauri::command]
 pub fn delete_single_video(id: String) -> Result<Vec<crate::domain::models::SingleVideo>, String> {
     workspace_repository::delete_single_video(id)
+}
+
+#[tauri::command]
+pub fn single_videos_root_status(
+) -> Result<crate::domain::models::SingleVideosRootStatus, String> {
+    workspace_repository::single_videos_root_status()
+}
+
+#[tauri::command]
+pub fn set_single_videos_root(
+    target_base_path: String,
+    move_media: bool,
+) -> Result<Vec<crate::domain::models::SingleVideo>, String> {
+    workspace_repository::set_single_videos_root(target_base_path, move_media)
 }
 
 #[tauri::command]

@@ -723,6 +723,14 @@ export interface SingleVideoFile {
   mediaType: string
 }
 
+/** Saúde da pasta "Single videos": onde ela está e quantas mídias faltam lá. */
+export interface SingleVideosRootStatus {
+  root: string
+  mediaRootDefault: string
+  totalCount: number
+  missingCount: number
+}
+
 export interface SingleVideoQueueItem {
   id: string
   url: string

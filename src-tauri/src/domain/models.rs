@@ -538,6 +538,104 @@ pub struct MediaThumbnailBatch {
     pub thumbs: HashMap<String, String>,
 }
 
+/// One-shot preview: on-disk TikTok slideshows missing a soundtrack file.
+/// Used by the headless repair CLI / internal APIs (no UI panel).
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SlideshowAudioRepairPreview {
+    pub dismissed: bool,
+    /// `false` until the operator runs a scan (panel shows without blocking UI).
+    pub scanned: bool,
+    /// ISO timestamp of the last persisted scan (if any).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scanned_at: Option<String>,
+    pub profiles_scanned: usize,
+    pub profiles_with_slideshows: usize,
+    pub slideshows_found: usize,
+    pub missing_audio: usize,
+    pub already_have_audio: usize,
+    /// Posts already attempted and marked inaccessible (deleted/private/IP-blocked).
+    pub unavailable_count: usize,
+    /// Per-profile summary (only profiles with slideshows / missing audio).
+    pub profiles: Vec<SlideshowAudioRepairProfileSummary>,
+    /// Sample of items missing audio (so the operator can see what will be repaired).
+    pub samples: Vec<SlideshowAudioRepairSample>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SlideshowAudioRepairProfileSummary {
+    pub source_id: String,
+    pub handle: String,
+    pub slideshows: usize,
+    pub missing_audio: usize,
+    pub already_have_audio: usize,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SlideshowAudioRepairSample {
+    pub source_id: String,
+    pub handle: String,
+    pub post_id: String,
+    pub image_count: usize,
+}
+
+/// Live progress for the one-shot scan/download (does NOT use the sync queue).
+#[derive(Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct SlideshowAudioRepairProgress {
+    /// `idle` | `scanning` | `downloading` | `done` | `error`
+    pub phase: String,
+    pub message: String,
+    pub profiles_total: usize,
+    pub profiles_done: usize,
+    pub current_handle: Option<String>,
+    pub current_source_id: Option<String>,
+    pub current_post_id: Option<String>,
+    /// Counters accumulated during the scan.
+    pub slideshows_found: usize,
+    pub missing_audio: usize,
+    pub already_have_audio: usize,
+    /// Download counters (downloading/done phases only).
+    pub download_total: usize,
+    pub download_done: usize,
+    pub recovered: usize,
+    pub failed: usize,
+    pub skipped: usize,
+    /// Last error (yt-dlp / network) for live feedback.
+    pub last_error: Option<String>,
+    /// Recent failures (newest first) for the UI during a run.
+    pub recent_failures: Vec<String>,
+    /// On-disk log path (set as soon as the run starts).
+    pub log_path: Option<String>,
+}
+
+/// Result of the one-shot download of missing slideshow soundtracks.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SlideshowAudioRepairResult {
+    pub attempted: usize,
+    pub recovered: usize,
+    pub failed: usize,
+    pub skipped: usize,
+    /// New posts written to the inaccessible ledger (will not be retried).
+    pub marked_unavailable: usize,
+    pub remaining_missing: usize,
+    /// Failure sample (not the full log).
+    pub failures: Vec<String>,
+    /// Full on-disk log of failures (and a summary).
+    pub log_path: Option<String>,
+    /// The run stopped early because downloads kept failing for posts that
+    /// are still online (or availability checks were inconclusive with the
+    /// live control also down). Nothing is marked without evidence.
+    pub aborted_on_network_block: bool,
+    /// Posts left queued unmarked: still online (oEmbed alive) or the
+    /// availability check was inconclusive while the control stayed up.
+    /// These were never written to the inaccessible ledger.
+    pub requeued_transient: usize,
+}
+
 /// Thumbnail de avatar (jpg 256px) em cache local — a lista de perfis exibe
 /// estes arquivos pequenos no disco do sistema em vez dos `ProfilePicture.jpg`
 /// em resolução original no volume de mídia.
@@ -645,6 +743,19 @@ pub struct SingleVideo {
     pub files: Vec<SingleVideoFile>,
     pub audio_relative_path: Option<String>,
     pub audio_absolute_path: Option<String>,
+}
+
+/// Saúde da raiz "Single videos": onde ela está hoje, quantos itens do catálogo
+/// não têm arquivo em disco e qual seria a pasta derivada do media root atual.
+/// A janela usa isso para avisar quando o catálogo aponta para uma pasta que não
+/// contém mais as mídias (ex.: depois de trocar o media root padrão).
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SingleVideosRootStatus {
+    pub root: String,
+    pub media_root_default: String,
+    pub total_count: u32,
+    pub missing_count: u32,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
