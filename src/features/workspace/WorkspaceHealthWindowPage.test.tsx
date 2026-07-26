@@ -9,7 +9,8 @@ import {
   waitFor,
 } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { WorkspaceHealthSnapshot } from "../../domain/models";
+import type { MediaDedupeFile, WorkspaceHealthSnapshot } from "../../domain/models";
+import { pickBestDedupeFile } from "./pickBestDedupeFile";
 import { WorkspaceHealthWindowPage } from "./WorkspaceHealthWindowPage";
 
 const bridgeMocks = vi.hoisted(() => ({
@@ -195,6 +196,7 @@ describe("WorkspaceHealthWindowPage", () => {
     );
     expect(bridgeMocks.enqueueMediaDedupeScan).toHaveBeenCalledWith({
       resourceProfile: "balanced",
+      scanProfile: "recommended",
     });
     expect(screen.getByText(/no scan has been run/i)).toBeTruthy();
   });
@@ -224,6 +226,7 @@ describe("WorkspaceHealthWindowPage", () => {
       expect(bridgeMocks.enqueueMediaDedupeScan).toHaveBeenCalledWith({
         provider: "instagram",
         resourceProfile: "balanced",
+        scanProfile: "recommended",
       }),
     );
   });
@@ -242,9 +245,29 @@ describe("WorkspaceHealthWindowPage", () => {
     await waitFor(() =>
       expect(bridgeMocks.enqueueMediaDedupeScan).toHaveBeenCalledWith({
         resourceProfile: "fast",
+        scanProfile: "recommended",
       }),
     );
     expect(screen.getByText(/vdf compares videos within each source/i)).toBeTruthy();
+  });
+
+  it("selects a deeper scan profile for the media scan", async () => {
+    render(<WorkspaceHealthWindowPage />);
+    fireEvent.click(
+      await screen.findByRole("tab", { name: /storage & cleanup/i }),
+    );
+    fireEvent.change(
+      screen.getByRole("combobox", { name: /media scan profile/i }),
+      { target: { value: "deep" } },
+    );
+    fireEvent.click(screen.getByRole("button", { name: /scan library/i }));
+
+    await waitFor(() =>
+      expect(bridgeMocks.enqueueMediaDedupeScan).toHaveBeenCalledWith({
+        resourceProfile: "balanced",
+        scanProfile: "deep",
+      }),
+    );
   });
 
   it("offers the managed similarity runtime without blocking exact scans", async () => {
@@ -425,6 +448,100 @@ describe("WorkspaceHealthWindowPage", () => {
     );
   });
 
+  it("shows ffprobe metadata columns and opens the compare view", async () => {
+    bridgeMocks.loadMediaDedupeStatus.mockResolvedValue({
+      state: "idle",
+      stage: "idle",
+      filesProcessed: 0,
+      filesTotal: 0,
+      bytesProcessed: 0,
+      bytesTotal: 0,
+      cancellable: false,
+      similarityEngine: {
+        status: "ready",
+        version: "4.1.x+test",
+        installed: true,
+        ffmpegAvailable: true,
+        ffmpegStatus: "ready",
+        ffmpegSource: "system",
+      },
+      perceptualSourcesProcessed: 0,
+      perceptualSourcesTotal: 0,
+      perceptualSourcesFailed: 0,
+      sourceJobs: [],
+      updatedAt: "",
+      latestScan: {
+        scanId: "scan-1",
+        resourceProfile: "balanced",
+        similarityScope: "source",
+        status: "completed",
+        filesScanned: 2,
+        bytesScanned: 200,
+        exactGroupCount: 0,
+        similarGroupCount: 1,
+        reclaimableBytes: 100,
+        skippedVideoSimilarityCount: 0,
+        startedAt: "2026-07-17T12:00:00Z",
+        exactGroups: [],
+        similarGroups: [
+          {
+            id: "similar:source-1:0",
+            kind: "similar",
+            confidencePercent: 92,
+            reclaimableBytes: 100,
+            consolidatable: false,
+            files: [
+              {
+                path: "C:\\Media\\a.mp4",
+                sourceId: "source-1",
+                provider: "instagram",
+                mediaType: "video",
+                sizeBytes: 200,
+                durationMs: 5000,
+                bitrateKbps: 3512,
+                videoCodec: "h264",
+                frameRate: 29.97,
+                audioSummary: "aac (stereo)",
+              },
+              {
+                path: "C:\\Media\\b.mp4",
+                sourceId: "source-1",
+                provider: "instagram",
+                mediaType: "video",
+                sizeBytes: 100,
+                durationMs: 5000,
+                bitrateKbps: 1200,
+                videoCodec: "vp9",
+                frameRate: 30,
+                audioSummary: "No audio",
+              },
+            ],
+          },
+        ],
+      },
+    });
+    render(<WorkspaceHealthWindowPage />);
+
+    fireEvent.click(
+      await screen.findByRole("tab", { name: /storage & cleanup/i }),
+    );
+
+    expect(await screen.findByText("H264 · 29.97fps")).toBeTruthy();
+    expect(screen.getByText("3.5 Mb/s")).toBeTruthy();
+    expect(screen.getByText("aac (stereo)")).toBeTruthy();
+    expect(screen.getByText("No audio")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: /^compare$/i }));
+    const dialog = screen.getByRole("dialog", { name: /compare 2 files/i });
+    expect(dialog).toBeTruthy();
+    expect(dialog.textContent).toContain("VP9 · 30fps");
+
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(
+      screen.queryByRole("dialog", { name: /compare 2 files/i }),
+    ).toBeNull();
+  });
+
   it("uses dedicated scroll regions for large tabs", async () => {
     render(<WorkspaceHealthWindowPage />);
 
@@ -445,5 +562,247 @@ describe("WorkspaceHealthWindowPage", () => {
         .getByRole("tabpanel", { name: /storage & cleanup/i })
         .classList.contains("health-scroll-region"),
     ).toBe(true);
+  });
+
+  describe("pickBestDedupeFile", () => {
+    function file(overrides: Partial<MediaDedupeFile>): MediaDedupeFile {
+      return {
+        path: "C:\\Media\\file.mp4",
+        mediaType: "video",
+        sizeBytes: 100,
+        ...overrides,
+      };
+    }
+
+    it("prefers higher resolution first", () => {
+      const low = file({ path: "low", width: 640, height: 480 });
+      const high = file({ path: "high", width: 1920, height: 1080 });
+      expect(pickBestDedupeFile([low, high])?.path).toBe("high");
+    });
+
+    it("falls back to bitrate when resolution ties", () => {
+      const low = file({
+        path: "low-bitrate",
+        width: 1920,
+        height: 1080,
+        bitrateKbps: 1200,
+      });
+      const high = file({
+        path: "high-bitrate",
+        width: 1920,
+        height: 1080,
+        bitrateKbps: 4500,
+      });
+      expect(pickBestDedupeFile([low, high])?.path).toBe("high-bitrate");
+    });
+
+    it("falls back to size when resolution and bitrate tie", () => {
+      const small = file({ path: "small", sizeBytes: 100 });
+      const big = file({ path: "big", sizeBytes: 5000 });
+      expect(pickBestDedupeFile([small, big])?.path).toBe("big");
+    });
+
+    it("falls back to the newest modifiedAt when all else ties", () => {
+      const older = file({ path: "older", sizeBytes: 100, modifiedAt: 1000 });
+      const newer = file({ path: "newer", sizeBytes: 100, modifiedAt: 2000 });
+      expect(pickBestDedupeFile([older, newer])?.path).toBe("newer");
+    });
+
+    it("never lets a file with missing metrics beat one that has them", () => {
+      const unknown = file({ path: "unknown", sizeBytes: 100 });
+      const known = file({
+        path: "known",
+        sizeBytes: 100,
+        modifiedAt: 500,
+      });
+      expect(pickBestDedupeFile([unknown, known])?.path).toBe("known");
+    });
+
+    it("returns undefined for an empty group", () => {
+      expect(pickBestDedupeFile([])).toBeUndefined();
+    });
+  });
+
+  it("marks the best-quality file and applies keep-best selection per group", async () => {
+    bridgeMocks.loadMediaDedupeStatus.mockResolvedValue({
+      state: "idle",
+      stage: "idle",
+      filesProcessed: 0,
+      filesTotal: 0,
+      bytesProcessed: 0,
+      bytesTotal: 0,
+      cancellable: false,
+      similarityEngine: {
+        status: "ready",
+        version: "4.1.x+test",
+        installed: true,
+        ffmpegAvailable: true,
+        ffmpegStatus: "ready",
+        ffmpegSource: "system",
+      },
+      perceptualSourcesProcessed: 0,
+      perceptualSourcesTotal: 0,
+      perceptualSourcesFailed: 0,
+      sourceJobs: [],
+      updatedAt: "",
+      latestScan: {
+        scanId: "scan-1",
+        resourceProfile: "balanced",
+        similarityScope: "source",
+        status: "completed",
+        filesScanned: 2,
+        bytesScanned: 300,
+        exactGroupCount: 0,
+        similarGroupCount: 1,
+        reclaimableBytes: 100,
+        skippedVideoSimilarityCount: 0,
+        startedAt: "2026-07-17T12:00:00Z",
+        exactGroups: [],
+        similarGroups: [
+          {
+            id: "similar:source-1:0",
+            kind: "similar",
+            confidencePercent: 92,
+            reclaimableBytes: 100,
+            consolidatable: false,
+            files: [
+              {
+                path: "C:\\Media\\low.mp4",
+                sourceId: "source-1",
+                provider: "instagram",
+                mediaType: "video",
+                sizeBytes: 100,
+                width: 640,
+                height: 480,
+              },
+              {
+                path: "C:\\Media\\high.mp4",
+                sourceId: "source-1",
+                provider: "instagram",
+                mediaType: "video",
+                sizeBytes: 200,
+                width: 1920,
+                height: 1080,
+              },
+            ],
+          },
+        ],
+      },
+    });
+    render(<WorkspaceHealthWindowPage />);
+
+    fireEvent.click(
+      await screen.findByRole("tab", { name: /storage & cleanup/i }),
+    );
+
+    expect(await screen.findByText("BEST")).toBeTruthy();
+    const highRow = screen.getByText("high.mp4").closest(".health-dedupe-row");
+    expect(highRow?.querySelector(".health-dedupe-best-badge")).toBeTruthy();
+    const lowRow = screen.getByText("low.mp4").closest(".health-dedupe-row");
+    expect(lowRow?.querySelector(".health-dedupe-best-badge")).toBeFalsy();
+
+    fireEvent.click(screen.getByRole("button", { name: /keep best/i }));
+
+    const highKeepRadio = highRow?.querySelector(
+      'input[type="radio"]',
+    ) as HTMLInputElement;
+    const lowRecycleCheckbox = lowRow?.querySelector(
+      'input[type="checkbox"]',
+    ) as HTMLInputElement;
+    expect(highKeepRadio.checked).toBe(true);
+    expect(lowRecycleCheckbox.checked).toBe(true);
+  });
+
+  it("collapses scan details by default and uses a similarity slider with a neutral path placeholder", async () => {
+    bridgeMocks.loadMediaDedupeStatus.mockResolvedValue({
+      state: "idle",
+      stage: "idle",
+      filesProcessed: 0,
+      filesTotal: 0,
+      bytesProcessed: 0,
+      bytesTotal: 0,
+      cancellable: false,
+      similarityEngine: {
+        status: "ready",
+        version: "4.1.x+test",
+        installed: true,
+        ffmpegAvailable: true,
+        ffmpegStatus: "ready",
+        ffmpegSource: "system",
+      },
+      perceptualSourcesProcessed: 0,
+      perceptualSourcesTotal: 0,
+      perceptualSourcesFailed: 0,
+      sourceJobs: [],
+      updatedAt: "",
+      latestScan: {
+        scanId: "scan-1",
+        resourceProfile: "balanced",
+        similarityScope: "source",
+        status: "completed",
+        filesScanned: 2,
+        bytesScanned: 200,
+        exactGroupCount: 0,
+        similarGroupCount: 1,
+        reclaimableBytes: 100,
+        skippedVideoSimilarityCount: 0,
+        startedAt: "2026-07-17T12:00:00Z",
+        finishedAt: "2026-07-17T12:05:00Z",
+        exactGroups: [],
+        similarGroups: [
+          {
+            id: "similar:source-1:0",
+            kind: "similar",
+            confidencePercent: 92,
+            reclaimableBytes: 100,
+            consolidatable: false,
+            files: [
+              {
+                path: "C:\\Media\\a.mp4",
+                sourceId: "source-1",
+                provider: "instagram",
+                mediaType: "video",
+                sizeBytes: 200,
+              },
+              {
+                path: "C:\\Media\\b.mp4",
+                sourceId: "source-1",
+                provider: "instagram",
+                mediaType: "video",
+                sizeBytes: 100,
+              },
+            ],
+          },
+        ],
+      },
+    });
+    render(<WorkspaceHealthWindowPage />);
+
+    fireEvent.click(
+      await screen.findByRole("tab", { name: /storage & cleanup/i }),
+    );
+
+    // Scan details (engine, per-source jobs, stat cards) is collapsed by default.
+    const scanDetailsSummary = (
+      await screen.findByText(/^scan details$/i)
+    ).closest("summary");
+    const scanDetailsDisclosure = scanDetailsSummary?.closest("details");
+    expect(scanDetailsDisclosure?.hasAttribute("open")).toBe(false);
+    // Stat cards remain reachable inside it.
+    expect(screen.getByText("Files scanned")).toBeTruthy();
+
+    // Results are the dominant, non-collapsed area.
+    expect(screen.getByText("Duplicate candidates")).toBeTruthy();
+    expect(
+      screen.getByPlaceholderText(/filter by folder or profile/i),
+    ).toBeTruthy();
+
+    const slider = screen.getByRole("slider", { name: /minimum similarity/i });
+    expect(slider).toBeTruthy();
+    fireEvent.change(slider, { target: { value: "95" } });
+    expect(screen.getByText("≥ 95%")).toBeTruthy();
+
+    // The compact control bar shows the one-line last-scan summary.
+    expect(screen.getByText(/2 files scanned/i)).toBeTruthy();
   });
 });

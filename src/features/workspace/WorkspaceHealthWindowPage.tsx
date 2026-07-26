@@ -29,9 +29,11 @@ import {
   validateProviderAccount,
 } from "../../bridge/desktop";
 import type {
+  MediaDedupeFile,
   MediaDedupeGroup,
   MediaDedupeJobStatus,
   MediaDedupeResourceProfile,
+  MediaDedupeScanProfile,
   MediaDedupeSimilarSelection,
   SourceHealthItem,
   WorkspaceHealthIncident,
@@ -41,6 +43,7 @@ import type {
 } from "../../domain/models";
 import { WindowShell } from "../brand/WindowShell";
 import { WindowTitlebar } from "../brand/WindowTitlebar";
+import { pickBestDedupeFile } from "./pickBestDedupeFile";
 
 type HealthTab = "overview" | "sources" | "accounts" | "storage";
 type SourceFilter = "all" | "attention" | "recurring" | "stale" | "never";
@@ -111,6 +114,7 @@ const idleDedupeStatus: MediaDedupeJobStatus = {
   state: "idle",
   stage: "idle",
   resourceProfile: "balanced",
+  scanProfile: "recommended",
   similarityScope: "source",
   filesProcessed: 0,
   filesTotal: 0,
@@ -339,6 +343,8 @@ export function WorkspaceHealthWindowPage({
   const [cleanupProvider, setCleanupProvider] = useState("all");
   const [cleanupResourceProfile, setCleanupResourceProfile] =
     useState<MediaDedupeResourceProfile>("balanced");
+  const [cleanupScanProfile, setCleanupScanProfile] =
+    useState<MediaDedupeScanProfile>("recommended");
   const [sourceSearch, setSourceSearch] = useState("");
   const [reviewSelections, setReviewSelections] = useState<
     Record<string, { keepPath: string; removePaths: string[] }>
@@ -680,6 +686,8 @@ export function WorkspaceHealthWindowPage({
               onProvider={setCleanupProvider}
               resourceProfile={cleanupResourceProfile}
               onResourceProfile={setCleanupResourceProfile}
+              scanProfile={cleanupScanProfile}
+              onScanProfile={setCleanupScanProfile}
             />
           ) : null}
         </main>
@@ -1111,6 +1119,8 @@ function Storage({
   onProvider,
   resourceProfile,
   onResourceProfile,
+  scanProfile,
+  onScanProfile,
 }: {
   health: WorkspaceHealthSnapshot;
   dedupe?: MediaDedupeJobStatus;
@@ -1128,6 +1138,8 @@ function Storage({
   onProvider: (provider: string) => void;
   resourceProfile: MediaDedupeResourceProfile;
   onResourceProfile: (profile: MediaDedupeResourceProfile) => void;
+  scanProfile: MediaDedupeScanProfile;
+  onScanProfile: (profile: MediaDedupeScanProfile) => void;
 }) {
   const scan = dedupe?.latestScan;
   const similarityEngine =
@@ -1139,6 +1151,11 @@ function Storage({
   // User toggle only; force-open when tools need attention so we never setState in an effect.
   const [runtimeExpandedByUser, setRuntimeExpandedByUser] = useState(false);
   const runtimeExpanded = runtimeNeedsAttention || runtimeExpandedByUser;
+  // Collapsed by default: results are the focus now. Force-open the whole
+  // "Scan details" disclosure when something nested inside needs attention,
+  // otherwise the attention indicator would be hidden behind the collapse.
+  const [scanDetailsExpandedByUser, setScanDetailsExpandedByUser] =
+    useState(false);
   const sourceJobs = dedupe?.sourceJobs ?? [];
   const completedSourceJobs = sourceJobs.filter(
     (job) => job.status === "completed",
@@ -1189,6 +1206,9 @@ function Storage({
   const activeSourceScopeValue = active && dedupe?.sourceScope
     ? `source:${dedupe.sourceScope}`
     : undefined;
+  const scanDetailsNeedsAttention = runtimeNeedsAttention || failedSourceJobs > 0;
+  const scanDetailsExpanded =
+    scanDetailsNeedsAttention || scanDetailsExpandedByUser;
   return (
     <div
       aria-labelledby="health-tab-storage"
@@ -1243,6 +1263,22 @@ function Storage({
                 <option value="fast">Fast</option>
               </select>
             </label>
+            <label className="health-scan-scope">
+              <span>Scan profile</span>
+              <select
+                aria-label="Media scan profile"
+                disabled={active || busyAction === "scan"}
+                onChange={(event) =>
+                  onScanProfile(event.target.value as MediaDedupeScanProfile)
+                }
+                title="Recommended matches VDF's 'Edited & altered copies' preset. AI scan and Deep add neural and audio passes (downloads ~100 MB on first use) and take longer."
+                value={active ? dedupe?.scanProfile ?? scanProfile : scanProfile}
+              >
+                <option value="recommended">Recommended</option>
+                <option value="ai">AI scan</option>
+                <option value="deep">Deep</option>
+              </select>
+            </label>
             {!active || dedupe?.stage === "starting" ? (
               <button
                 className="primary-button"
@@ -1264,6 +1300,7 @@ function Storage({
                                 | "vsco",
                             }),
                         resourceProfile,
+                        scanProfile,
                       },
                     ),
                   )
@@ -1287,138 +1324,17 @@ function Storage({
             ) : null}
           </div>
         </div>
-        {!active ? (
-          <div className="health-scan-semantics">
-            <span>{selectedSourceCount.toLocaleString()} configured sources</span>
-            <span>Exact SHA-256 across selected scope on each volume</span>
-            <span>Visual similarity within each source</span>
+        {!active && scan ? (
+          <div className="health-last-scan">
+            <strong>Last scan</strong>
+            <span>
+              {scan.finishedAt ? formatDate(scan.finishedAt) : "completed"} ·{" "}
+              {scopeLabel} · {scan.filesScanned.toLocaleString()} files
+              scanned
+            </span>
           </div>
         ) : null}
         <Progress status={dedupe ?? idleDedupeStatus} scopeLabel={scopeLabel} />
-        {dedupe ? (
-          <details
-            className="health-runtime-disclosure"
-            onToggle={(event) => setRuntimeExpandedByUser(event.currentTarget.open)}
-            open={runtimeExpanded}
-          >
-            <summary>
-              <span>
-                <strong>Scan engine &amp; media tools</strong>
-                <small>
-                  {similarityEngine.installed && similarityEngine.ffmpegAvailable
-                    ? `Ready · VDF ${similarityEngine.version} · FFmpeg ${similarityEngine.ffmpegVersion ?? "detected"} (${similarityEngine.ffmpegSource === "managed" ? "Managed" : "System"}) · Click to review`
-                    : "Setup requires attention · Click to manage"}
-                </small>
-              </span>
-              <span className="health-runtime-disclosure-affordance">
-                <span className={`status ${similarityEngine.installed && similarityEngine.ffmpegAvailable ? "status-ready" : "status-attention"}`}>
-                  {similarityEngine.installed && similarityEngine.ffmpegAvailable
-                    ? "Ready"
-                    : "Attention"}
-                </span>
-                <svg aria-hidden="true" className="health-runtime-chevron" viewBox="0 0 20 20">
-                  <path d="m6 8 4 4 4-4" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.8" />
-                </svg>
-              </span>
-            </summary>
-            <div className="health-runtime-details">
-              <div className="health-runtime-row">
-                <span>
-                  <strong>
-                    {similarityEngine.installed
-                      ? `Video Duplicate Finder ${similarityEngine.version}`
-                      : similarityEngine.status === "installing"
-                        ? "Installing Video Duplicate Finder…"
-                        : "Video similarity is not installed"}
-                  </strong>
-                  <small>
-                    Exact copies use SHA-256. Images use NinjaCrawler aHash/dHash;
-                    VDF compares videos within each source.
-                  </small>
-                  {similarityEngine.error ? (
-                    <small className="health-tone-attention">
-                      {similarityEngine.error}
-                    </small>
-                  ) : null}
-                </span>
-                {!similarityEngine.installed ? (
-                  <button
-                    className="ghost-button"
-                    disabled={
-                      active ||
-                      busyAction === "install-engine" ||
-                      similarityEngine.status === "installing" ||
-                      similarityEngine.status === "unsupported"
-                    }
-                    onClick={() =>
-                      void runCleanupAction(
-                        "install-engine",
-                        installMediaDedupeSimilarityEngine,
-                      )
-                    }
-                    type="button"
-                  >
-                    {busyAction === "install-engine" ||
-                    similarityEngine.status === "installing"
-                      ? "Installing…"
-                      : "Install similarity engine"}
-                  </button>
-                ) : (
-                  <span className="status status-ready">Installed</span>
-                )}
-              </div>
-              <div className="health-runtime-row">
-                <span>
-                  <strong>
-                    {similarityEngine.ffmpegStatus === "installing"
-                      ? "Installing FFmpeg and FFprobe…"
-                      : similarityEngine.ffmpegAvailable
-                        ? `FFmpeg ${similarityEngine.ffmpegVersion ?? "detected"}`
-                        : "FFmpeg and FFprobe were not found"}
-                  </strong>
-                  <small>
-                    {similarityEngine.ffmpegSource === "managed"
-                      ? "Private NinjaCrawler runtime; the system PATH is unchanged."
-                      : similarityEngine.ffmpegSource === "system"
-                        ? "Using the tools detected on the system PATH."
-                        : "Required for video similarity and video thumbnails."}
-                  </small>
-                  {similarityEngine.ffmpegError ? (
-                    <small className="health-tone-attention">
-                      {similarityEngine.ffmpegError}
-                    </small>
-                  ) : null}
-                </span>
-                {similarityEngine.ffmpegAvailable ? (
-                  <span className="status status-ready">
-                    {similarityEngine.ffmpegSource === "managed" ? "Managed" : "System"}
-                  </span>
-                ) : (
-                  <button
-                    className="ghost-button"
-                    disabled={
-                      active ||
-                      busyAction === "install-media-tools" ||
-                      similarityEngine.ffmpegStatus === "installing"
-                    }
-                    onClick={() =>
-                      void runCleanupAction(
-                        "install-media-tools",
-                        installMediaToolRuntime,
-                      )
-                    }
-                    type="button"
-                  >
-                    {busyAction === "install-media-tools" ||
-                    similarityEngine.ffmpegStatus === "installing"
-                      ? "Installing…"
-                      : "Install private runtime"}
-                  </button>
-                )}
-              </div>
-            </div>
-          </details>
-        ) : null}
         {cleanupError ? (
           <div className="runtime-log-window-error" role="alert">
             Cleanup controls are unavailable. {cleanupError}
@@ -1429,159 +1345,310 @@ function Storage({
             {dedupe.error}
           </div>
         ) : null}
-        {sourceJobs.length || (dedupe?.perceptualSourcesTotal ?? 0) > 0 ? (
-          <details
-            className="health-source-jobs"
-            open={(dedupe?.perceptualSourcesFailed ?? 0) > 0}
-          >
-            <summary>
-              Per-source similarity jobs
-              <span>
-                {completedSourceJobs} completed
-                {cachedSourceJobs
-                  ? ` · ${cachedSourceJobs} cached`
-                  : ""}
-                {runningSourceJobs
-                  ? ` · ${runningSourceJobs} running`
-                  : ""}
-                {queuedSourceJobs
-                  ? ` · ${queuedSourceJobs} queued`
-                  : ""}
-                {failedSourceJobs
-                  ? ` · ${failedSourceJobs} failed`
-                  : ""}
-              </span>
-            </summary>
-            <ul>
-              {sourceJobs.slice(0, 100).map((job) => (
-                <li key={job.sourceId}>
+        <details
+          className="health-runtime-disclosure health-scan-details-disclosure"
+          onToggle={(event) =>
+            setScanDetailsExpandedByUser(event.currentTarget.open)
+          }
+          open={scanDetailsExpanded}
+        >
+          <summary>
+            <span>
+              <strong>Scan details</strong>
+              <small>
+                Scan engine, media tools, per-source jobs, and scan
+                statistics · Click to {scanDetailsExpanded ? "collapse" : "review"}
+              </small>
+            </span>
+            <span className="health-runtime-disclosure-affordance">
+              {scanDetailsNeedsAttention ? (
+                <span className="status status-attention">Attention</span>
+              ) : null}
+              <svg aria-hidden="true" className="health-runtime-chevron" viewBox="0 0 20 20">
+                <path d="m6 8 4 4 4-4" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.8" />
+              </svg>
+            </span>
+          </summary>
+          <div className="health-runtime-details health-scan-details-body">
+            {!active ? (
+              <div className="health-scan-semantics">
+                <span>{selectedSourceCount.toLocaleString()} configured sources</span>
+                <span>Exact SHA-256 across selected scope on each volume</span>
+                <span>Visual similarity within each source</span>
+              </div>
+            ) : null}
+            {dedupe ? (
+              <details
+                className="health-runtime-disclosure"
+                onToggle={(event) => setRuntimeExpandedByUser(event.currentTarget.open)}
+                open={runtimeExpanded}
+              >
+                <summary>
                   <span>
-                    <strong>{job.sourcePath.split(/[\\/]/).pop()}</strong>
-                    <small title={job.currentPath ?? job.sourcePath}>
-                      {job.provider} · {job.stage.replaceAll("_", " ")}
+                    <strong>Scan engine &amp; media tools</strong>
+                    <small>
+                      {similarityEngine.installed && similarityEngine.ffmpegAvailable
+                        ? `Ready · VDF ${similarityEngine.version} · FFmpeg ${similarityEngine.ffmpegVersion ?? "detected"} (${similarityEngine.ffmpegSource === "managed" ? "Managed" : "System"}) · Click to review`
+                        : "Setup requires attention · Click to manage"}
                     </small>
                   </span>
-                  <span className={job.status === "failed" ? "health-tone-attention" : undefined}>
-                    {job.error ??
-                      (job.progressPercent === undefined
-                        ? job.status
-                        : `${job.progressPercent}%`)}
+                  <span className="health-runtime-disclosure-affordance">
+                    <span className={`status ${similarityEngine.installed && similarityEngine.ffmpegAvailable ? "status-ready" : "status-attention"}`}>
+                      {similarityEngine.installed && similarityEngine.ffmpegAvailable
+                        ? "Ready"
+                        : "Attention"}
+                    </span>
+                    <svg aria-hidden="true" className="health-runtime-chevron" viewBox="0 0 20 20">
+                      <path d="m6 8 4 4 4-4" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.8" />
+                    </svg>
                   </span>
-                </li>
-              ))}
-            </ul>
-            {sourceJobs.length > 100 ? (
-              <small>Showing the first 100 source jobs.</small>
+                </summary>
+                <div className="health-runtime-details">
+                  <div className="health-runtime-row">
+                    <span>
+                      <strong>
+                        {similarityEngine.installed
+                          ? `Video Duplicate Finder ${similarityEngine.version}`
+                          : similarityEngine.status === "installing"
+                            ? "Installing Video Duplicate Finder…"
+                            : "Video similarity is not installed"}
+                      </strong>
+                      <small>
+                        Exact copies use SHA-256. Images use NinjaCrawler aHash/dHash;
+                        VDF compares videos within each source.
+                      </small>
+                      {similarityEngine.error ? (
+                        <small className="health-tone-attention">
+                          {similarityEngine.error}
+                        </small>
+                      ) : null}
+                    </span>
+                    {!similarityEngine.installed ? (
+                      <button
+                        className="ghost-button"
+                        disabled={
+                          active ||
+                          busyAction === "install-engine" ||
+                          similarityEngine.status === "installing" ||
+                          similarityEngine.status === "unsupported"
+                        }
+                        onClick={() =>
+                          void runCleanupAction(
+                            "install-engine",
+                            installMediaDedupeSimilarityEngine,
+                          )
+                        }
+                        type="button"
+                      >
+                        {busyAction === "install-engine" ||
+                        similarityEngine.status === "installing"
+                          ? "Installing…"
+                          : "Install similarity engine"}
+                      </button>
+                    ) : (
+                      <span className="status status-ready">Installed</span>
+                    )}
+                  </div>
+                  <div className="health-runtime-row">
+                    <span>
+                      <strong>
+                        {similarityEngine.ffmpegStatus === "installing"
+                          ? "Installing FFmpeg and FFprobe…"
+                          : similarityEngine.ffmpegAvailable
+                            ? `FFmpeg ${similarityEngine.ffmpegVersion ?? "detected"}`
+                            : "FFmpeg and FFprobe were not found"}
+                      </strong>
+                      <small>
+                        {similarityEngine.ffmpegSource === "managed"
+                          ? "Private NinjaCrawler runtime; the system PATH is unchanged."
+                          : similarityEngine.ffmpegSource === "system"
+                            ? "Using the tools detected on the system PATH."
+                            : "Required for video similarity and video thumbnails."}
+                      </small>
+                      {similarityEngine.ffmpegError ? (
+                        <small className="health-tone-attention">
+                          {similarityEngine.ffmpegError}
+                        </small>
+                      ) : null}
+                    </span>
+                    {similarityEngine.ffmpegAvailable ? (
+                      <span className="status status-ready">
+                        {similarityEngine.ffmpegSource === "managed" ? "Managed" : "System"}
+                      </span>
+                    ) : (
+                      <button
+                        className="ghost-button"
+                        disabled={
+                          active ||
+                          busyAction === "install-media-tools" ||
+                          similarityEngine.ffmpegStatus === "installing"
+                        }
+                        onClick={() =>
+                          void runCleanupAction(
+                            "install-media-tools",
+                            installMediaToolRuntime,
+                          )
+                        }
+                        type="button"
+                      >
+                        {busyAction === "install-media-tools" ||
+                        similarityEngine.ffmpegStatus === "installing"
+                          ? "Installing…"
+                          : "Install private runtime"}
+                      </button>
+                    )}
+                  </div>
+                </div>
+              </details>
             ) : null}
-          </details>
-        ) : null}
-        {!active && scan ? (
-          <>
-            <div className="health-last-scan">
-              <span>
-                <strong>Latest scan completed</strong>
-                {scan.finishedAt ? ` ${formatDate(scan.finishedAt)}` : ""}
-              </span>
-              <small>
-                {scopeLabel} · read-only · no files changed
-              </small>
-            </div>
-            <div className="health-scan-summary">
-              <SummaryCard
-                label="Files scanned"
-                value={scan.filesScanned.toLocaleString()}
-                detail={formatBytes(scan.bytesScanned)}
-                severity="healthy"
-              />
-              <SummaryCard
-                label="Exact groups"
-                value={scan.exactGroupCount.toLocaleString()}
-                detail={`${formatBytes(scan.reclaimableBytes)} reclaimable`}
-                severity={scan.exactGroupCount ? "attention" : "healthy"}
-              />
-              <SummaryCard
-                label="Similar groups"
-                value={scan.similarGroupCount.toLocaleString()}
-                detail="Review required"
-                severity={scan.similarGroupCount ? "attention" : "healthy"}
-              />
-              <SummaryCard
-                label="Video similarity"
-                value={`${scan.skippedVideoSimilarityCount} skipped`}
-                detail="FFmpeg/decoding unavailable"
-                severity={
-                  scan.skippedVideoSimilarityCount ? "attention" : "healthy"
-                }
-              />
-            </div>
-            <DedupeGroups title="Exact duplicates" groups={scan.exactGroups} />
-            {consolidatableExactGroups.length > 0 ? (
-              <button
-                className="primary-button health-apply-button"
-                disabled={busyAction === "apply-exact"}
-                onClick={() => {
-                  if (
-                    window.confirm(
-                      `Consolidate ${consolidatableExactGroups.length} exact duplicate groups using hardlinks? All paths will be preserved.`,
-                    )
-                  )
-                    void runCleanupAction("apply-exact", () =>
-                      applyMediaDedupe({
-                        scanId: scan.scanId,
-                        consolidateExact: true,
-                        similarSelections: [],
-                      }),
-                    );
-                }}
-                type="button"
+            {sourceJobs.length || (dedupe?.perceptualSourcesTotal ?? 0) > 0 ? (
+              <details
+                className="health-source-jobs"
+                open={(dedupe?.perceptualSourcesFailed ?? 0) > 0}
               >
-                {busyAction === "apply-exact"
-                  ? "Starting consolidation…"
-                  : `Consolidate exact duplicates · ${formatBytes(scan.reclaimableBytes)}`}
-              </button>
+                <summary>
+                  Per-source similarity jobs
+                  <span>
+                    {completedSourceJobs} completed
+                    {cachedSourceJobs
+                      ? ` · ${cachedSourceJobs} cached`
+                      : ""}
+                    {runningSourceJobs
+                      ? ` · ${runningSourceJobs} running`
+                      : ""}
+                    {queuedSourceJobs
+                      ? ` · ${queuedSourceJobs} queued`
+                      : ""}
+                    {failedSourceJobs
+                      ? ` · ${failedSourceJobs} failed`
+                      : ""}
+                  </span>
+                </summary>
+                <ul>
+                  {sourceJobs.slice(0, 100).map((job) => (
+                    <li key={job.sourceId}>
+                      <span>
+                        <strong>{job.sourcePath.split(/[\\/]/).pop()}</strong>
+                        <small title={job.currentPath ?? job.sourcePath}>
+                          {job.provider} · {job.stage.replaceAll("_", " ")}
+                        </small>
+                      </span>
+                      <span className={job.status === "failed" ? "health-tone-attention" : undefined}>
+                        {job.error ??
+                          (job.progressPercent === undefined
+                            ? job.status
+                            : `${job.progressPercent}%`)}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+                {sourceJobs.length > 100 ? (
+                  <small>Showing the first 100 source jobs.</small>
+                ) : null}
+              </details>
             ) : null}
-            <SimilarityReview
-              groups={scan.similarGroups}
-              selections={reviewSelections}
-              setSelections={setReviewSelections}
-            />
-            {similarSelections.length > 0 ? (
-              <button
-                className="danger-button health-apply-button"
-                disabled={busyAction === "apply-similar"}
-                onClick={() => {
-                  if (
-                    window.confirm(
-                      `Move ${similarSelections.reduce((count, item) => count + item.removePaths.length, 0)} reviewed files to the Recycle Bin?`,
-                    )
-                  )
-                    void runCleanupAction("apply-similar", () =>
-                      applyMediaDedupe({
-                        scanId: scan.scanId,
-                        consolidateExact: false,
-                        similarSelections,
-                      }),
-                    );
-                }}
-                type="button"
-              >
-                {busyAction === "apply-similar"
-                  ? "Starting cleanup…"
-                  : "Move reviewed copies to Recycle Bin"}
-              </button>
+            {!active && scan ? (
+              <div className="health-scan-summary">
+                <SummaryCard
+                  label="Files scanned"
+                  value={scan.filesScanned.toLocaleString()}
+                  detail={formatBytes(scan.bytesScanned)}
+                  severity="healthy"
+                />
+                <SummaryCard
+                  label="Exact groups"
+                  value={scan.exactGroupCount.toLocaleString()}
+                  detail={`${formatBytes(scan.reclaimableBytes)} reclaimable`}
+                  severity={scan.exactGroupCount ? "attention" : "healthy"}
+                />
+                <SummaryCard
+                  label="Similar groups"
+                  value={scan.similarGroupCount.toLocaleString()}
+                  detail="Review required"
+                  severity={scan.similarGroupCount ? "attention" : "healthy"}
+                />
+                <SummaryCard
+                  label="Video similarity"
+                  value={`${scan.skippedVideoSimilarityCount} skipped`}
+                  detail="FFmpeg/decoding unavailable"
+                  severity={
+                    scan.skippedVideoSimilarityCount ? "attention" : "healthy"
+                  }
+                />
+              </div>
             ) : null}
-          </>
-        ) : null}
-        {!active && !scan ? (
-          <div className="health-cleanup-empty empty-state">
-            <strong>No scan has been run</strong>
-            <p>
-              Start a read-only scan to inventory recognized images and videos,
-              group candidates, and estimate reclaimable space.
-            </p>
           </div>
-        ) : null}
+        </details>
       </section>
+      {!active && scan ? (
+        <>
+          <DedupeResultsList
+            exactGroups={scan.exactGroups}
+            selections={reviewSelections}
+            setSelections={setReviewSelections}
+            similarGroups={scan.similarGroups}
+          />
+          {consolidatableExactGroups.length > 0 ? (
+            <button
+              className="primary-button health-apply-button"
+              disabled={busyAction === "apply-exact"}
+              onClick={() => {
+                if (
+                  window.confirm(
+                    `Consolidate ${consolidatableExactGroups.length} exact duplicate groups using hardlinks? All paths will be preserved.`,
+                  )
+                )
+                  void runCleanupAction("apply-exact", () =>
+                    applyMediaDedupe({
+                      scanId: scan.scanId,
+                      consolidateExact: true,
+                      similarSelections: [],
+                    }),
+                  );
+              }}
+              type="button"
+            >
+              {busyAction === "apply-exact"
+                ? "Starting consolidation…"
+                : `Consolidate exact duplicates · ${formatBytes(scan.reclaimableBytes)}`}
+            </button>
+          ) : null}
+          {similarSelections.length > 0 ? (
+            <button
+              className="danger-button health-apply-button"
+              disabled={busyAction === "apply-similar"}
+              onClick={() => {
+                if (
+                  window.confirm(
+                    `Move ${similarSelections.reduce((count, item) => count + item.removePaths.length, 0)} reviewed files to the Recycle Bin?`,
+                  )
+                )
+                  void runCleanupAction("apply-similar", () =>
+                    applyMediaDedupe({
+                      scanId: scan.scanId,
+                      consolidateExact: false,
+                      similarSelections,
+                    }),
+                  );
+              }}
+              type="button"
+            >
+              {busyAction === "apply-similar"
+                ? "Starting cleanup…"
+                : "Move reviewed copies to Recycle Bin"}
+            </button>
+          ) : null}
+        </>
+      ) : null}
+      {!active && !scan ? (
+        <div className="health-cleanup-empty empty-state">
+          <strong>No scan has been run</strong>
+          <p>
+            Start a read-only scan to inventory recognized images and videos,
+            group candidates, and estimate reclaimable space.
+          </p>
+        </div>
+      ) : null}
       <section className="health-storage-section">
         <div className="panel-header compact-header">
           <div>
@@ -1715,107 +1782,787 @@ function StorageRootRow({
   );
 }
 
-function DedupeGroups({
-  title,
-  groups,
+/** File name without its parent directories, mirroring VDF's results list. */
+function fileNameOf(path: string): string {
+  return path.split(/[\\/]/).pop() ?? path;
+}
+
+/** Parent directory of a file path, for the muted secondary line under the name. */
+function parentPathOf(path: string): string {
+  const parts = path.split(/[\\/]/);
+  parts.pop();
+  return parts.join(parts[0] === "" ? "/" : "\\") || path;
+}
+
+function formatMediaDuration(durationMs?: number): string {
+  if (!durationMs || durationMs <= 0) return "—";
+  const totalSeconds = Math.round(durationMs / 1000);
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${minutes}:${seconds.toString().padStart(2, "0")}`;
+}
+
+function formatResolution(width?: number, height?: number): string {
+  if (!width || !height) return "—";
+  return `${width}×${height}`;
+}
+
+function formatBitrateKbps(bitrateKbps?: number): string {
+  if (!bitrateKbps || bitrateKbps <= 0) return "—";
+  if (bitrateKbps >= 1000) return `${(bitrateKbps / 1000).toFixed(1)} Mb/s`;
+  return `${Math.round(bitrateKbps)} kb/s`;
+}
+
+/** Combines video codec + frame rate into one compact column, e.g. "H264 · 29.97fps". */
+function formatVideoCodec(videoCodec?: string, frameRate?: number): string {
+  const codec = videoCodec ? videoCodec.toUpperCase() : undefined;
+  const fps =
+    frameRate && frameRate > 0
+      ? `${Number.isInteger(frameRate) ? frameRate : frameRate.toFixed(2)}fps`
+      : undefined;
+  if (codec && fps) return `${codec} · ${fps}`;
+  if (codec) return codec;
+  if (fps) return fps;
+  return "—";
+}
+
+function formatModifiedAt(modifiedAt?: number): string {
+  if (!modifiedAt) return "—";
+  const date = new Date(modifiedAt);
+  if (Number.isNaN(date.getTime())) return "—";
+  const showYear = date.getFullYear() !== new Date().getFullYear();
+  return date.toLocaleDateString(undefined, {
+    month: "short",
+    day: "numeric",
+    ...(showYear ? { year: "numeric" as const } : {}),
+  });
+}
+
+type DedupeSelectionMap = Record<
+  string,
+  { keepPath: string; removePaths: string[] }
+>;
+
+type DedupeSortKey = "wasted" | "totalSize" | "fileCount" | "matchPercent";
+type DedupeSortDir = "desc" | "asc";
+type DedupeMediaFilter = "all" | "video" | "image";
+
+const dedupeSortOptions: ReadonlyArray<readonly [DedupeSortKey, string]> = [
+  ["wasted", "Wasted space"],
+  ["totalSize", "Total size"],
+  ["fileCount", "File count"],
+  ["matchPercent", "Match %"],
+];
+
+function groupMatchPercent(group: MediaDedupeGroup): number {
+  return group.kind === "exact" ? 100 : (group.confidencePercent ?? 0);
+}
+
+function groupTotalSize(group: MediaDedupeGroup): number {
+  return group.files.reduce((sum, file) => sum + file.sizeBytes, 0);
+}
+
+function groupMediaType(group: MediaDedupeGroup): "image" | "video" | undefined {
+  return group.files[0]?.mediaType;
+}
+
+function dedupeSortValue(group: MediaDedupeGroup, key: DedupeSortKey): number {
+  switch (key) {
+    case "totalSize":
+      return groupTotalSize(group);
+    case "fileCount":
+      return group.files.length;
+    case "matchPercent":
+      return groupMatchPercent(group);
+    case "wasted":
+    default:
+      return group.reclaimableBytes;
+  }
+}
+
+/**
+ * VDF-inspired unified duplicate results list: exact and similar groups render
+ * through the same header + row layout so scan output reads as one list instead
+ * of two disconnected sections. Exact groups are consolidated in bulk elsewhere
+ * (see the "Consolidate exact duplicates" action) and stay display-only here —
+ * they have no per-file keep/recycle selection today. Similar groups keep the
+ * existing Keep/Recycle radio+checkbox flow and selection state shape.
+ *
+ * The toolbar (sort, filters, auto-select, compact rows) and the sticky footer
+ * status bar are all client-side — they slice/reorder what the scan already
+ * returned and never touch the backend.
+ */
+function DedupeResultsList({
+  exactGroups,
+  similarGroups,
+  selections,
+  setSelections,
 }: {
-  title: string;
-  groups: MediaDedupeGroup[];
+  exactGroups: MediaDedupeGroup[];
+  similarGroups: MediaDedupeGroup[];
+  selections: DedupeSelectionMap;
+  setSelections: Dispatch<SetStateAction<DedupeSelectionMap>>;
 }) {
+  const [sortKey, setSortKey] = useState<DedupeSortKey>("wasted");
+  const [sortDir, setSortDir] = useState<DedupeSortDir>("desc");
+  const [mediaFilter, setMediaFilter] = useState<DedupeMediaFilter>("all");
+  const [minMatchPercent, setMinMatchPercent] = useState(0);
+  const [pathFilter, setPathFilter] = useState("");
+  const [onlyWithSelections, setOnlyWithSelections] = useState(false);
+  const [compactRows, setCompactRows] = useState(false);
+
+  const combined = useMemo(
+    () => [...exactGroups, ...similarGroups],
+    [exactGroups, similarGroups],
+  );
+
+  const visible = useMemo(() => {
+    const needle = pathFilter.trim().toLowerCase();
+    const filtered = combined.filter((group) => {
+      if (mediaFilter !== "all" && groupMediaType(group) !== mediaFilter)
+        return false;
+      if (groupMatchPercent(group) < minMatchPercent) return false;
+      if (
+        needle &&
+        !group.files.some((file) => file.path.toLowerCase().includes(needle))
+      )
+        return false;
+      if (
+        onlyWithSelections &&
+        (selections[group.id]?.removePaths.length ?? 0) === 0
+      )
+        return false;
+      return true;
+    });
+    const sorted = [...filtered].sort(
+      (left, right) => dedupeSortValue(right, sortKey) - dedupeSortValue(left, sortKey),
+    );
+    if (sortDir === "asc") sorted.reverse();
+    return sorted;
+  }, [
+    combined,
+    mediaFilter,
+    minMatchPercent,
+    onlyWithSelections,
+    pathFilter,
+    selections,
+    sortDir,
+    sortKey,
+  ]);
+
+  const visibleSimilar = useMemo(
+    () => visible.filter((group) => group.kind === "similar"),
+    [visible],
+  );
+
+  const [compareGroup, setCompareGroup] = useState<MediaDedupeGroup | null>(
+    null,
+  );
+
+  const footerStats = useMemo(() => {
+    const duplicateFiles = visible.reduce(
+      (sum, group) => sum + group.files.length,
+      0,
+    );
+    const reclaimable = visible.reduce(
+      (sum, group) => sum + group.reclaimableBytes,
+      0,
+    );
+    const selectedForRecycle = visible.reduce(
+      (sum, group) => sum + (selections[group.id]?.removePaths.length ?? 0),
+      0,
+    );
+    return { duplicateFiles, reclaimable, selectedForRecycle };
+  }, [selections, visible]);
+
+  const applyAutoSelect = useCallback(
+    (
+      mode:
+        | "keep-largest"
+        | "keep-oldest"
+        | "keep-newest"
+        | "keep-best-quality"
+        | "clear",
+    ) => {
+      setSelections((current) => {
+        const next = { ...current };
+        for (const group of visibleSimilar) {
+          if (mode === "clear") {
+            delete next[group.id];
+            continue;
+          }
+          let keep: MediaDedupeFile;
+          if (mode === "keep-best-quality") {
+            keep = pickBestDedupeFile(group.files) ?? group.files[0];
+          } else if (mode === "keep-largest") {
+            keep = group.files.reduce((best, file) =>
+              file.sizeBytes > best.sizeBytes ? file : best,
+            );
+          } else {
+            // Files without a known modifiedAt are never preferred over ones
+            // that do — they only win when nothing in the group has a date.
+            const dated = group.files.filter(
+              (file) => file.modifiedAt != null,
+            );
+            const pool = dated.length > 0 ? dated : group.files;
+            keep = pool.reduce((best, file) => {
+              const fileTime = file.modifiedAt ?? 0;
+              const bestTime = best.modifiedAt ?? 0;
+              return mode === "keep-oldest"
+                ? fileTime < bestTime
+                  ? file
+                  : best
+                : fileTime > bestTime
+                  ? file
+                  : best;
+            });
+          }
+          next[group.id] = {
+            keepPath: keep.path,
+            removePaths: group.files
+              .filter((file) => file.path !== keep.path)
+              .map((file) => file.path),
+          };
+        }
+        return next;
+      });
+    },
+    [setSelections, visibleSimilar],
+  );
+
+  if (!combined.length) {
+    return (
+      <section className="health-dedupe-groups">
+        <div className="panel-header">
+          <div>
+            <span className="eyebrow">Results</span>
+            <h3>Duplicate candidates</h3>
+          </div>
+          <span className="pill">0</span>
+        </div>
+        <p className="health-dedupe-empty">
+          No exact or similar duplicates found in this scope.
+        </p>
+      </section>
+    );
+  }
   return (
     <section className="health-dedupe-groups">
       <div className="panel-header">
         <div>
           <span className="eyebrow">Results</span>
-          <h3>{title}</h3>
+          <h3>Duplicate candidates</h3>
         </div>
-        <span className="pill">{groups.length}</span>
+        <span className="pill">{visible.length}</span>
       </div>
-      {groups.slice(0, 100).map((group) => (
-        <details key={group.id}>
-          <summary>
-            <span>{group.files.length} files</span>
-            <strong>{formatBytes(group.reclaimableBytes)}</strong>
-          </summary>
-          <ul>
-            {group.files.map((file) => (
-              <li key={file.path}>
-                <span title={file.path}>{file.path}</span>
-                <small>{formatBytes(file.sizeBytes)}</small>
-              </li>
-            ))}
-          </ul>
-        </details>
+      <div className="health-dedupe-toolbar">
+        <label className="health-dedupe-toolbar-field">
+          <span>Sort by</span>
+          <div className="health-dedupe-sort-control">
+            <select
+              aria-label="Sort duplicate candidates"
+              onChange={(event) =>
+                setSortKey(event.target.value as DedupeSortKey)
+              }
+              value={sortKey}
+            >
+              {dedupeSortOptions.map(([key, label]) => (
+                <option key={key} value={key}>
+                  {label}
+                </option>
+              ))}
+            </select>
+            <button
+              aria-label={
+                sortDir === "desc" ? "Sort descending" : "Sort ascending"
+              }
+              className="ghost-button health-dedupe-sort-direction"
+              onClick={() =>
+                setSortDir((current) => (current === "desc" ? "asc" : "desc"))
+              }
+              title={sortDir === "desc" ? "Descending" : "Ascending"}
+              type="button"
+            >
+              {sortDir === "desc" ? "↓" : "↑"}
+            </button>
+          </div>
+        </label>
+        <label className="health-dedupe-toolbar-field">
+          <span>Media type</span>
+          <select
+            aria-label="Filter by media type"
+            onChange={(event) =>
+              setMediaFilter(event.target.value as DedupeMediaFilter)
+            }
+            value={mediaFilter}
+          >
+            <option value="all">All</option>
+            <option value="video">Video</option>
+            <option value="image">Image</option>
+          </select>
+        </label>
+        <label
+          className="health-dedupe-toolbar-field health-dedupe-toolbar-field-slider"
+          title="Hide groups whose files match below this similarity"
+        >
+          <span className="health-dedupe-toolbar-field-label-row">
+            <span>Minimum similarity</span>
+            <span className="health-dedupe-toolbar-slider-value">
+              ≥ {minMatchPercent}%
+            </span>
+          </span>
+          <input
+            aria-label="Minimum similarity"
+            max={100}
+            min={0}
+            onChange={(event) =>
+              setMinMatchPercent(
+                Math.min(100, Math.max(0, Number(event.target.value) || 0)),
+              )
+            }
+            title="Hide groups whose files match below this similarity"
+            type="range"
+            value={minMatchPercent}
+          />
+        </label>
+        <label className="health-dedupe-toolbar-field health-dedupe-toolbar-field-grow">
+          <span>Path contains</span>
+          <input
+            aria-label="Filter by path substring"
+            onChange={(event) => setPathFilter(event.target.value)}
+            placeholder="Filter by folder or profile…"
+            type="text"
+            value={pathFilter}
+          />
+        </label>
+        <label className="health-dedupe-toolbar-toggle">
+          <input
+            checked={onlyWithSelections}
+            onChange={(event) => setOnlyWithSelections(event.target.checked)}
+            type="checkbox"
+          />
+          Only groups with selections
+        </label>
+        <label className="health-dedupe-toolbar-toggle">
+          <input
+            checked={compactRows}
+            onChange={(event) => setCompactRows(event.target.checked)}
+            type="checkbox"
+          />
+          Compact rows
+        </label>
+        <label className="health-dedupe-toolbar-field">
+          <span>Auto-select</span>
+          <select
+            aria-label="Auto-select for similar groups"
+            disabled={visibleSimilar.length === 0}
+            onChange={(event) => {
+              const value = event.target.value;
+              event.target.value = "";
+              if (value === "keep-best-quality")
+                applyAutoSelect("keep-best-quality");
+              if (value === "keep-largest") applyAutoSelect("keep-largest");
+              if (value === "keep-oldest") applyAutoSelect("keep-oldest");
+              if (value === "keep-newest") applyAutoSelect("keep-newest");
+              if (value === "clear") applyAutoSelect("clear");
+            }}
+            title="Applies to visible similar groups only — exact groups are display-only"
+            value=""
+          >
+            <option value="">Choose action…</option>
+            <option value="keep-best-quality">Keep best quality</option>
+            <option value="keep-largest">Keep largest</option>
+            <option value="keep-oldest">Keep oldest</option>
+            <option value="keep-newest">Keep newest</option>
+            <option value="clear">Clear selections</option>
+          </select>
+        </label>
+      </div>
+      {visible.slice(0, 100).map((group, index) => (
+        <DedupeGroupCard
+          compact={compactRows}
+          group={group}
+          index={index + 1}
+          key={group.id}
+          onCompare={setCompareGroup}
+          selection={selections[group.id]}
+          setSelections={setSelections}
+        />
       ))}
-      {groups.length > 100 ? (
-        <small>Showing the 100 largest groups.</small>
+      {visible.length > 100 ? (
+        <small>Showing the 100 largest visible groups.</small>
       ) : null}
+      {compareGroup ? (
+        <DedupeCompareModal
+          group={compareGroup}
+          onClose={() => setCompareGroup(null)}
+          selection={selections[compareGroup.id]}
+          setSelections={setSelections}
+        />
+      ) : null}
+      <div className="health-dedupe-footer-bar">
+        <span>
+          <strong>{visible.length.toLocaleString()}</strong> groups
+        </span>
+        <span>
+          <strong>{footerStats.duplicateFiles.toLocaleString()}</strong>{" "}
+          duplicate files
+        </span>
+        <span>
+          <strong>{formatBytes(footerStats.reclaimable)}</strong> reclaimable
+        </span>
+        <span>
+          <strong>{footerStats.selectedForRecycle.toLocaleString()}</strong>{" "}
+          selected for recycle
+        </span>
+      </div>
     </section>
   );
 }
 
-function SimilarityReview({
-  groups,
-  selections,
+function DedupeGroupCard({
+  group,
+  index,
+  selection,
   setSelections,
+  compact,
+  onCompare,
 }: {
-  groups: MediaDedupeGroup[];
-  selections: Record<string, { keepPath: string; removePaths: string[] }>;
-  setSelections: Dispatch<
-    SetStateAction<Record<string, { keepPath: string; removePaths: string[] }>>
-  >;
+  group: MediaDedupeGroup;
+  index: number;
+  selection: { keepPath: string; removePaths: string[] } | undefined;
+  setSelections: Dispatch<SetStateAction<DedupeSelectionMap>>;
+  compact: boolean;
+  onCompare: (group: MediaDedupeGroup) => void;
 }) {
+  const isExact = group.kind === "exact";
+  const matchPercent = isExact ? 100 : (group.confidencePercent ?? 0);
+  const resolvedSelection = selection ?? {
+    keepPath: group.files[0]?.path ?? "",
+    removePaths: [],
+  };
+  const bestFile = pickBestDedupeFile(group.files);
   return (
-    <section className="health-similarity-review">
-      <div className="panel-header">
-        <div>
-          <span className="eyebrow">Manual review</span>
-          <h3>Similar candidates</h3>
+    <article className="health-dedupe-group" key={group.id}>
+      <header className="health-dedupe-group-header">
+        <span className="health-dedupe-group-index">#{index}</span>
+        <div className="health-dedupe-group-heading">
+          <strong>
+            {group.files.length} file{group.files.length === 1 ? "" : "s"}
+          </strong>
+          <small>
+            {formatBytes(
+              group.files.reduce((sum, file) => sum + file.sizeBytes, 0),
+            )}{" "}
+            total · save up to {formatBytes(group.reclaimableBytes)}
+          </small>
         </div>
-        <span className="pill">{groups.length}</span>
-      </div>
-      {groups.map((group) => {
-        const selection = selections[group.id] ?? {
-          keepPath: group.files[0]?.path ?? "",
-          removePaths: [],
-        };
-        return (
-          <article className="health-similar-group" key={group.id}>
-            <header>
-              <strong>{group.confidencePercent ?? 0}% confidence</strong>
-              <span>{formatBytes(group.reclaimableBytes)} potential</span>
-            </header>
-            <div className="health-similar-files">
-              {group.files.map((file) => {
-                const keep = selection.keepPath === file.path;
-                const remove = selection.removePaths.includes(file.path);
-                return (
-                  <div
-                    className={
-                      keep
-                        ? "health-similar-file is-keep"
-                        : remove
-                          ? "health-similar-file is-remove"
-                          : "health-similar-file"
-                    }
-                    key={file.path}
+        <span
+          className={`pill health-dedupe-match-badge ${isExact ? "health-tone-attention" : ""}`}
+        >
+          {isExact ? "Exact · 100%" : `Similar · ${matchPercent}%`}
+        </span>
+        {!isExact && bestFile ? (
+          <button
+            className="ghost-button health-dedupe-keepbest-button"
+            onClick={() =>
+              setSelections((current) => ({
+                ...current,
+                [group.id]: {
+                  keepPath: bestFile.path,
+                  removePaths: group.files
+                    .filter((file) => file.path !== bestFile.path)
+                    .map((file) => file.path),
+                },
+              }))
+            }
+            title="Keep the highest-quality file (resolution, then bitrate, then size, then most recent) and recycle the rest"
+            type="button"
+          >
+            Keep best
+          </button>
+        ) : null}
+        <button
+          className="ghost-button health-dedupe-compare-button"
+          onClick={() => onCompare(group)}
+          type="button"
+        >
+          Compare
+        </button>
+      </header>
+      <div
+        className={
+          compact ? "health-dedupe-rows is-compact" : "health-dedupe-rows"
+        }
+      >
+        {group.files.map((file) => {
+          const keep = !isExact && resolvedSelection.keepPath === file.path;
+          const remove =
+            !isExact && resolvedSelection.removePaths.includes(file.path);
+          const rowClass = [
+            "health-dedupe-row",
+            keep ? "is-keep" : remove ? "is-remove" : "",
+            compact ? "is-compact" : "",
+          ]
+            .filter(Boolean)
+            .join(" ");
+          return (
+            <div className={rowClass} key={file.path}>
+              {file.mediaType === "image" ? (
+                <img
+                  alt=""
+                  className="health-dedupe-row-thumb"
+                  src={convertFileSrc(file.path)}
+                />
+              ) : file.thumbnailPath ? (
+                <img
+                  alt=""
+                  className="health-dedupe-row-thumb"
+                  src={convertFileSrc(file.thumbnailPath)}
+                />
+              ) : (
+                <div className="health-dedupe-row-thumb health-video-placeholder">
+                  VIDEO
+                </div>
+              )}
+              <div className="health-dedupe-row-name">
+                <span className="health-dedupe-row-name-line">
+                  <strong title={file.path}>{fileNameOf(file.path)}</strong>
+                  {bestFile && file.path === bestFile.path ? (
+                    <span
+                      className="health-dedupe-best-badge"
+                      title="Best quality in this group: highest resolution, then bitrate, then size, then most recent"
+                    >
+                      BEST
+                    </span>
+                  ) : null}
+                </span>
+                {compact ? null : (
+                  <small title={file.path}>{parentPathOf(file.path)}</small>
+                )}
+              </div>
+              <span className="health-dedupe-row-col">
+                {formatMediaDuration(file.durationMs)}
+              </span>
+              <span className="health-dedupe-row-col">
+                {formatResolution(file.width, file.height)}
+              </span>
+              {compact ? null : (
+                <>
+                  <span
+                    className="health-dedupe-row-col"
+                    title="Bitrate (ffprobe)"
                   >
-                    {file.mediaType === "image" ? (
-                      <img
-                        alt="Duplicate candidate"
-                        src={convertFileSrc(file.path)}
-                      />
-                    ) : (
-                      <div className="health-video-placeholder">VIDEO</div>
-                    )}
-                    <strong title={file.path}>
-                      {file.path.split(/[\\/]/).pop()}
-                    </strong>
-                    <small>{formatBytes(file.sizeBytes)}</small>
+                    {formatBitrateKbps(file.bitrateKbps)}
+                  </span>
+                  <span
+                    className="health-dedupe-row-col"
+                    title="Video codec / frame rate (ffprobe)"
+                  >
+                    {formatVideoCodec(file.videoCodec, file.frameRate)}
+                  </span>
+                  <span
+                    className="health-dedupe-row-col"
+                    title="Audio stream (ffprobe)"
+                  >
+                    {file.audioSummary ?? "—"}
+                  </span>
+                </>
+              )}
+              <span className="health-dedupe-row-col">
+                {formatBytes(file.sizeBytes)}
+              </span>
+              <span className="health-dedupe-row-col">
+                {formatModifiedAt(file.modifiedAt)}
+              </span>
+              <span className="health-dedupe-row-col">{matchPercent}%</span>
+              {isExact ? (
+                <span className="health-dedupe-row-selection health-dedupe-row-selection-placeholder" />
+              ) : (
+                <div className="health-dedupe-row-selection">
+                  <label>
+                    <input
+                      checked={keep}
+                      name={`keep-${group.id}`}
+                      onChange={() =>
+                        setSelections((current) => ({
+                          ...current,
+                          [group.id]: {
+                            keepPath: file.path,
+                            removePaths: (
+                              current[group.id]?.removePaths ?? []
+                            ).filter((path) => path !== file.path),
+                          },
+                        }))
+                      }
+                      type="radio"
+                    />{" "}
+                    Keep
+                  </label>
+                  <label>
+                    <input
+                      checked={remove}
+                      disabled={keep}
+                      onChange={(event) =>
+                        setSelections((current) => {
+                          const existing =
+                            current[group.id] ?? resolvedSelection;
+                          return {
+                            ...current,
+                            [group.id]: {
+                              ...existing,
+                              removePaths: event.target.checked
+                                ? [...existing.removePaths, file.path]
+                                : existing.removePaths.filter(
+                                    (path) => path !== file.path,
+                                  ),
+                            },
+                          };
+                        })
+                      }
+                      type="checkbox"
+                    />{" "}
+                    Recycle
+                  </label>
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </article>
+  );
+}
+
+/**
+ * Side-by-side compare view for one duplicate group (VDF-inspired): a large
+ * preview + full metadata per file, with the same Keep/Recycle controls as the
+ * row list. Similar groups can be resolved here; exact groups are display-only
+ * (they're consolidated in bulk elsewhere, same as the row list).
+ */
+function DedupeCompareModal({
+  group,
+  selection,
+  setSelections,
+  onClose,
+}: {
+  group: MediaDedupeGroup;
+  selection: { keepPath: string; removePaths: string[] } | undefined;
+  setSelections: Dispatch<SetStateAction<DedupeSelectionMap>>;
+  onClose: () => void;
+}) {
+  const isExact = group.kind === "exact";
+  const matchPercent = isExact ? 100 : (group.confidencePercent ?? 0);
+  const resolvedSelection = selection ?? {
+    keepPath: group.files[0]?.path ?? "",
+    removePaths: [],
+  };
+  const bestFile = pickBestDedupeFile(group.files);
+
+  useEffect(() => {
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [onClose]);
+
+  return (
+    <div
+      aria-label={`Compare ${group.files.length} files`}
+      aria-modal="true"
+      className="health-dedupe-compare-backdrop"
+      onClick={onClose}
+      role="dialog"
+    >
+      <div
+        className="health-dedupe-compare-modal"
+        onClick={(event) => event.stopPropagation()}
+      >
+        <header className="health-dedupe-compare-header">
+          <div>
+            <span className="eyebrow">
+              {isExact ? "Exact · 100%" : `Similar · ${matchPercent}%`}
+            </span>
+            <h3>
+              {group.files.length} file{group.files.length === 1 ? "" : "s"} ·
+              save up to {formatBytes(group.reclaimableBytes)}
+            </h3>
+          </div>
+          <button
+            aria-label="Close compare view"
+            className="health-dedupe-compare-close"
+            onClick={onClose}
+            type="button"
+          >
+            ✕
+          </button>
+        </header>
+        <div className="health-dedupe-compare-grid">
+          {group.files.map((file) => {
+            const keep = !isExact && resolvedSelection.keepPath === file.path;
+            const remove =
+              !isExact && resolvedSelection.removePaths.includes(file.path);
+            return (
+              <article
+                className={[
+                  "health-dedupe-compare-item",
+                  keep ? "is-keep" : remove ? "is-remove" : "",
+                ]
+                  .filter(Boolean)
+                  .join(" ")}
+                key={file.path}
+              >
+                <div className="health-dedupe-compare-preview">
+                  {file.mediaType === "video" ? (
+                    <video controls src={convertFileSrc(file.path)} />
+                  ) : (
+                    <img alt="" src={convertFileSrc(file.path)} />
+                  )}
+                </div>
+                <dl className="health-dedupe-compare-meta">
+                  <dt>Name</dt>
+                  <dd title={file.path}>
+                    {fileNameOf(file.path)}
+                    {bestFile && file.path === bestFile.path ? (
+                      <span
+                        className="health-dedupe-best-badge"
+                        title="Best quality in this group: highest resolution, then bitrate, then size, then most recent"
+                      >
+                        BEST
+                      </span>
+                    ) : null}
+                  </dd>
+                  <dt>Path</dt>
+                  <dd title={file.path}>{parentPathOf(file.path)}</dd>
+                  <dt>Size</dt>
+                  <dd>{formatBytes(file.sizeBytes)}</dd>
+                  <dt>Resolution</dt>
+                  <dd>{formatResolution(file.width, file.height)}</dd>
+                  <dt>Duration</dt>
+                  <dd>{formatMediaDuration(file.durationMs)}</dd>
+                  <dt>Bitrate</dt>
+                  <dd>{formatBitrateKbps(file.bitrateKbps)}</dd>
+                  <dt>Codec</dt>
+                  <dd>{formatVideoCodec(file.videoCodec, file.frameRate)}</dd>
+                  <dt>Audio</dt>
+                  <dd>{file.audioSummary ?? "—"}</dd>
+                  <dt>Modified</dt>
+                  <dd>{formatModifiedAt(file.modifiedAt)}</dd>
+                  <dt>Match</dt>
+                  <dd>{matchPercent}%</dd>
+                </dl>
+                {isExact ? (
+                  <p className="health-dedupe-compare-readonly">
+                    Exact duplicates are consolidated in bulk — no per-file
+                    selection here.
+                  </p>
+                ) : (
+                  <div className="health-dedupe-row-selection health-dedupe-compare-selection">
                     <label>
                       <input
                         checked={keep}
-                        name={`keep-${group.id}`}
+                        name={`compare-keep-${group.id}`}
                         onChange={() =>
                           setSelections((current) => ({
                             ...current,
@@ -1837,7 +2584,8 @@ function SimilarityReview({
                         disabled={keep}
                         onChange={(event) =>
                           setSelections((current) => {
-                            const existing = current[group.id] ?? selection;
+                            const existing =
+                              current[group.id] ?? resolvedSelection;
                             return {
                               ...current,
                               [group.id]: {
@@ -1856,13 +2604,13 @@ function SimilarityReview({
                       Recycle
                     </label>
                   </div>
-                );
-              })}
-            </div>
-          </article>
-        );
-      })}
-    </section>
+                )}
+              </article>
+            );
+          })}
+        </div>
+      </div>
+    </div>
   );
 }
 
