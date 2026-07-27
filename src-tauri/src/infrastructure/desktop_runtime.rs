@@ -211,6 +211,28 @@ pub fn window_state_plugin<R: Runtime>() -> tauri::plugin::TauriPlugin<R> {
 /// acontecer antes de `app.manage` no setup.
 static LAST_SNAPSHOT_FINGERPRINT: Mutex<Option<u64>> = Mutex::new(None);
 
+/// Last published snapshot, kept so `get_workspace_snapshot` can serve a pull
+/// without recomputing. Updated on every publication (both the changed and the
+/// unchanged path), so it always mirrors what the webviews last saw. The clone
+/// stored here runs off the native main thread, so its cost is acceptable.
+static LAST_SNAPSHOT: Mutex<Option<WorkspaceSnapshot>> = Mutex::new(None);
+
+/// Returns a clone of the last published snapshot, if any.
+pub fn cached_workspace_snapshot() -> Option<WorkspaceSnapshot> {
+    match LAST_SNAPSHOT.lock() {
+        Ok(guard) => guard.clone(),
+        Err(poisoned) => poisoned.into_inner().clone(),
+    }
+}
+
+fn store_cached_snapshot(snapshot: &WorkspaceSnapshot) {
+    let mut guard = match LAST_SNAPSHOT.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    *guard = Some(snapshot.clone());
+}
+
 fn snapshot_fingerprint(snapshot: &WorkspaceSnapshot) -> Option<u64> {
     let bytes = serde_json::to_vec(snapshot).ok()?;
     let mut hasher = DefaultHasher::new();
@@ -222,6 +244,9 @@ fn snapshot_fingerprint(snapshot: &WorkspaceSnapshot) -> Option<u64> {
 /// última. Falha de serialização conta como mudança (melhor emitir demais do
 /// que segurar uma atualização real).
 fn register_snapshot_fingerprint(snapshot: &WorkspaceSnapshot) -> bool {
+    // Keep the pull cache in lockstep with the fingerprint so a window that pulls
+    // right after a ping always gets the snapshot that triggered it.
+    store_cached_snapshot(snapshot);
     let Some(fingerprint) = snapshot_fingerprint(snapshot) else {
         return true;
     };
@@ -269,7 +294,12 @@ fn emit_workspace_runtime(
 
     controller.sync_tray_state(app, &snapshot.desktop_runtime)?;
 
-    app.emit(WORKSPACE_SNAPSHOT_CHANGED_EVENT, snapshot.clone())
+    // Emit a minimal "snapshot changed" ping instead of the whole snapshot
+    // (~8 MB JSON). Shipping the snapshot as an event payload runs an
+    // ExecuteScript per webview on the native main thread, freezing every
+    // window for seconds. Windows react to the ping by pulling the snapshot via
+    // `get_workspace_snapshot` off the main thread.
+    app.emit(WORKSPACE_SNAPSHOT_CHANGED_EVENT, ())
         .map_err(|error| error.to_string())?;
 
     if controller.should_emit_state(&snapshot.desktop_runtime)? {

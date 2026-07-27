@@ -396,19 +396,26 @@ pub(super) fn sync_profile_picture_to_settings(output_root: &Path) -> Result<Pat
 
     Ok(settings_picture)
 }
+/// Free `ProfilePicture_<date>.jpg` slot inside `parent`, disambiguated with a
+/// `_2`, `_3`, … suffix when the same date already has an archived picture.
+/// Taking the date as a parameter lets legacy imports date the archive by when
+/// the picture was actually captured instead of by the migration run.
+pub(super) fn archived_profile_picture_path(parent: &Path, date: &str) -> PathBuf {
+    let mut target = parent.join(format!("ProfilePicture_{date}.jpg"));
+    let mut suffix = 2u32;
+    while target.exists() {
+        target = parent.join(format!("ProfilePicture_{date}_{suffix}.jpg"));
+        suffix += 1;
+    }
+    target
+}
 pub(super) fn archive_profile_picture(existing_path: &Path) {
     let parent = match existing_path.parent() {
         Some(p) => p,
         None => return,
     };
     let date_str = chrono::Local::now().format("%Y-%m-%d").to_string();
-    let base_name = format!("ProfilePicture_{date_str}.jpg");
-    let mut target = parent.join(&base_name);
-    let mut suffix = 2u32;
-    while target.exists() {
-        target = parent.join(format!("ProfilePicture_{date_str}_{suffix}.jpg"));
-        suffix += 1;
-    }
+    let target = archived_profile_picture_path(parent, &date_str);
     let _ = fs::rename(existing_path, &target);
 }
 pub(super) fn find_source_avatar(output_root: &Path) -> Option<String> {

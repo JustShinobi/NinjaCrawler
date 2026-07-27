@@ -48,6 +48,15 @@ pub(super) struct LegacyInstagramReconciliationRecord {
     pub(super) provider_post_code_cased: Option<String>,
     pub(super) media_type: String,
     pub(super) media_section: String,
+    /// Post caption. The SCrawler XML does not carry it (always `None`); the 4K
+    /// Stogram catalog does.
+    pub(super) title: Option<String>,
+    /// Capture time as a unix timestamp, when the legacy catalog records it.
+    pub(super) captured_at_timestamp: Option<i64>,
+    /// Perceptual fingerprint, precomputed outside the write transaction by bulk
+    /// importers (decoding thousands of images while holding the SQLite write
+    /// lock stalls every other writer, the app's own startup included).
+    pub(super) image_fingerprint: Option<ImageFingerprint>,
 }
 #[derive(Default)]
 pub(super) struct LegacyInstagramReconciliationStats {
@@ -1306,6 +1315,9 @@ pub(super) fn collect_legacy_instagram_reconciliation_records(
                 permalink,
                 Some(entry.media_url.as_str()),
             ),
+            title: None,
+            captured_at_timestamp: None,
+            image_fingerprint: None,
         });
     }
 
@@ -2021,7 +2033,9 @@ pub(super) fn legacy_reconciliation_records_to_downloaded_media(
             media_section: record.media_section.clone(),
             provider_media_key: record.provider_media_key.clone(),
             provider_post_code: record.provider_post_code_cased.clone(),
-            captured_at_timestamp: None,
+            captured_at_timestamp: record.captured_at_timestamp,
+            title: record.title.clone(),
+            file_sha256: record.file_sha256.clone(),
             final_file_name: record
                 .file_path
                 .file_name()
@@ -2080,12 +2094,36 @@ pub(super) fn reconcile_instagram_scrawler_profile_ledgers_with_connection(
     timestamp: &str,
 ) -> Result<LegacyInstagramReconciliationStats, String> {
     let records = collect_legacy_instagram_reconciliation_records(profile_root)?;
+    reconcile_instagram_ledgers_from_records(
+        connection,
+        &records,
+        profile_root,
+        source_id,
+        account_id,
+        source_handle,
+        timestamp,
+    )
+}
+
+/// Seeds every Instagram ledger (media, aliases, fingerprints, posts) from
+/// already-built reconciliation records. Split out of the SCrawler path so other
+/// legacy catalogs — the 4K Stogram migration builds its records from SQLite
+/// rather than XML — reuse the exact same write path.
+pub(super) fn reconcile_instagram_ledgers_from_records(
+    connection: &Connection,
+    records: &[LegacyInstagramReconciliationRecord],
+    profile_root: &Path,
+    source_id: &str,
+    account_id: &str,
+    source_handle: &str,
+    timestamp: &str,
+) -> Result<LegacyInstagramReconciliationStats, String> {
     if records.is_empty() {
         return Ok(LegacyInstagramReconciliationStats::default());
     }
 
-    let downloaded_media = legacy_reconciliation_records_to_downloaded_media(&records);
-    let observed_posts = legacy_reconciliation_records_to_observed_posts(&records);
+    let downloaded_media = legacy_reconciliation_records_to_downloaded_media(records);
+    let observed_posts = legacy_reconciliation_records_to_observed_posts(records);
 
     upsert_instagram_media_ledger_entries(
         connection,
@@ -2104,20 +2142,16 @@ pub(super) fn reconcile_instagram_scrawler_profile_ledgers_with_connection(
         &downloaded_media,
         timestamp,
     )?;
-    upsert_instagram_media_fingerprint_entries(
-        connection,
-        source_id,
-        account_id,
-        profile_root,
-        &downloaded_media,
-        timestamp,
-    )?;
+    // `upsert_instagram_legacy_media_fingerprint_entries` below writes the very
+    // same fingerprint rows (same primary key, same file) straight from the
+    // records, so calling the downloaded-media variant here would decode every
+    // image twice for nothing.
     upsert_instagram_legacy_media_alias_entries(
         connection,
         source_id,
         account_id,
         profile_root,
-        &records,
+        records,
         timestamp,
     )?;
     upsert_instagram_legacy_media_fingerprint_entries(
@@ -2125,7 +2159,7 @@ pub(super) fn reconcile_instagram_scrawler_profile_ledgers_with_connection(
         source_id,
         account_id,
         profile_root,
-        &records,
+        records,
         timestamp,
     )?;
     upsert_instagram_post_ledger_entries(

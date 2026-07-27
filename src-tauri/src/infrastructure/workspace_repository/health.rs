@@ -598,6 +598,117 @@ fn format_bytes(value: u64) -> String {
     }
 }
 
+
+/// Opens or reveals an app log file with the OS shell. Both entry points
+/// refuse anything outside `layout.logs_dir`, so neither can be turned into a
+/// generic "open any path" primitive.
+pub fn open_app_log_file(path: String) -> Result<(), String> {
+    with_workspace(|_connection, layout| {
+        let path = PathBuf::from(path.trim());
+        if path.as_os_str().is_empty() {
+            return Err("Log path is empty.".to_string());
+        }
+        let canonical = path
+            .canonicalize()
+            .map_err(|error| format!("Log file not found: {error}"))?;
+        let logs_root = layout
+            .logs_dir
+            .canonicalize()
+            .unwrap_or_else(|_| layout.logs_dir.clone());
+        if !canonical.starts_with(&logs_root) {
+            return Err(format!(
+                "Refusing to open path outside app logs dir ({}).",
+                layout.logs_dir.display()
+            ));
+        }
+        open_path_with_os_shell(&canonical)
+    })
+}
+
+pub fn reveal_app_log_file(path: String) -> Result<(), String> {
+    with_workspace(|_connection, layout| {
+        let path = PathBuf::from(path.trim());
+        let canonical = path
+            .canonicalize()
+            .map_err(|error| format!("Log file not found: {error}"))?;
+        let logs_root = layout
+            .logs_dir
+            .canonicalize()
+            .unwrap_or_else(|_| layout.logs_dir.clone());
+        if !canonical.starts_with(&logs_root) {
+            return Err(format!(
+                "Refusing to reveal path outside app logs dir ({}).",
+                layout.logs_dir.display()
+            ));
+        }
+        reveal_path_with_os_shell(&canonical)
+    })
+}
+
+fn open_path_with_os_shell(path: &Path) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        Command::new("cmd")
+            .args(["/C", "start", "", &path.to_string_lossy()])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|error| format!("Failed to open log: {error}"))?;
+        return Ok(());
+    }
+    #[cfg(target_os = "macos")]
+    {
+        Command::new("open")
+            .arg(path)
+            .spawn()
+            .map_err(|error| format!("Failed to open log: {error}"))?;
+        return Ok(());
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        Command::new("xdg-open")
+            .arg(path)
+            .spawn()
+            .map_err(|error| format!("Failed to open log: {error}"))?;
+        return Ok(());
+    }
+    #[allow(unreachable_code)]
+    Err("Opening logs is not supported on this platform.".to_string())
+}
+
+fn reveal_path_with_os_shell(path: &Path) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        Command::new("explorer")
+            .arg(format!("/select,{}", path.display()))
+            .spawn()
+            .map_err(|error| format!("Failed to reveal log: {error}"))?;
+        return Ok(());
+    }
+    #[cfg(target_os = "macos")]
+    {
+        Command::new("open")
+            .args(["-R"])
+            .arg(path)
+            .spawn()
+            .map_err(|error| format!("Failed to reveal log: {error}"))?;
+        return Ok(());
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        if let Some(parent) = path.parent() {
+            Command::new("xdg-open")
+                .arg(parent)
+                .spawn()
+                .map_err(|error| format!("Failed to reveal log: {error}"))?;
+            return Ok(());
+        }
+    }
+    #[allow(unreachable_code)]
+    Err("Revealing logs is not supported on this platform.".to_string())
+}
+
 #[cfg(test)]
 mod health_tests {
     use super::*;

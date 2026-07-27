@@ -191,6 +191,10 @@ const MIGRATIONS: &[(i64, &str)] = &[
         49,
         include_str!("../../migrations/0049_media_title_duration.sql"),
     ),
+    (
+        50,
+        include_str!("../../migrations/0050_instagram_media_title_captured_at.sql"),
+    ),
 ];
 
 const PROVIDER_SYNC_RESUME_SCHEMA: &str =
@@ -339,10 +343,26 @@ fn ensure_media_dedupe_source_scope_schema(connection: &Connection) -> rusqlite:
     Ok(())
 }
 
+/// `instagram_sync_media_ledger` is created lazily by the workspace repository,
+/// so the caption/capture columns can only be added when the table is already
+/// there. `add_column_if_missing` no-ops on a missing table, and the runtime
+/// `CREATE TABLE` already declares both columns for fresh databases.
+fn ensure_instagram_media_metadata_schema(connection: &Connection) -> rusqlite::Result<()> {
+    add_column_if_missing(connection, "instagram_sync_media_ledger", "title", "TEXT")?;
+    add_column_if_missing(
+        connection,
+        "instagram_sync_media_ledger",
+        "captured_at",
+        "INTEGER",
+    )?;
+    Ok(())
+}
+
 fn reconcile_colliding_development_migrations(connection: &Connection) -> rusqlite::Result<()> {
     ensure_source_profile_stats_schema(connection)?;
     ensure_media_dedupe_performance_schema(connection)?;
-    ensure_media_dedupe_source_scope_schema(connection)
+    ensure_media_dedupe_source_scope_schema(connection)?;
+    ensure_instagram_media_metadata_schema(connection)
 }
 
 fn apply_migration(
@@ -358,6 +378,9 @@ fn apply_migration(
     }
     if version == 48 {
         return ensure_media_dedupe_source_scope_schema(transaction);
+    }
+    if version == 50 {
+        return ensure_instagram_media_metadata_schema(transaction);
     }
     transaction.execute_batch(sql)
 }

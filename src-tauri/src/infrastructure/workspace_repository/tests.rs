@@ -540,6 +540,51 @@ fn single_video_slideshow_paths_exclude_audio_but_audio_is_discovered() {
 }
 
 #[test]
+fn merge_single_videos_directory_merges_into_the_empty_folder_the_app_created() {
+    // Cenário real: trocar o media root criou a pasta nova vazia, então mover
+    // não pode recusar por "destino já existe".
+    let temp_dir = tempfile::tempdir().expect("temp dir");
+    let from = temp_dir.path().join("old/Single videos");
+    let to = temp_dir.path().join("new/Single videos");
+    fs::create_dir_all(&from).expect("old root");
+    fs::create_dir_all(&to).expect("new root");
+    fs::write(from.join("123.mp4"), b"video").expect("video");
+    fs::write(from.join("123_audio.m4a"), b"audio").expect("audio");
+
+    merge_single_videos_directory(&from, &to).expect("merge");
+
+    assert!(to.join("123.mp4").exists());
+    assert!(to.join("123_audio.m4a").exists());
+    assert!(!from.exists(), "a pasta antiga deve sumir quando esvazia");
+}
+
+#[test]
+fn merge_single_videos_directory_keeps_identical_duplicates_and_refuses_conflicts() {
+    let temp_dir = tempfile::tempdir().expect("temp dir");
+    let from = temp_dir.path().join("old");
+    let to = temp_dir.path().join("new");
+    fs::create_dir_all(&from).expect("old root");
+    fs::create_dir_all(&to).expect("new root");
+    fs::write(from.join("same.mp4"), b"video").expect("source");
+    fs::write(to.join("same.mp4"), b"video").expect("destination");
+
+    merge_single_videos_directory(&from, &to).expect("merge");
+    assert!(to.join("same.mp4").exists());
+    assert!(!from.join("same.mp4").exists(), "duplicata idêntica é descartada");
+
+    fs::create_dir_all(&from).expect("old root again");
+    fs::write(from.join("clash.mp4"), b"longer content").expect("source");
+    fs::write(to.join("clash.mp4"), b"short").expect("destination");
+
+    let error = merge_single_videos_directory(&from, &to).expect_err("conflito deve falhar");
+    assert!(error.contains("different size"), "mensagem inesperada: {error}");
+    assert!(
+        from.join("clash.mp4").exists(),
+        "a mídia de origem não pode ser perdida no conflito"
+    );
+}
+
+#[test]
 fn backfill_twitter_post_keys_fills_only_missing() {
     let conn = rusqlite::Connection::open_in_memory().expect("db");
     conn.execute_batch(
@@ -2874,6 +2919,15 @@ fn instagram_saved_posts_request_honors_account_defaults() {
     );
 }
 
+fn instagram_media_path_setting(path: &Path) -> ProviderAccountSettingValue {
+    ProviderAccountSettingValue {
+        setting_key: "instagram.account.mediaPath".to_string(),
+        value_kind: ProviderAccountSettingValueKind::String,
+        string_value: Some(path.display().to_string()),
+        json_value: None,
+    }
+}
+
 #[test]
 fn resolved_source_media_output_root_uses_instagram_account_media_path_setting() {
     let (temp_dir, layout) = create_test_layout();
@@ -2885,21 +2939,18 @@ fn resolved_source_media_output_root_uses_instagram_account_media_path_setting()
             test_layout,
             sample_account("account-1", "instagram"),
         )?;
-        upsert_source_profile_with_connection(
-            connection,
-            test_layout,
-            sample_source("source-1", "instagram", Some("account-1")),
-        )?;
+        // The setting comes first: a source created afterwards has no media on
+        // disk to protect, so it resolves straight to the account path.
         save_provider_account_settings_with_connection(
             connection,
             test_layout,
             "account-1".to_string(),
-            vec![ProviderAccountSettingValue {
-                setting_key: "instagram.account.mediaPath".to_string(),
-                value_kind: ProviderAccountSettingValueKind::String,
-                string_value: Some(custom_media_root.display().to_string()),
-                json_value: None,
-            }],
+            vec![instagram_media_path_setting(&custom_media_root)],
+        )?;
+        upsert_source_profile_with_connection(
+            connection,
+            test_layout,
+            sample_source("source-1", "instagram", Some("account-1")),
         )?;
 
         let source = load_sources(connection)?
@@ -2914,6 +2965,63 @@ fn resolved_source_media_output_root_uses_instagram_account_media_path_setting()
         resolved_root,
         custom_media_root.join("source-1"),
         "instagram sources should honor account-level mediaPath when resolving root"
+    );
+}
+
+/// Counterpart of the test above: a source that already existed when the account
+/// media path changed keeps resolving to where its media actually is. Changing
+/// the account path pins each such source to its previous root
+/// (`preserve_existing_source_media_paths_for_account_setting_change`) so the
+/// already-downloaded files are never orphaned.
+#[test]
+fn changing_the_account_media_path_pins_existing_sources_to_their_current_root() {
+    let (temp_dir, layout) = create_test_layout();
+    let custom_media_root = temp_dir.path().join("custom-instagram-media");
+
+    let (resolved_root, expected_root) = with_workspace_layout(layout, |connection, test_layout| {
+        upsert_provider_account_with_connection(
+            connection,
+            test_layout,
+            sample_account("account-1", "instagram"),
+        )?;
+        upsert_source_profile_with_connection(
+            connection,
+            test_layout,
+            sample_source("source-1", "instagram", Some("account-1")),
+        )?;
+
+        let before = load_sources(connection)?
+            .into_iter()
+            .find(|item| item.id == "source-1")
+            .ok_or_else(|| "source should exist".to_string())?;
+        let root_before =
+            resolved_source_media_output_root_with_connection(connection, test_layout, &before)?;
+
+        save_provider_account_settings_with_connection(
+            connection,
+            test_layout,
+            "account-1".to_string(),
+            vec![instagram_media_path_setting(&custom_media_root)],
+        )?;
+
+        let after = load_sources(connection)?
+            .into_iter()
+            .find(|item| item.id == "source-1")
+            .ok_or_else(|| "source should exist".to_string())?;
+        let root_after =
+            resolved_source_media_output_root_with_connection(connection, test_layout, &after)?;
+        Ok((root_after, root_before))
+    })
+    .expect("source root should resolve");
+
+    assert_eq!(
+        resolved_root, expected_root,
+        "an existing source must stay pinned to the root holding its media"
+    );
+    assert_ne!(
+        resolved_root,
+        custom_media_root.join("source-1"),
+        "the new account path must not silently move an existing source"
     );
 }
 
@@ -4003,6 +4111,20 @@ fn queued_media_thumbnail_generation_dispatches_images_without_ffmpeg() {
         }
         other => panic!("expected InvalidMedia for corrupt image, got {other:?}"),
     }
+}
+
+#[test]
+fn ffprobe_csv_video_detection_tolerates_side_data_column() {
+    use crate::infrastructure::workspace_repository::media::ffprobe_csv_reports_video_stream;
+
+    // Stream sem side data.
+    assert!(ffprobe_csv_reports_video_stream("video\r\n"));
+    // Com side data (ICC Profile, displaymatrix) o csv ganha uma coluna vazia.
+    assert!(ffprobe_csv_reports_video_stream("video,\r\n"));
+    assert!(ffprobe_csv_reports_video_stream("video,,\n"));
+    // Mídia só de áudio: `-select_streams v` não devolve nada.
+    assert!(!ffprobe_csv_reports_video_stream(""));
+    assert!(!ffprobe_csv_reports_video_stream("\r\n"));
 }
 
 #[test]

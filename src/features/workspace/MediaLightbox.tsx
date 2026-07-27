@@ -1,6 +1,13 @@
-import { useEffect, useRef } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { convertFileSrc } from '@tauri-apps/api/core'
+import {
+  applyLightboxMediaPrefs,
+  getStoredLightboxMediaPrefs,
+  readPrefsFromElement,
+  setStoredLightboxMediaPrefs,
+} from './lightboxSession'
+import type { LightboxMediaPrefs } from './lightboxSession'
 
 /**
  * Shared media lightbox for Profile View and Single Videos. Plays video/image
@@ -11,8 +18,14 @@ import { convertFileSrc } from '@tauri-apps/api/core'
  * - ↑/↓: previous/next post or top-level item (vertical axis — does NOT walk slides)
  * - ←/→ on carousel: previous/next slide of the same post
  * - ←/→ on video: seek ±1s
+ * - ←/→ while the slideshow `<audio>` is focused: native audio seek (does NOT change slide)
+ * - Space: play/pause the active media (video, or slideshow soundtrack)
+ * - M: mute/unmute the active media
  * - Enter: fullscreen the lightbox (state survives media type switches)
  * - Escape: exit fullscreen if active; otherwise close
+ *
+ * Volume/mute are persisted (localStorage) and re-applied to every media
+ * element that mounts, so they survive post switches and window reopens.
  */
 export interface MediaLightboxProps {
   fileAbsPath: string
@@ -36,6 +49,12 @@ export interface MediaLightboxProps {
   title?: string
   /** Secondary meta (e.g. "1.2K views · 2/5"). */
   meta?: string
+  /**
+   * Post caption, shown under the media. Instagram captions run long and carry
+   * their own line breaks, so it is clamped to a few lines behind a "more"
+   * toggle instead of pushing the actions out of view.
+   */
+  caption?: string
   /** Separate audio track for slideshows. */
   audioAbsPath?: string
   /** Actions below the preview (Open online / Reveal / etc.). */
@@ -44,10 +63,18 @@ export interface MediaLightboxProps {
 
 const VIDEO_SEEK_SECONDS = 1
 
+/**
+ * Debounce for hydrating `<video src>` while stepping quickly through posts:
+ * the previous element unmounts immediately (stops stale playback) and the
+ * next src only attaches once navigation settles, so skipped-past videos never
+ * start decoding. The first video after opening hydrates synchronously.
+ */
+const VIDEO_HYDRATE_DEBOUNCE_MS = 150
+
 function isInteractiveKeyTarget(target: EventTarget | null, root: HTMLElement | null): boolean {
   if (!(target instanceof Element)) return false
-  // Do not treat <audio>/<video> as “interactive” for arrows — otherwise a
-  // carousel with a soundtrack steals ←/→ while the player is focused.
+  // Media elements are handled per-key (e.g. a focused <audio> keeps native
+  // ←/→ seek) instead of blanket-ignoring shortcuts while they are focused.
   const interactive = target.closest(
     'button, input, textarea, select, a[href], [contenteditable="true"]',
   )
@@ -79,11 +106,72 @@ export function MediaLightbox({
   onSlideNext,
   title,
   meta,
+  caption,
   audioAbsPath,
   actions,
 }: MediaLightboxProps) {
   const lightboxRef = useRef<HTMLDivElement>(null)
-  const videoRef = useRef<HTMLVideoElement>(null)
+  const videoRef = useRef<HTMLVideoElement | null>(null)
+  const audioRef = useRef<HTMLAudioElement | null>(null)
+
+  // Volume/mute prefs: hydrated once from storage, then kept in a ref so the
+  // stable keyboard listener and mounting media elements always see the
+  // latest values without re-subscribing.
+  const [initialPrefs] = useState<LightboxMediaPrefs>(getStoredLightboxMediaPrefs)
+  const prefsRef = useRef<LightboxMediaPrefs>(initialPrefs)
+
+  // Caption clamp: only offer the toggle when the text actually overflows,
+  // otherwise a one-line caption would show a useless "more".
+  const [captionExpanded, setCaptionExpanded] = useState(false)
+  const [captionOverflows, setCaptionOverflows] = useState(false)
+
+  // Collapse again on every new post. Adjusting state during render is the
+  // documented alternative to an effect for deriving from changed props.
+  const captionIdentity = `${fileAbsPath} ${caption ?? ''}`
+  const [lastCaptionIdentity, setLastCaptionIdentity] = useState(captionIdentity)
+  if (lastCaptionIdentity !== captionIdentity) {
+    setLastCaptionIdentity(captionIdentity)
+    setCaptionExpanded(false)
+  }
+
+  // Measured through a callback ref so it runs exactly when the node mounts.
+  // The caption element is keyed by its text, so a new caption remounts it and
+  // re-measures. Measuring only while collapsed: expanding lifts the clamp, so
+  // the comparison would always come out false.
+  const measureCaption = useCallback((element: HTMLDivElement | null) => {
+    if (!element) return
+    setCaptionOverflows(element.scrollHeight > element.clientHeight + 1)
+  }, [])
+
+  const setVideoEl = useCallback((el: HTMLVideoElement | null) => {
+    videoRef.current = el
+    if (el) applyLightboxMediaPrefs(el, prefsRef.current)
+  }, [])
+  const setAudioEl = useCallback((el: HTMLAudioElement | null) => {
+    audioRef.current = el
+    if (el) applyLightboxMediaPrefs(el, prefsRef.current)
+  }, [])
+
+  // Fired by the native controls AND by our Space/M handling (muted/volume
+  // writes dispatch `volumechange`), so persistence has one code path.
+  const handleMediaVolumeChange = useCallback((el: HTMLMediaElement) => {
+    const prefs = readPrefsFromElement(el)
+    prefsRef.current = prefs
+    setStoredLightboxMediaPrefs(prefs)
+  }, [])
+
+  // Video src hydration (see VIDEO_HYDRATE_DEBOUNCE_MS). The <video> only
+  // mounts while `hydratedVideoPath === fileAbsPath`, so on navigation the
+  // stale element unmounts on the very next render (derived, no setState in
+  // the effect body) and the new src attaches once the debounce fires.
+  const [hydratedVideoPath, setHydratedVideoPath] = useState<string | undefined>(() =>
+    isVideo ? fileAbsPath : undefined,
+  )
+  useEffect(() => {
+    if (!isVideo || hydratedVideoPath === fileAbsPath) return
+    const timer = window.setTimeout(() => setHydratedVideoPath(fileAbsPath), VIDEO_HYDRATE_DEBOUNCE_MS)
+    return () => window.clearTimeout(timer)
+  }, [isVideo, fileAbsPath, hydratedVideoPath])
 
   // Refs: keyboard listener mounts once and always reads current state.
   // Avoids “dead” arrows from a stale closure after switching slide/post.
@@ -150,10 +238,32 @@ export function MediaLightbox({
       return true
     }
 
+    const togglePlayback = () => {
+      const media = videoRef.current ?? audioRef.current
+      if (!media) return
+      if (media.paused) {
+        const play = media.play()
+        void play?.catch(() => undefined)
+      } else {
+        media.pause()
+      }
+    }
+
+    const toggleMute = () => {
+      const media = videoRef.current ?? audioRef.current
+      if (!media) return
+      // Dispatches `volumechange`, which persists the new prefs.
+      media.muted = !media.muted
+    }
+
     const handleKeyDown = (event: KeyboardEvent) => {
       if (isInteractiveKeyTarget(event.target, lightboxRef.current)) return
 
       const nav = navRef.current
+      // A focused media element keeps its own transport keys native
+      // (Space/M on <video>/<audio>, and ←/→ seek on <audio>).
+      const mediaFocused = event.target instanceof HTMLMediaElement
+      const audioFocused = event.target === audioRef.current && audioRef.current !== null
       let handled = false
 
       if (event.key === 'Escape') {
@@ -172,17 +282,32 @@ export function MediaLightbox({
         if (nav.hasPrev) nav.onPrev()
         handled = true
       } else if (isArrow(event, 'Right')) {
-        if (nav.isVideo) {
+        if (audioFocused) {
+          // Focused slideshow soundtrack: leave native seek alone.
+        } else if (nav.isVideo) {
           handled = seekVideo(VIDEO_SEEK_SECONDS)
         } else if (nav.hasSlideNext && nav.onSlideNext) {
           nav.onSlideNext()
           handled = true
         }
       } else if (isArrow(event, 'Left')) {
-        if (nav.isVideo) {
+        if (audioFocused) {
+          // Focused slideshow soundtrack: leave native seek alone.
+        } else if (nav.isVideo) {
           handled = seekVideo(-VIDEO_SEEK_SECONDS)
         } else if (nav.hasSlidePrev && nav.onSlidePrev) {
           nav.onSlidePrev()
+          handled = true
+        }
+      } else if (event.key === ' ' || event.code === 'Space') {
+        if (!mediaFocused) {
+          togglePlayback()
+          // Handled even without media so Space never scrolls the page behind.
+          handled = true
+        }
+      } else if ((event.key === 'm' || event.key === 'M') && !event.ctrlKey && !event.metaKey && !event.altKey) {
+        if (!mediaFocused) {
+          toggleMute()
           handled = true
         }
       } else if (event.key === 'Enter') {
@@ -239,18 +364,53 @@ export function MediaLightbox({
         {title ? <div className="profile-view-lightbox-title">{title}</div> : null}
         {meta ? <div className="profile-view-lightbox-meta">{meta}</div> : null}
         {isVideo ? (
-          <video ref={videoRef} src={convertFileSrc(fileAbsPath)} controls autoPlay loop />
+          hydratedVideoPath === fileAbsPath ? (
+            <video
+              ref={setVideoEl}
+              src={convertFileSrc(fileAbsPath)}
+              controls
+              autoPlay
+              loop
+              onVolumeChange={(event) => handleMediaVolumeChange(event.currentTarget)}
+            />
+          ) : null
         ) : (
           <img src={convertFileSrc(fileAbsPath)} alt="" />
         )}
         {!isVideo && audioAbsPath ? (
           <audio
             key={audioAbsPath}
+            ref={setAudioEl}
             src={convertFileSrc(audioAbsPath)}
             controls
             autoPlay
             loop
+            onVolumeChange={(event) => handleMediaVolumeChange(event.currentTarget)}
           />
+        ) : null}
+        {caption ? (
+          <div className="profile-view-lightbox-caption">
+            <div
+              key={caption}
+              ref={captionExpanded ? undefined : measureCaption}
+              className={
+                captionExpanded
+                  ? 'profile-view-lightbox-caption-text expanded'
+                  : 'profile-view-lightbox-caption-text'
+              }
+            >
+              {caption}
+            </div>
+            {captionOverflows || captionExpanded ? (
+              <button
+                className="profile-view-lightbox-caption-toggle"
+                onClick={() => setCaptionExpanded((expanded) => !expanded)}
+                type="button"
+              >
+                {captionExpanded ? 'less' : 'more'}
+              </button>
+            ) : null}
+          </div>
         ) : null}
         {actions ? <div className="profile-view-lightbox-actions">{actions}</div> : null}
       </div>

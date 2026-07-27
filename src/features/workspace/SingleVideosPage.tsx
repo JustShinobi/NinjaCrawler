@@ -4,17 +4,21 @@ import {
   deleteSingleVideo,
   enqueueSingleVideoDownload,
   listSingleVideos,
+  loadSingleVideosRootStatus,
   loadWorkspaceSnapshot,
   openExternalTarget,
+  pickImportRootFolder,
   revealMediaInFolder,
+  setSingleVideosRoot,
   subscribeToSingleVideosChanged,
   upsertSourceProfile,
 } from '../../bridge/desktop'
-import type { ProviderKey, SingleVideo } from '../../domain/models'
+import type { ProviderKey, SingleVideo, SingleVideosRootStatus } from '../../domain/models'
 import { WindowShell } from '../brand/WindowShell'
 import { WindowTitlebar } from '../brand/WindowTitlebar'
 import { MediaCard } from './MediaCard'
 import { MediaLightbox } from './MediaLightbox'
+import { useLightboxSession } from './lightboxSession'
 
 const PROVIDER_LABELS: Record<string, string> = {
   tiktok: 'TikTok',
@@ -95,7 +99,6 @@ export function SingleVideosPage() {
   const [query, setQuery] = useState('')
   const [viewMode, setViewMode] = useState<ViewMode>(readStoredMode)
   const [densityIndex, setDensityIndex] = useState<number>(readStoredDensity)
-  const [lightboxIndex, setLightboxIndex] = useState<number>()
   const [selectMode, setSelectMode] = useState(false)
   const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set())
   const selectAnchorRef = useRef<string | null>(null)
@@ -103,6 +106,9 @@ export function SingleVideosPage() {
   const [deleting, setDeleting] = useState(false)
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; video: SingleVideo }>()
   const [addingProfile, setAddingProfile] = useState(false)
+  const [rootStatus, setRootStatus] = useState<SingleVideosRootStatus>()
+  const [folderChange, setFolderChange] = useState<{ basePath: string; moveMedia: boolean }>()
+  const [folderSubmitting, setFolderSubmitting] = useState(false)
 
   useEffect(() => {
     try {
@@ -123,13 +129,51 @@ export function SingleVideosPage() {
     setLoading(true)
     setError(undefined)
     try {
-      setVideos(await listSingleVideos())
+      const [loaded, status] = await Promise.all([listSingleVideos(), loadSingleVideosRootStatus()])
+      setVideos(loaded)
+      setRootStatus(status)
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : 'Failed to load single videos.')
     } finally {
       setLoading(false)
     }
   }, [])
+
+  // Escolher a pasta é o mesmo gesto do "change media path" de um perfil: o
+  // usuário aponta a pasta base e confirma se as mídias já baixadas vão junto.
+  const handlePickFolder = useCallback(async () => {
+    setError(undefined)
+    setNotice(undefined)
+    try {
+      const basePath = await pickImportRootFolder()
+      if (!basePath) return
+      // Com mídia faltando o gesto provável é localizar a pasta que já tem os
+      // arquivos, não mover a raiz vazia por cima dela.
+      setFolderChange({ basePath, moveMedia: (rootStatus?.missingCount ?? 0) === 0 })
+    } catch (pickError) {
+      setError(pickError instanceof Error ? pickError.message : 'Failed to open the folder picker.')
+    }
+  }, [rootStatus])
+
+  const confirmFolderChange = useCallback(async () => {
+    if (!folderChange) return
+    setFolderSubmitting(true)
+    setError(undefined)
+    try {
+      setVideos(await setSingleVideosRoot(folderChange.basePath, folderChange.moveMedia))
+      setRootStatus(await loadSingleVideosRootStatus())
+      setFolderChange(undefined)
+      setNotice(
+        folderChange.moveMedia
+          ? 'Single videos folder changed and existing media moved.'
+          : 'Single videos folder changed.',
+      )
+    } catch (changeError) {
+      setError(changeError instanceof Error ? changeError.message : 'Failed to change the folder.')
+    } finally {
+      setFolderSubmitting(false)
+    }
+  }, [folderChange])
 
   useEffect(() => {
     void load()
@@ -233,6 +277,12 @@ export function SingleVideosPage() {
     })
   }, [filtered])
 
+  // Shared lightbox session: one single-video = one group on the vertical
+  // axis; its files (slideshow frames) are the slides.
+  const lightboxGroupKeyFor = useCallback((item: SingleVideoPreviewItem) => item.video.id, [])
+  const lightbox = useLightboxSession({ items: previewItems, groupKeyFor: lightboxGroupKeyFor })
+  const lightboxOpen = lightbox.index !== undefined
+
   // Sai/limpa a seleção ao trocar de filtro.
   useEffect(() => {
     setSelectMode(false)
@@ -272,7 +322,7 @@ export function SingleVideosPage() {
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
       if (event.key !== 'Escape') return
-      if (lightboxIndex !== undefined) return
+      if (lightboxOpen) return
       if (confirmIds && confirmIds.length > 0) {
         if (deleting) {
           event.preventDefault()
@@ -298,69 +348,21 @@ export function SingleVideosPage() {
     }
     document.addEventListener('keydown', handler, true)
     return () => document.removeEventListener('keydown', handler, true)
-  }, [lightboxIndex, confirmIds, deleting, selectMode, contextMenu, exitSelectMode])
+  }, [lightboxOpen, confirmIds, deleting, selectMode, contextMenu, exitSelectMode])
 
+  const { open: openLightboxAt } = lightbox
   const openLightbox = useCallback(
     (video: SingleVideo) => {
       const index = previewItems.findIndex(
         (item) => item.video.id === video.id && item.file.absolutePath === video.absolutePath,
       )
       const fallbackIndex = previewItems.findIndex((item) => item.video.id === video.id)
-      if (index >= 0) setLightboxIndex(index)
-      else if (fallbackIndex >= 0) setLightboxIndex(fallbackIndex)
+      if (index >= 0) openLightboxAt(index)
+      else if (fallbackIndex >= 0) openLightboxAt(fallbackIndex)
     },
-    [previewItems],
+    [previewItems, openLightboxAt],
   )
-  const closeLightbox = useCallback(() => setLightboxIndex(undefined), [])
-
-  /** Indices of the first file of each video on the flat lightbox list. */
-  const videoStartIndices = useMemo(() => {
-    const starts: number[] = []
-    let lastId: string | undefined
-    previewItems.forEach((item, index) => {
-      if (item.video.id !== lastId) {
-        starts.push(index)
-        lastId = item.video.id
-      }
-    })
-    return starts
-  }, [previewItems])
-
-  const stepLightboxPost = useCallback(
-    (delta: number) => {
-      setLightboxIndex((current) => {
-        if (current === undefined || videoStartIndices.length === 0) return current
-        let pos = 0
-        for (let i = 0; i < videoStartIndices.length; i++) {
-          const start = videoStartIndices[i]!
-          const end = (videoStartIndices[i + 1] ?? previewItems.length) - 1
-          if (current >= start && current <= end) {
-            pos = i
-            break
-          }
-        }
-        const next = pos + delta
-        if (next < 0 || next >= videoStartIndices.length) return current
-        return videoStartIndices[next]!
-      })
-    },
-    [previewItems.length, videoStartIndices],
-  )
-
-  const stepLightboxSlide = useCallback(
-    (delta: number) => {
-      setLightboxIndex((current) => {
-        if (current === undefined) return current
-        const item = previewItems[current]
-        if (!item) return current
-        const next = current + delta
-        if (next < 0 || next >= previewItems.length) return current
-        if (previewItems[next]?.video.id !== item.video.id) return current
-        return next
-      })
-    },
-    [previewItems],
-  )
+  const closeLightbox = lightbox.close
 
   const performDelete = useCallback(async () => {
     if (!confirmIds || confirmIds.length === 0) return
@@ -459,24 +461,12 @@ export function SingleVideosPage() {
   }, [contextMenu])
 
   const gridStyle = { '--pv-thumb-min': `${DENSITY_STEPS[densityIndex]}px` } as CSSProperties
-  const activeItem = lightboxIndex !== undefined ? previewItems[lightboxIndex] : undefined
+  const activeSession = lightbox.active
+  const activeItem = activeSession?.item
   const activeVideo = activeItem?.video
-  const activeFileIndex =
-    activeItem && activeVideo
-      ? activeVideo.files.findIndex((file) => file.absolutePath === activeItem.file.absolutePath)
-      : -1
-  const activeVideoPos = useMemo(() => {
-    if (lightboxIndex === undefined) return -1
-    for (let i = 0; i < videoStartIndices.length; i++) {
-      const start = videoStartIndices[i]!
-      const end = (videoStartIndices[i + 1] ?? previewItems.length) - 1
-      if (lightboxIndex >= start && lightboxIndex <= end) return i
-    }
-    return -1
-  }, [lightboxIndex, videoStartIndices, previewItems.length])
   const activeTitle =
-    activeVideo && activeVideo.files.length > 1 && activeFileIndex >= 0
-      ? `${activeVideo.uploader ? `@${activeVideo.uploader}` : providerLabel(activeVideo.provider)} · ${activeFileIndex + 1} / ${activeVideo.files.length}`
+    activeVideo && activeSession && activeSession.slideCount > 1
+      ? `${activeVideo.uploader ? `@${activeVideo.uploader}` : providerLabel(activeVideo.provider)} · ${activeSession.slideIndex + 1} / ${activeSession.slideCount}`
       : activeVideo?.uploader
         ? `@${activeVideo.uploader}`
         : activeVideo
@@ -545,6 +535,25 @@ export function SingleVideosPage() {
       </form>
 
       {notice ? <div className="runtime-log-window-empty single-videos-notice">{notice}</div> : null}
+
+      {rootStatus && rootStatus.missingCount > 0 ? (
+        <div className="single-videos-root-warning" role="status">
+          <div>
+            <strong>
+              {rootStatus.missingCount} of {rootStatus.totalCount} media file
+              {rootStatus.totalCount === 1 ? '' : 's'} were not found in the current folder.
+            </strong>
+            <p>
+              Single videos folder: <code>{rootStatus.root}</code>. Point this window at the folder
+              that actually holds the media (leave “move” unchecked) — then change it again with
+              “move” checked if you want the files somewhere else.
+            </p>
+          </div>
+          <button className="ghost-button" onClick={() => void handlePickFolder()} type="button">
+            Change folder…
+          </button>
+        </div>
+      ) : null}
 
       {videos.length > 0 ? (
         <div className={`profile-view-toolbar single-videos-toolbar${selectMode ? ' is-selecting' : ''}`}>
@@ -666,6 +675,14 @@ export function SingleVideosPage() {
               >
                 Select
               </button>
+              <button
+                className="ghost-button queue-icon-button"
+                onClick={() => void handlePickFolder()}
+                type="button"
+                title={rootStatus ? `Single videos folder: ${rootStatus.root}` : 'Change folder'}
+              >
+                Folder…
+              </button>
             </>
           )}
         </div>
@@ -737,22 +754,68 @@ export function SingleVideosPage() {
         </div>
       ) : null}
 
-      {activeItem && activeVideo ? (
+      {folderChange ? (
+        <div
+          className="profile-view-lightbox profile-view-confirm"
+          role="dialog"
+          aria-modal="true"
+          onClick={() => (folderSubmitting ? undefined : setFolderChange(undefined))}
+        >
+          <div className="profile-view-confirm-card" onClick={(event) => event.stopPropagation()}>
+            <h2>Change the Single videos folder?</h2>
+            <p>
+              New folder: <code>{folderChange.basePath}</code>
+            </p>
+            <label className="single-videos-folder-move">
+              <input
+                type="checkbox"
+                checked={folderChange.moveMedia}
+                disabled={folderSubmitting}
+                onChange={(event) =>
+                  setFolderChange({ ...folderChange, moveMedia: event.target.checked })
+                }
+              />
+              Move the media already downloaded to the new folder
+            </label>
+            <p className="single-videos-folder-hint">
+              {folderChange.moveMedia
+                ? 'Files move to the new folder. Moving across drives copies and can take a while.'
+                : 'Nothing is moved — use this to point the catalog at a folder that already holds the media.'}
+            </p>
+            <div className="profile-view-confirm-actions">
+              <button
+                className="ghost-button"
+                onClick={() => setFolderChange(undefined)}
+                type="button"
+                disabled={folderSubmitting}
+              >
+                Cancel
+              </button>
+              <button
+                className="ghost-button"
+                onClick={() => void confirmFolderChange()}
+                type="button"
+                disabled={folderSubmitting}
+              >
+                {folderSubmitting ? 'Applying…' : 'Apply'}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {activeItem && activeVideo && activeSession ? (
         <MediaLightbox
           fileAbsPath={activeItem.file.absolutePath}
           isVideo={isSingleVideoVideo(activeItem.file.mediaType)}
-          hasPrev={activeVideoPos > 0}
-          hasNext={activeVideoPos >= 0 && activeVideoPos < videoStartIndices.length - 1}
-          onPrev={() => stepLightboxPost(-1)}
-          onNext={() => stepLightboxPost(1)}
-          hasSlidePrev={activeFileIndex > 0}
-          hasSlideNext={
-            activeVideo.files.length > 1 &&
-            activeFileIndex >= 0 &&
-            activeFileIndex < activeVideo.files.length - 1
-          }
-          onSlidePrev={() => stepLightboxSlide(-1)}
-          onSlideNext={() => stepLightboxSlide(1)}
+          hasPrev={activeSession.hasPrev}
+          hasNext={activeSession.hasNext}
+          onPrev={() => lightbox.stepPost(-1)}
+          onNext={() => lightbox.stepPost(1)}
+          hasSlidePrev={activeSession.hasSlidePrev}
+          hasSlideNext={activeSession.hasSlideNext}
+          onSlidePrev={() => lightbox.stepSlide(-1)}
+          onSlideNext={() => lightbox.stepSlide(1)}
           onClose={closeLightbox}
           title={activeTitle}
           audioAbsPath={activeVideo.mediaType === 'slideshow' ? activeVideo.audioAbsolutePath : undefined}

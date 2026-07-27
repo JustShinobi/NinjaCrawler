@@ -653,6 +653,19 @@ pub struct SingleVideo {
     pub audio_absolute_path: Option<String>,
 }
 
+/// Saúde da raiz "Single videos": onde ela está hoje, quantos itens do catálogo
+/// não têm arquivo em disco e qual seria a pasta derivada do media root atual.
+/// A janela usa isso para avisar quando o catálogo aponta para uma pasta que não
+/// contém mais as mídias (ex.: depois de trocar o media root padrão).
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SingleVideosRootStatus {
+    pub root: String,
+    pub media_root_default: String,
+    pub total_count: u32,
+    pub missing_count: u32,
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SingleVideoFile {
