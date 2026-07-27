@@ -3,8 +3,8 @@ use crate::domain::models::{
     MediaDedupeScanResult,
 };
 use crate::infrastructure::{
-    media_dedupe_vdf, media_path_migration_runtime, media_tool_runtime, source_delete_runtime,
-    source_sync_runtime, workspace_repository,
+    media_dedupe_vdf, media_metadata_probe, media_path_migration_runtime, media_tool_runtime,
+    source_delete_runtime, source_sync_runtime, workspace_repository,
 };
 use chrono::{DateTime, Utc};
 use image::{imageops::FilterType, GenericImageView};
@@ -29,6 +29,7 @@ struct RuntimeState {
     provider_scope: Option<String>,
     source_scope: Option<String>,
     resource_profile: String,
+    scan_profile: String,
     started_at: Option<String>,
     phase_started_at: Option<Instant>,
     files_processed: u64,
@@ -57,6 +58,7 @@ impl Default for RuntimeState {
             provider_scope: None,
             source_scope: None,
             resource_profile: "balanced".to_string(),
+            scan_profile: "recommended".to_string(),
             started_at: None,
             phase_started_at: None,
             files_processed: 0,
@@ -102,6 +104,16 @@ pub fn media_dedupe_status() -> Result<MediaDedupeJobStatus, String> {
     let mut state = runtime_state().lock().map_err(|error| error.to_string())?;
     if state.latest_scan.is_none() {
         state.latest_scan = workspace_repository::load_latest_media_dedupe_scan()?;
+    }
+    if let Some(latest_scan) = state.latest_scan.as_mut() {
+        // The in-memory cache can outlive the scan by a long time (it is only replaced
+        // when another scan completes), while the thumbnail queue keeps generating
+        // thumbnails in the background. Re-resolve on every serve so `thumbnailPath`
+        // reflects whatever has been generated since the result was first cached.
+        workspace_repository::refresh_media_dedupe_thumbnail_paths(latest_scan);
+        workspace_repository::refresh_media_dedupe_metadata(latest_scan);
+        spawn_missing_video_thumbnail_generation(latest_scan);
+        spawn_missing_media_metadata_probe(latest_scan);
     }
     if state
         .engine_status
@@ -222,6 +234,7 @@ pub fn enqueue_scan(
     let provider_scope = normalize_provider_scope(input.provider)?;
     let source_scope = normalize_source_scope(input.source_id);
     let resource_profile = normalize_resource_profile(input.resource_profile)?;
+    let scan_profile = normalize_scan_profile(input.scan_profile)?;
     workspace_repository::media_dedupe_scan_context(
         provider_scope.as_deref(),
         source_scope.as_deref(),
@@ -264,6 +277,7 @@ pub fn enqueue_scan(
         state.provider_scope = provider_scope.clone();
         state.source_scope = source_scope.clone();
         state.resource_profile = resource_profile.clone();
+        state.scan_profile = scan_profile.clone();
         state.started_at = Some(started_at);
         state.phase_started_at = Some(Instant::now());
         state.files_processed = 0;
@@ -288,6 +302,7 @@ pub fn enqueue_scan(
             provider_scope,
             source_scope,
             resource_profile,
+            scan_profile,
             cancel,
         )
     });
@@ -380,6 +395,7 @@ fn run_scan(
     provider_scope: Option<String>,
     source_scope: Option<String>,
     resource_profile: String,
+    scan_profile: String,
     cancel: Arc<AtomicBool>,
 ) {
     update_state(&app, |state| {
@@ -392,17 +408,22 @@ fn run_scan(
         provider_scope.as_deref(),
         source_scope.as_deref(),
         &resource_profile,
+        &scan_profile,
         &cancel,
     );
     match outcome {
-        Ok(result) => update_state(&app, |state| {
-            state.state = "completed".to_string();
-            state.stage = "completed".to_string();
-            state.current_path = None;
-            state.current_root = None;
-            state.latest_scan = Some(result);
-            state.error = None;
-        }),
+        Ok(result) => {
+            spawn_missing_video_thumbnail_generation(&result);
+            spawn_missing_media_metadata_probe(&result);
+            update_state(&app, |state| {
+                state.state = "completed".to_string();
+                state.stage = "completed".to_string();
+                state.current_path = None;
+                state.current_root = None;
+                state.latest_scan = Some(result);
+                state.error = None;
+            });
+        }
         Err(error) if cancel.load(Ordering::Acquire) => {
             let _ = workspace_repository::finish_media_dedupe_scan_with_error(
                 &scan_id,
@@ -441,6 +462,7 @@ fn scan_library(
     provider_scope: Option<&str>,
     source_scope: Option<&str>,
     resource_profile: &str,
+    scan_profile: &str,
     cancel: &AtomicBool,
 ) -> Result<MediaDedupeScanResult, String> {
     let context = workspace_repository::media_dedupe_scan_context(provider_scope, source_scope)?;
@@ -593,7 +615,7 @@ fn scan_library(
     let engine = media_dedupe_vdf::status();
     if engine.installed && engine.ffmpeg_available {
         let (_, total, _, compared_videos) =
-            run_perceptual_scans(app, scan_id, &context, resource_profile, cancel)?;
+            run_perceptual_scans(app, scan_id, &context, resource_profile, scan_profile, cancel)?;
         if total > 0 {
             skipped_video_similarity_count =
                 skipped_video_similarity_count.saturating_sub(compared_videos);
@@ -612,8 +634,10 @@ fn run_perceptual_scans(
     scan_id: &str,
     context: &workspace_repository::MediaDedupeScanContext,
     resource_profile: &str,
+    scan_profile: &str,
     cancel: &AtomicBool,
 ) -> Result<(u32, u32, u32, u32), String> {
+    let vdf_profile = media_dedupe_vdf::VdfScanProfile::parse(scan_profile);
     let mut sources = Vec::new();
     for source in &context.source_roots {
         let inventory =
@@ -654,7 +678,7 @@ fn run_perceptual_scans(
         worker_lanes[index % worker_count].extend(group);
     }
 
-    let settings = media_dedupe_vdf::settings_fingerprint();
+    let settings = media_dedupe_vdf::settings_fingerprint(vdf_profile);
     let options = media_dedupe_vdf::VdfRunOptions::for_profile(resource_profile, worker_count);
     let completed = AtomicU32::new(0);
     let failed = AtomicU32::new(0);
@@ -676,7 +700,7 @@ fn run_perceptual_scans(
                         break;
                     }
                     let outcome = run_perceptual_source(
-                        app, scan_id, &source, &inventory, settings, options, cancel,
+                        app, scan_id, &source, &inventory, settings, options, vdf_profile, cancel,
                     );
                     let outcome = match outcome {
                         Ok(outcome) => outcome,
@@ -742,6 +766,7 @@ fn run_perceptual_source(
     inventory: &workspace_repository::MediaDedupeSourceVideoInventory,
     settings: &str,
     options: media_dedupe_vdf::VdfRunOptions,
+    profile: media_dedupe_vdf::VdfScanProfile,
     cancel: &AtomicBool,
 ) -> Result<PerceptualSourceOutcome, String> {
     let paths = media_dedupe_vdf::source_paths(scan_id, &source.source_id)?;
@@ -816,7 +841,7 @@ fn run_perceptual_source(
     )?;
     let source_path = source.path.to_string_lossy().to_string();
     let outcome =
-        media_dedupe_vdf::run_source_scan(&source.path, &paths, options, cancel, |progress| {
+        media_dedupe_vdf::run_source_scan(&source.path, &paths, options, profile, cancel, |progress| {
             update_state(app, |state| {
                 state.stage = "perceptual_scan".to_string();
                 state.files_processed = progress.files_processed;
@@ -1258,7 +1283,9 @@ fn excluded_directory(path: &Path) -> bool {
     path.file_name()
         .and_then(|value| value.to_str())
         .is_some_and(|name| {
-            name.eq_ignore_ascii_case(".thumbs") || name.eq_ignore_ascii_case("cover")
+            name.eq_ignore_ascii_case(".thumbs")
+                || name.eq_ignore_ascii_case("cover")
+                || name.eq_ignore_ascii_case("Settings")
         })
 }
 
@@ -1543,6 +1570,7 @@ fn status_from_state(state: &RuntimeState) -> MediaDedupeJobStatus {
         provider_scope: state.provider_scope.clone(),
         source_scope: state.source_scope.clone(),
         resource_profile: state.resource_profile.clone(),
+        scan_profile: state.scan_profile.clone(),
         similarity_scope: "source".to_string(),
         files_processed: state.files_processed,
         files_total: state.files_total,
@@ -1593,6 +1621,17 @@ fn normalize_resource_profile(profile: Option<String>) -> Result<String, String>
     Ok(profile)
 }
 
+fn normalize_scan_profile(profile: Option<String>) -> Result<String, String> {
+    let profile = profile
+        .unwrap_or_else(|| "recommended".to_string())
+        .trim()
+        .to_ascii_lowercase();
+    match profile.as_str() {
+        "recommended" | "ai" | "deep" => Ok(profile),
+        other => Err(format!("Unsupported media cleanup scan profile: {other}.")),
+    }
+}
+
 fn resource_profile_source_workers(profile: &str) -> usize {
     match profile {
         "quiet" => 1,
@@ -1627,14 +1666,153 @@ fn publish(app: &AppHandle) {
     }
 }
 
+/// Paths of grouped video files (exact + similar duplicate groups) that don't have a
+/// resolved thumbnail yet. Pure/testable — the caller decides what to do with the result.
+fn grouped_video_files_missing_thumbnails(scan: &MediaDedupeScanResult) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut missing = Vec::new();
+    for group in scan.exact_groups.iter().chain(scan.similar_groups.iter()) {
+        for file in &group.files {
+            if file.media_type != "video" || file.thumbnail_path.is_some() {
+                continue;
+            }
+            if seen.insert(file.path.clone()) {
+                missing.push(file.path.clone());
+            }
+        }
+    }
+    missing
+}
+
+fn video_thumbnail_generation_in_flight() -> &'static Mutex<HashSet<String>> {
+    static IN_FLIGHT: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    IN_FLIGHT.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+/// Generates missing thumbnails for videos that ended up in a dedupe result group, so the
+/// UI stops showing the "VIDEO" placeholder for files the scan already flagged as
+/// duplicates. Deliberately scoped to grouped files only (not the whole scanned
+/// inventory) and runs off the calling thread — thumbnail generation (ffmpeg) must never
+/// block serving scan results. `refresh_media_dedupe_thumbnail_paths` re-resolves
+/// `thumbnailPath` on every status serve, so the UI picks up thumbnails as they land
+/// without any extra signalling from here.
+fn spawn_missing_video_thumbnail_generation(scan: &MediaDedupeScanResult) {
+    let candidates = grouped_video_files_missing_thumbnails(scan);
+    if candidates.is_empty() {
+        return;
+    }
+    let to_generate: Vec<String> = {
+        let Ok(mut in_flight) = video_thumbnail_generation_in_flight().lock() else {
+            return;
+        };
+        candidates
+            .into_iter()
+            .filter(|path| in_flight.insert(path.clone()))
+            .collect()
+    };
+    if to_generate.is_empty() {
+        return;
+    }
+    std::thread::spawn(move || {
+        for path in &to_generate {
+            // `generate_media_thumbnail` is idempotent (skips already-current thumbs)
+            // and classifies failures instead of panicking/propagating: a missing
+            // ffmpeg or a corrupt video is logged and skipped, never fails the caller.
+            let _ = workspace_repository::generate_media_thumbnail(Path::new(path));
+        }
+        if let Ok(mut in_flight) = video_thumbnail_generation_in_flight().lock() {
+            for path in &to_generate {
+                in_flight.remove(path);
+            }
+        }
+    });
+}
+
+/// Paths of grouped video files that don't have ffprobe metadata (bitrate/codec/
+/// fps/audio) resolved yet. Pure/testable, same shape as
+/// `grouped_video_files_missing_thumbnails` — the caller decides what to do.
+fn grouped_video_files_missing_metadata(scan: &MediaDedupeScanResult) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut missing = Vec::new();
+    for group in scan.exact_groups.iter().chain(scan.similar_groups.iter()) {
+        for file in &group.files {
+            if file.media_type != "video" {
+                continue;
+            }
+            let has_metadata = file.bitrate_kbps.is_some()
+                || file.video_codec.is_some()
+                || file.frame_rate.is_some()
+                || file.audio_summary.is_some();
+            if has_metadata {
+                continue;
+            }
+            if seen.insert(file.path.clone()) {
+                missing.push(file.path.clone());
+            }
+        }
+    }
+    missing
+}
+
+fn media_metadata_probe_in_flight() -> &'static Mutex<HashSet<String>> {
+    static IN_FLIGHT: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    IN_FLIGHT.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+/// Probes ffprobe metadata (bitrate/codec/fps/audio) for videos that ended up in
+/// a dedupe result group, so the UI's metadata columns fill in progressively
+/// instead of showing `–` forever. Scoped to grouped files only, runs off the
+/// calling thread — ffprobe must never block serving scan results.
+/// `refresh_media_dedupe_metadata` re-resolves the cache on every status serve,
+/// so the UI picks up results as they land without any extra signalling here.
+fn spawn_missing_media_metadata_probe(scan: &MediaDedupeScanResult) {
+    let candidates = grouped_video_files_missing_metadata(scan);
+    if candidates.is_empty() {
+        return;
+    }
+    let to_probe: Vec<String> = {
+        let Ok(mut in_flight) = media_metadata_probe_in_flight().lock() else {
+            return;
+        };
+        candidates
+            .into_iter()
+            .filter(|path| in_flight.insert(path.clone()))
+            .collect()
+    };
+    if to_probe.is_empty() {
+        return;
+    }
+    std::thread::spawn(move || {
+        for path in &to_probe {
+            media_metadata_probe::probe_and_cache(Path::new(path));
+        }
+        if let Ok(mut in_flight) = media_metadata_probe_in_flight().lock() {
+            for path in &to_probe {
+                in_flight.remove(path);
+            }
+        }
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::models::{MediaDedupeFile, MediaDedupeGroup};
 
     #[test]
     fn scanner_excludes_generated_and_profile_assets() {
         assert!(excluded_directory(Path::new(r"C:\media\.thumbs")));
         assert!(excluded_directory(Path::new(r"C:\media\cover")));
+        assert!(excluded_directory(Path::new(
+            r"S:\NinjaCrawler\Twitter\JessKsada\Settings"
+        )));
+        // `excluded_directory` only judges the directory itself; nested folders like
+        // `Settings\Pictures` are never visited because the walker (see
+        // `collect_inventory`) skips pushing excluded directories onto its traversal
+        // stack, so their children are never enumerated either.
+        assert!(!excluded_directory(Path::new(
+            r"S:\NinjaCrawler\Twitter\JessKsada\SettingsBackup"
+        )));
         assert!(excluded_file(Path::new(r"C:\media\ProfilePicture.jpg")));
         assert!(excluded_file(Path::new(r"C:\media\video.mp4.download")));
         assert!(!excluded_file(Path::new(r"C:\media\post.jpg")));
@@ -1720,6 +1898,192 @@ mod tests {
         assert!(canonical.exists());
         assert!(duplicate.exists());
         assert!(same_file::is_same_file(&canonical, &duplicate).expect("hardlink identity"));
+    }
+
+    fn media_file(path: &str, media_type: &str, thumbnail_path: Option<&str>) -> MediaDedupeFile {
+        MediaDedupeFile {
+            path: path.to_string(),
+            source_id: Some("source-1".to_string()),
+            provider: Some("instagram".to_string()),
+            media_type: media_type.to_string(),
+            size_bytes: 1,
+            width: None,
+            height: None,
+            duration_ms: None,
+            thumbnail_path: thumbnail_path.map(str::to_string),
+            modified_at_ms: None,
+            bitrate_kbps: None,
+            video_codec: None,
+            frame_rate: None,
+            audio_summary: None,
+        }
+    }
+
+    fn media_file_with_metadata(path: &str, media_type: &str) -> MediaDedupeFile {
+        MediaDedupeFile {
+            bitrate_kbps: Some(2500),
+            video_codec: Some("h264".to_string()),
+            frame_rate: Some(30.0),
+            audio_summary: Some("aac (stereo)".to_string()),
+            ..media_file(path, media_type, None)
+        }
+    }
+
+    fn group(kind: &str, files: Vec<MediaDedupeFile>) -> MediaDedupeGroup {
+        MediaDedupeGroup {
+            id: format!("{kind}:1"),
+            kind: kind.to_string(),
+            confidence_percent: Some(100),
+            reclaimable_bytes: 0,
+            consolidatable: kind == "exact",
+            reason: None,
+            files,
+        }
+    }
+
+    fn scan_result(
+        exact_groups: Vec<MediaDedupeGroup>,
+        similar_groups: Vec<MediaDedupeGroup>,
+    ) -> MediaDedupeScanResult {
+        MediaDedupeScanResult {
+            scan_id: "scan-1".to_string(),
+            provider_scope: None,
+            source_scope: None,
+            resource_profile: "balanced".to_string(),
+            similarity_scope: "source".to_string(),
+            status: "completed".to_string(),
+            files_scanned: 0,
+            bytes_scanned: 0,
+            exact_group_count: exact_groups.len() as u32,
+            similar_group_count: similar_groups.len() as u32,
+            reclaimable_bytes: 0,
+            skipped_video_similarity_count: 0,
+            started_at: "2026-01-01T00:00:00Z".to_string(),
+            finished_at: Some("2026-01-01T00:00:01Z".to_string()),
+            exact_groups,
+            similar_groups,
+        }
+    }
+
+    #[test]
+    fn missing_thumbnails_only_selects_grouped_videos_without_a_thumbnail() {
+        let scan = scan_result(
+            vec![group(
+                "exact",
+                vec![
+                    media_file(r"C:\media\a.mp4", "video", None),
+                    // Already has a thumbnail — must not be re-selected.
+                    media_file(r"C:\media\b.mp4", "video", Some(r"C:\media\.thumbs\b.mp4.jpg")),
+                    // Images are left alone in this pass.
+                    media_file(r"C:\media\c.jpg", "image", None),
+                ],
+            )],
+            vec![group(
+                "similar",
+                vec![media_file(r"C:\media\d.mp4", "video", None)],
+            )],
+        );
+
+        let mut missing = grouped_video_files_missing_thumbnails(&scan);
+        missing.sort();
+        assert_eq!(
+            missing,
+            vec![r"C:\media\a.mp4".to_string(), r"C:\media\d.mp4".to_string()]
+        );
+    }
+
+    #[test]
+    fn missing_thumbnails_deduplicates_a_video_that_appears_in_multiple_groups() {
+        let scan = scan_result(
+            vec![group(
+                "exact",
+                vec![media_file(r"C:\media\a.mp4", "video", None)],
+            )],
+            vec![group(
+                "similar",
+                vec![media_file(r"C:\media\a.mp4", "video", None)],
+            )],
+        );
+
+        let missing = grouped_video_files_missing_thumbnails(&scan);
+        assert_eq!(missing, vec![r"C:\media\a.mp4".to_string()]);
+    }
+
+    #[test]
+    fn missing_thumbnails_returns_empty_when_no_scan_data_or_nothing_missing() {
+        assert!(grouped_video_files_missing_thumbnails(&scan_result(Vec::new(), Vec::new())).is_empty());
+
+        let scan = scan_result(
+            vec![group(
+                "exact",
+                vec![media_file(
+                    r"C:\media\a.mp4",
+                    "video",
+                    Some(r"C:\media\.thumbs\a.mp4.jpg"),
+                )],
+            )],
+            Vec::new(),
+        );
+        assert!(grouped_video_files_missing_thumbnails(&scan).is_empty());
+    }
+
+    #[test]
+    fn missing_metadata_selects_grouped_videos_without_any_probed_field() {
+        let scan = scan_result(
+            vec![group(
+                "exact",
+                vec![
+                    media_file(r"C:\media\a.mp4", "video", None),
+                    // Already probed — must not be re-selected even though only
+                    // one field is set (audio_summary alone still counts).
+                    media_file_with_metadata(r"C:\media\b.mp4", "video"),
+                    // Images are never probed.
+                    media_file(r"C:\media\c.jpg", "image", None),
+                ],
+            )],
+            vec![group(
+                "similar",
+                vec![media_file(r"C:\media\d.mp4", "video", None)],
+            )],
+        );
+
+        let mut missing = grouped_video_files_missing_metadata(&scan);
+        missing.sort();
+        assert_eq!(
+            missing,
+            vec![r"C:\media\a.mp4".to_string(), r"C:\media\d.mp4".to_string()]
+        );
+    }
+
+    #[test]
+    fn missing_metadata_deduplicates_a_video_that_appears_in_multiple_groups() {
+        let scan = scan_result(
+            vec![group(
+                "exact",
+                vec![media_file(r"C:\media\a.mp4", "video", None)],
+            )],
+            vec![group(
+                "similar",
+                vec![media_file(r"C:\media\a.mp4", "video", None)],
+            )],
+        );
+
+        let missing = grouped_video_files_missing_metadata(&scan);
+        assert_eq!(missing, vec![r"C:\media\a.mp4".to_string()]);
+    }
+
+    #[test]
+    fn missing_metadata_returns_empty_when_nothing_is_missing() {
+        assert!(grouped_video_files_missing_metadata(&scan_result(Vec::new(), Vec::new())).is_empty());
+
+        let scan = scan_result(
+            vec![group(
+                "exact",
+                vec![media_file_with_metadata(r"C:\media\a.mp4", "video")],
+            )],
+            Vec::new(),
+        );
+        assert!(grouped_video_files_missing_metadata(&scan).is_empty());
     }
 
     #[test]

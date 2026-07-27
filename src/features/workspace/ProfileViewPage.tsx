@@ -30,6 +30,7 @@ import { WindowShell } from '../brand/WindowShell'
 import { WindowTitlebar } from '../brand/WindowTitlebar'
 import { MediaCard } from './MediaCard'
 import { MediaLightbox } from './MediaLightbox'
+import { useLightboxSession } from './lightboxSession'
 
 interface ProfileViewPageProps {
   initialSourceId?: string
@@ -447,7 +448,6 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
   }>()
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string>()
-  const [lightboxIndex, setLightboxIndex] = useState<number>()
   const [viewMode, setViewMode] = useState<ViewMode>(readStoredMode)
   const [highlightsMode, setHighlightsMode] = useState<HighlightsMode>(readStoredHighlightsMode)
   const [likesMode, setLikesMode] = useState<LikesMode>(readStoredLikesMode)
@@ -1052,6 +1052,23 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
     return items
   }, [sortedPosts])
 
+  /**
+   * Lightbox grouping key: one carousel = one group.
+   * - multi-file post → group by postId / first file
+   * - shared postId (even if gallery split the post) → same group
+   * - otherwise each file is an isolated vertical item
+   */
+  const lightboxGroupKey = useCallback((item: FlatItem): string => {
+    const postId = item.post.postId?.trim()
+    if (postId) return `pid:${postId}`
+    if (item.post.files.length > 1) return `files:${postKey(item.post)}`
+    return `file:${item.file.relativePath}`
+  }, [])
+
+  // Shared lightbox session: derives contiguous groups (one “post” on the
+  // vertical axis) and owns open/close + post/slide stepping + shrink clamp.
+  const lightbox = useLightboxSession({ items: flatItems, groupKeyFor: lightboxGroupKey })
+
   const firstFlatIndexByPost = useMemo(() => {
     const map = new Map<MediaGalleryPost, number>()
     flatItems.forEach((item, index) => {
@@ -1062,36 +1079,18 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
     return map
   }, [flatItems])
 
+  const { open: openLightboxAt } = lightbox
   const openLightboxForPost = useCallback(
     (post: MediaGalleryPost) => {
       const index = firstFlatIndexByPost.get(post)
       if (index !== undefined) {
-        setLightboxIndex(index)
+        openLightboxAt(index)
       }
     },
-    [firstFlatIndexByPost],
+    [firstFlatIndexByPost, openLightboxAt],
   )
 
-  const closeLightbox = useCallback(() => setLightboxIndex(undefined), [])
-  const stepLightbox = useCallback(
-    (delta: number) => {
-      setLightboxIndex((current) => {
-        if (current === undefined) return current
-        const next = current + delta
-        if (next < 0 || next >= flatItems.length) return current
-        return next
-      })
-    },
-    [flatItems.length],
-  )
-
-  // A lista encolheu (exclusão/refresh) e o índice estourou: gruda no último
-  // item ou fecha quando não sobrou nada.
-  useEffect(() => {
-    if (lightboxIndex !== undefined && lightboxIndex >= flatItems.length) {
-      setLightboxIndex(flatItems.length > 0 ? flatItems.length - 1 : undefined)
-    }
-  }, [flatItems.length, lightboxIndex])
+  const closeLightbox = lightbox.close
 
   /**
    * Shift+Del no lightbox: manda o post ativo para a Lixeira SEM diálogo (o
@@ -1100,6 +1099,7 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
    * então após a exclusão a mesma posição exibe o item seguinte.
    */
   const deleteActivePost = useCallback(async () => {
+    const lightboxIndex = lightbox.index
     if (!sourceId || deleting || lightboxIndex === undefined) return
     const item = flatItems[lightboxIndex]
     if (!item) return
@@ -1112,20 +1112,20 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
         item.post.files.map((file) => file.relativePath),
       )
       setGallery(next)
-      setLightboxIndex(anchor)
+      openLightboxAt(anchor)
     } catch (deleteError) {
       setError(deleteError instanceof Error ? deleteError.message : 'Failed to delete media.')
     } finally {
       setDeleting(false)
     }
-  }, [sourceId, deleting, lightboxIndex, flatItems, firstFlatIndexByPost])
+  }, [sourceId, deleting, lightbox.index, flatItems, firstFlatIndexByPost, openLightboxAt])
   // Ref para o listener de teclado (estável) sempre ver a versão corrente.
   const deleteActivePostRef = useRef(deleteActivePost)
   deleteActivePostRef.current = deleteActivePost
 
   // Atalho destrutivo próprio do Profile View; navegação/seek ficam no
   // MediaLightbox compartilhado.
-  const lightboxOpen = lightboxIndex !== undefined
+  const lightboxOpen = lightbox.index !== undefined
   const lightboxOpenRef = useRef(lightboxOpen)
   lightboxOpenRef.current = lightboxOpen
   useEffect(() => {
@@ -1436,7 +1436,10 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
   }, [sourceId, confirmPosts, exitSelectMode])
 
   const totalMedia = gallery?.posts.reduce((sum, post) => sum + post.files.length, 0) ?? 0
-  const activeItem = lightboxIndex !== undefined ? flatItems[lightboxIndex] : undefined
+  const activeSession = lightbox.active
+  const activeItem = activeSession?.item
+  const activeSlideIndex = activeSession?.slideIndex ?? 0
+  const activeSlideCount = activeSession?.slideCount ?? 1
   // Album (não virtualizado) usa colunas auto-fill; o grid virtualizado fixa o
   // número de colunas (`--pv-cols`) para todas as linhas ficarem alinhadas.
   const gridStyle = { '--pv-thumb-min': `${gridMetrics.min}px` } as CSSProperties
@@ -1570,6 +1573,9 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
         captionTitle={captionTitle}
         captionMeta={captionMeta}
         posterAbsPath={posterSrc}
+        // O virtualizer já limita os cards à viewport; lazy nativo aqui só
+        // adiciona o bug de interseção sob transform (thumbs sumidas até rolar).
+        eagerPoster={isVirtualized}
         // Se um jpg derivado estiver corrompido/inacessível, o MediaCard cai
         // para o próprio vídeo apenas naquele card; não deixa ícone quebrado.
         videoThumbAbsPath={
@@ -1770,7 +1776,7 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
           ) : null}
           {sourceId ? (
             <button
-              className={`ghost-button profile-view-header-action profile-view-sync-now profile-view-dedupe${thisProfileDedupeActive ? ' is-running' : ''}`}
+              className={`ghost-button profile-view-header-action profile-view-dedupe${thisProfileDedupeActive ? ' is-running' : ''}`}
               disabled={dedupeLaunching || (mediaCleanupActive && !thisProfileDedupeActive)}
               onClick={() => void handleDedupe()}
               type="button"
@@ -2554,16 +2560,36 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
         </div>
       ) : null}
 
-      {activeItem ? (
+      {activeItem && activeSession ? (
         <MediaLightbox
           fileAbsPath={activeItem.file.absolutePath}
           isVideo={isVideo(activeItem.file.mediaType)}
-          hasPrev={lightboxIndex! > 0}
-          hasNext={lightboxIndex! < flatItems.length - 1}
-          onPrev={() => stepLightbox(-1)}
-          onNext={() => stepLightbox(1)}
+          hasPrev={activeSession.hasPrev}
+          hasNext={activeSession.hasNext}
+          onPrev={() => lightbox.stepPost(-1)}
+          onNext={() => lightbox.stepPost(1)}
+          hasSlidePrev={activeSession.hasSlidePrev}
+          hasSlideNext={activeSession.hasSlideNext}
+          onSlidePrev={() => lightbox.stepSlide(-1)}
+          onSlideNext={() => lightbox.stepSlide(1)}
           onClose={closeLightbox}
           title={activeItem.post.author ? `@${activeItem.post.author}` : gallery?.handle}
+          caption={activeItem.post.title}
+          meta={[
+            activeItem.post.viewCount !== undefined
+              ? `${compactCount(activeItem.post.viewCount)} views`
+              : '',
+            activeSlideCount > 1 ? `${activeSlideIndex + 1}/${activeSlideCount}` : '',
+          ]
+            .filter(Boolean)
+            .join(' · ') || undefined}
+          audioAbsPath={
+            activeItem.post.mediaType === 'slideshow' ||
+            activeItem.post.files.length > 1 ||
+            activeSlideCount > 1
+              ? activeItem.post.audioAbsolutePath
+              : undefined
+          }
           actions={
             <>
               {isEphemeralStorySection(activeItem.post.section) ? null : (

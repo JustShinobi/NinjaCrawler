@@ -1252,26 +1252,25 @@ where
             .unwrap_or("")
             .to_ascii_lowercase();
         if is_audio_only_video_download(&extension, video_codec) {
-            // TikTok photo-mode posts can expose their soundtrack as an MP4
-            // whose container has no video stream. Do not persist it as a
-            // video; leaving the post unproduced routes it to the image-page
-            // fallback below.
+            // TikTok photo-mode: track becomes an MP4 with no video stream. Save as
+            // `<post_id>_audio.<ext>` for Profile View / lightbox; the post still
+            // falls through to the image fallback (do not mark as produced).
             connector_debug::append_current(
                 "internal.tiktok",
                 "system",
-                "media.audio_only_video_rejected",
+                "media.audio_only_saved_as_soundtrack",
                 format!(
                     "source={}\npost_id={post_id}\nextension={extension}\nvcodec={video_codec}",
                     source_path.display()
                 ),
             );
-            let _ = fs::remove_file(&source_path);
+            let _ = persist_slideshow_audio(request, &source_path, post_id, &extension);
             continue;
         }
         if AUDIO_EXTENSIONS.contains(&extension.as_str()) {
-            // Áudio do slideshow (quando o yt-dlp consegue): descarta — as
-            // imagens vêm do gallery-dl.
-            let _ = fs::remove_file(&source_path);
+            // Slideshow soundtrack (yt-dlp downloads the audio; images come from
+            // the photo-page fallback). Keep on the profile using Single Videos naming.
+            let _ = persist_slideshow_audio(request, &source_path, post_id, &extension);
             continue;
         }
         if VIDEO_EXTENSIONS.contains(&extension.as_str()) && !request.download_videos {
@@ -1340,6 +1339,49 @@ fn is_audio_only_video_download(extension: &str, video_codec: &str) -> bool {
             video_codec.trim().to_ascii_lowercase().as_str(),
             "none" | "audio only"
         )
+}
+
+/// Persist a photo-mode post soundtrack as `<post_id>_audio.<ext>` at the
+/// profile root (same convention as Single Videos / gallery lookup).
+/// Does not mark the post as produced — images still need to be downloaded.
+fn persist_slideshow_audio(
+    request: &TikTokConnectorRequest,
+    source_path: &Path,
+    post_id: &str,
+    extension: &str,
+) -> Result<PathBuf, String> {
+    let ext = extension.trim().trim_start_matches('.').to_ascii_lowercase();
+    if ext.is_empty() {
+        let _ = fs::remove_file(source_path);
+        return Err("missing audio extension".to_string());
+    }
+    if !atomic_file::is_nonempty_file(source_path) {
+        let _ = fs::remove_file(source_path);
+        return Err("empty audio source".to_string());
+    }
+    fs::create_dir_all(&request.profile_root).map_err(|error| error.to_string())?;
+    let destination = request
+        .profile_root
+        .join(format!("{post_id}_audio.{ext}"));
+    if atomic_file::is_nonempty_file(&destination) {
+        let _ = fs::remove_file(source_path);
+        return Ok(destination);
+    }
+    connector_debug::append_current(
+        "internal.tiktok",
+        "call",
+        "media.slideshow_audio_persist",
+        format!(
+            "post_id={post_id}\nsource={}\ndestination={}",
+            source_path.display(),
+            destination.display()
+        ),
+    );
+    if fs::rename(source_path, &destination).is_err() {
+        fs::copy(source_path, &destination).map_err(|error| error.to_string())?;
+        let _ = fs::remove_file(source_path);
+    }
+    Ok(destination)
 }
 
 /// Baixa as imagens de um post de foto (slideshow). O yt-dlp não suporta o

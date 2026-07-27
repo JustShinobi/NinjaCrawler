@@ -1,6 +1,9 @@
 use super::*;
 
 const SINGLE_VIDEOS_ROOT_SETTING_KEY: &str = "storage.single_videos_root";
+/// Nome da pasta appended à base escolhida pelo usuário — o mesmo contrato do
+/// `target_base_path/<handle>` usado ao mudar a pasta de um perfil.
+pub(super) const SINGLE_VIDEOS_FOLDER_NAME: &str = "Single videos";
 
 fn single_video_url_host(url: &str) -> String {
     let after_scheme = url.split_once("://").map(|(_, rest)| rest).unwrap_or(url);
@@ -28,8 +31,25 @@ fn detect_single_video_provider(url: &str) -> Option<&'static str> {
     }
 }
 
-/// Raiz "Single videos" (setting `storage.single_videos_root`; default
-/// `<media_root>/Single videos`). Garante a pasta criada.
+/// Pasta que o media root atual implicaria — apenas o valor sugerido na UI e o
+/// seed do pin abaixo. NÃO é a raiz efetiva: uma vez fixada, a raiz só muda por
+/// `set_single_videos_root`.
+fn single_videos_default_root(
+    connection: &Connection,
+    layout: &StorageLayout,
+) -> Result<PathBuf, String> {
+    let effective = resolve_effective_storage_layout(connection, layout)?;
+    Ok(effective.media_root.join(SINGLE_VIDEOS_FOLDER_NAME))
+}
+
+/// Raiz "Single videos" (setting `storage.single_videos_root`).
+///
+/// A raiz é *fixada* no primeiro uso a partir do media root vigente e daí em
+/// diante é independente dele — mesmo contrato do `special_path` de um perfil, e
+/// o que o About promete ("existing sources keep their save path"). Sem o pin,
+/// trocar o media root re-apontava o catálogo inteiro para uma pasta nova e
+/// vazia enquanto as mídias ficavam para trás. Para mudar de pasta de verdade
+/// (movendo o conteúdo) use `set_single_videos_root`.
 fn single_videos_root(connection: &Connection, layout: &StorageLayout) -> Result<PathBuf, String> {
     if let Some(setting) = load_app_setting_value(connection, SINGLE_VIDEOS_ROOT_SETTING_KEY)? {
         let trimmed = setting.trim();
@@ -39,10 +59,153 @@ fn single_videos_root(connection: &Connection, layout: &StorageLayout) -> Result
             return Ok(root);
         }
     }
-    let effective = resolve_effective_storage_layout(connection, layout)?;
-    let root = effective.media_root.join("Single videos");
+    let root = single_videos_default_root(connection, layout)?;
     fs::create_dir_all(&root).map_err(|error| error.to_string())?;
+    upsert_app_setting_value(
+        connection,
+        SINGLE_VIDEOS_ROOT_SETTING_KEY,
+        &root.to_string_lossy(),
+    )?;
     Ok(root)
+}
+
+/// Quantos itens do catálogo não têm arquivo em disco na raiz atual. É o sinal
+/// que a janela usa para avisar que a pasta apontada não é onde as mídias estão.
+fn count_missing_single_video_files(connection: &Connection, root: &Path) -> Result<u32, String> {
+    let mut statement = connection
+        .prepare("SELECT relative_path FROM single_videos")
+        .map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(|error| error.to_string())?;
+    let mut missing = 0_u32;
+    for row in rows {
+        let relative = row.map_err(|error| error.to_string())?;
+        if !root.join(&relative).exists() {
+            missing = missing.saturating_add(1);
+        }
+    }
+    Ok(missing)
+}
+
+/// Estado da raiz para a janela Single Videos (pasta atual, contagem total e
+/// quantas mídias estão faltando lá).
+pub fn single_videos_root_status() -> Result<SingleVideosRootStatus, String> {
+    with_workspace(|connection, layout| {
+        let root = single_videos_root(connection, layout)?;
+        let total_count = connection
+            .query_row("SELECT COUNT(*) FROM single_videos", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .map_err(|error| error.to_string())?
+            .max(0) as u32;
+        let missing_count = count_missing_single_video_files(connection, &root)?;
+        Ok(SingleVideosRootStatus {
+            root: root.to_string_lossy().to_string(),
+            media_root_default: single_videos_default_root(connection, layout)?
+                .to_string_lossy()
+                .to_string(),
+            total_count,
+            missing_count,
+        })
+    })
+}
+
+/// Move o conteúdo da raiz antiga para a nova. A raiz é plana, então quando o
+/// destino já existe (caso comum: a pasta vazia que o app criou sozinho ao
+/// trocar o media root) mesclamos arquivo a arquivo em vez de recusar a
+/// operação. Colisão de nome com tamanho diferente aborta — não sobrescrevemos
+/// mídia do usuário.
+pub(super) fn merge_single_videos_directory(from: &Path, to: &Path) -> Result<(), String> {
+    fs::create_dir_all(to).map_err(|error| error.to_string())?;
+    for entry in fs::read_dir(from).map_err(|error| error.to_string())?.flatten() {
+        let source_path = entry.path();
+        let Some(file_name) = source_path.file_name() else {
+            continue;
+        };
+        let destination = to.join(file_name);
+        if destination.exists() {
+            let same_size = match (source_path.metadata(), destination.metadata()) {
+                (Ok(left), Ok(right)) => left.len() == right.len(),
+                _ => false,
+            };
+            if same_size {
+                // Já copiado numa tentativa anterior (ou baixado de novo no
+                // destino): descarta a origem em vez de duplicar.
+                if source_path.is_dir() {
+                    fs::remove_dir_all(&source_path).map_err(|error| error.to_string())?;
+                } else {
+                    fs::remove_file(&source_path).map_err(|error| error.to_string())?;
+                }
+                continue;
+            }
+            return Err(format!(
+                "'{}' already exists in the destination with a different size. Resolve it manually before moving.",
+                destination.display()
+            ));
+        }
+        if fs::rename(&source_path, &destination).is_ok() {
+            continue;
+        }
+        if source_path.is_dir() {
+            move_media_directory(&source_path, &destination)?;
+        } else {
+            fs::copy(&source_path, &destination).map_err(|error| error.to_string())?;
+            fs::remove_file(&source_path).map_err(|error| error.to_string())?;
+        }
+    }
+    // Só remove a origem se ela ficou realmente vazia.
+    let _ = fs::remove_dir(from);
+    Ok(())
+}
+
+/// Aponta o Single Videos para `<target_base_path>/Single videos`, opcionalmente
+/// movendo as mídias já baixadas — o mesmo par (novo caminho, mover conteúdo?)
+/// do "change media path" de um perfil. Os `relative_path` do catálogo são
+/// relativos à raiz, então mover a pasta preserva o histórico.
+pub fn set_single_videos_root(
+    target_base_path: String,
+    move_media: bool,
+) -> Result<Vec<SingleVideo>, String> {
+    with_workspace(|connection, layout| {
+        let base = PathBuf::from(target_base_path.trim());
+        if base.as_os_str().is_empty() || !base.is_absolute() {
+            return Err("The new Single videos folder must be an absolute path.".to_string());
+        }
+        let new_root = if base
+            .file_name()
+            .and_then(|value| value.to_str())
+            .is_some_and(|name| name.eq_ignore_ascii_case(SINGLE_VIDEOS_FOLDER_NAME))
+        {
+            // O usuário apontou direto para uma pasta "Single videos" (típico ao
+            // localizar a pasta antiga); não aninha outra dentro dela.
+            base
+        } else {
+            base.join(SINGLE_VIDEOS_FOLDER_NAME)
+        };
+
+        let old_root = single_videos_root(connection, layout)?;
+        if paths_match_case_insensitive(&old_root, &new_root) {
+            upsert_app_setting_value(
+                connection,
+                SINGLE_VIDEOS_ROOT_SETTING_KEY,
+                &new_root.to_string_lossy(),
+            )?;
+            return Ok(());
+        }
+
+        if move_media && old_root.exists() {
+            merge_single_videos_directory(&old_root, &new_root)?;
+        }
+        fs::create_dir_all(&new_root).map_err(|error| error.to_string())?;
+        upsert_app_setting_value(
+            connection,
+            SINGLE_VIDEOS_ROOT_SETTING_KEY,
+            &new_root.to_string_lossy(),
+        )?;
+        Ok(())
+    })?;
+    list_single_videos()
 }
 
 fn single_video_meta_field(fields: &mut std::str::Split<'_, char>) -> Option<String> {

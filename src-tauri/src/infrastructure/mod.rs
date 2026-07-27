@@ -11,6 +11,7 @@ pub mod import_runtime;
 pub mod instagram_connector;
 pub mod media_dedupe_runtime;
 pub mod media_dedupe_vdf;
+pub mod media_metadata_probe;
 pub mod media_tool_runtime;
 pub mod media_path_migration_runtime;
 pub mod media_thumbnail_runtime;

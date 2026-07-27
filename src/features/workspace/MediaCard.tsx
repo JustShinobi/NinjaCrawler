@@ -40,6 +40,13 @@ export interface MediaCardProps {
   onDelete?: () => void
   /** Menu de contexto (botão direito) sobre o card. */
   onContextMenu?: (event: MouseEvent<HTMLElement>) => void
+  /**
+   * Carrega o poster imediatamente em vez de `loading="lazy"`. Obrigatório em
+   * grids virtualizados: as linhas ficam em containers com `transform`, onde o
+   * cálculo de interseção do lazy-load nativo falha durante a abertura da
+   * janela e as imagens só apareceriam após um scroll.
+   */
+  eagerPoster?: boolean
 }
 
 const TRASH_PATH =
@@ -71,6 +78,7 @@ export function MediaCard({
   onReveal,
   onDelete,
   onContextMenu,
+  eagerPoster,
 }: MediaCardProps) {
   // Guardamos qual caminho falhou (não um boolean): quando o card virtualizado
   // é reutilizado com outro poster, o novo caminho volta a ser tentado sem
@@ -103,7 +111,7 @@ export function MediaCard({
           <img
             src={convertFileSrc(usablePoster)}
             alt=""
-            loading="lazy"
+            loading={eagerPoster ? 'eager' : 'lazy'}
             onError={() => setFailedPosterPath(posterAbsPath)}
           />
         ) : videoThumbAbsPath ? (

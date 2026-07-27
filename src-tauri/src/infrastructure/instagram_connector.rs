@@ -131,6 +131,14 @@ pub struct DownloadedInstagramMedia {
     /// case-sensitive), used to rebuild the `instagram.com/p/<code>/` link.
     pub provider_post_code: Option<String>,
     pub captured_at_timestamp: Option<i64>,
+    /// Post caption, when the source carries it. The native sync leaves this
+    /// `None` (the API response is not persisted); legacy imports whose catalog
+    /// stores the caption fill it in.
+    pub title: Option<String>,
+    /// Content hash, when the caller already computed it. Hashing means reading
+    /// the whole file, and the alias/fingerprint ledgers each need it — passing
+    /// it through avoids re-reading gigabytes. `None` makes them compute it.
+    pub file_sha256: Option<String>,
     pub final_file_name: String,
     pub legacy_raw_file_name: Option<String>,
     pub extension: String,
@@ -2069,6 +2077,8 @@ where
                     provider_media_key: planned_asset.asset.provider_media_key.clone(),
                     provider_post_code: planned_asset.asset.provider_post_code.clone(),
                     captured_at_timestamp: planned_asset.asset.captured_at_timestamp,
+                    title: None,
+                    file_sha256: None,
                     final_file_name: planned_asset
                         .destination_path
                         .file_name()
@@ -3507,6 +3517,8 @@ where
                 provider_media_key: asset.provider_media_key.clone(),
                 provider_post_code: asset.provider_post_code.clone(),
                 captured_at_timestamp: asset.captured_at_timestamp,
+                title: None,
+                file_sha256: None,
                 final_file_name: destination_path
                     .file_name()
                     .and_then(|value| value.to_str())

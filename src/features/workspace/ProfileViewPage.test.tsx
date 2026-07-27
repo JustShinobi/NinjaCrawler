@@ -406,6 +406,7 @@ describe('ProfileViewPage', () => {
 
     fireEvent.keyDown(document, { key: 'ArrowRight' })
 
+    // Still on the first (video) post — Open online still targets that URL.
     expect(within(dialog).getByRole('button', { name: /open online/i })).toBeTruthy()
     fireEvent.click(within(dialog).getByRole('button', { name: /open online/i }))
     await waitFor(() => {
@@ -413,6 +414,76 @@ describe('ProfileViewPage', () => {
         'https://www.tiktok.com/@gaaby.tls/video/7624199329925958920',
       )
     })
+  })
+
+  it('shows view count in the lightbox viewing mode', async () => {
+    render(<ProfileViewPage initialSourceId="src-1" />)
+    const thumbs = await screen.findAllByRole('button', { name: /open preview/i })
+    fireEvent.click(thumbs[0])
+    const dialog = await screen.findByRole('dialog')
+    const compact = new Intl.NumberFormat(undefined, {
+      notation: 'compact',
+      maximumFractionDigits: 1,
+    }).format(10)
+    expect(within(dialog).getByText(`${compact} views`)).toBeTruthy()
+  })
+
+  it('navigates carousel photos with horizontal arrows and posts with vertical arrows', async () => {
+    render(<ProfileViewPage initialSourceId="src-1" />)
+    // Second post is the slideshow (2 images).
+    const thumbs = await screen.findAllByRole('button', { name: /open preview/i })
+    fireEvent.click(thumbs[1])
+    const dialog = await screen.findByRole('dialog')
+
+    // First slide of the carousel.
+    fireEvent.click(within(dialog).getByRole('button', { name: /open file/i }))
+    await waitFor(() => {
+      expect(bridgeMocks.openMediaFile).toHaveBeenCalledWith('S:/x/b_0.jpeg')
+    })
+    bridgeMocks.openMediaFile.mockClear()
+
+    // Right arrow advances to the second photo of the same carousel.
+    fireEvent.keyDown(document, { key: 'ArrowRight' })
+    fireEvent.click(within(dialog).getByRole('button', { name: /open file/i }))
+    await waitFor(() => {
+      expect(bridgeMocks.openMediaFile).toHaveBeenCalledWith('S:/x/b_1.jpeg')
+    })
+    bridgeMocks.openMediaFile.mockClear()
+
+    // Left arrow returns to the previous photo.
+    fireEvent.keyDown(document, { key: 'ArrowLeft' })
+    fireEvent.click(within(dialog).getByRole('button', { name: /open file/i }))
+    await waitFor(() => {
+      expect(bridgeMocks.openMediaFile).toHaveBeenCalledWith('S:/x/b_0.jpeg')
+    })
+    bridgeMocks.openMediaFile.mockClear()
+
+    // From mid-carousel, Down jumps to the *next post* — but there is none after
+    // the slideshow in this fixture. Up jumps to the previous post (video).
+    fireEvent.keyDown(document, { key: 'ArrowRight' }) // on slide 1
+    fireEvent.keyDown(document, { key: 'ArrowUp' })
+    fireEvent.click(within(dialog).getByRole('button', { name: /open file/i }))
+    await waitFor(() => {
+      expect(bridgeMocks.openMediaFile).toHaveBeenCalledWith('S:/x/a.mp4')
+    })
+  })
+
+  it('plays carousel audio in the lightbox when the gallery exposes it', async () => {
+    const gallery = galleryFixture()
+    gallery.posts[1] = {
+      ...gallery.posts[1]!,
+      audioAbsolutePath: 'S:/x/7600000000000000000_audio.m4a',
+      audioRelativePath: '7600000000000000000_audio.m4a',
+    }
+    bridgeMocks.loadSourceMediaGallery.mockResolvedValue(gallery)
+
+    render(<ProfileViewPage initialSourceId="src-1" />)
+    const thumbs = await screen.findAllByRole('button', { name: /open preview/i })
+    fireEvent.click(thumbs[1])
+    const dialog = await screen.findByRole('dialog')
+    const audio = dialog.querySelector('audio')
+    expect(audio).toBeTruthy()
+    expect(audio?.getAttribute('src')).toContain('7600000000000000000_audio.m4a')
   })
 
   it('multi-selects posts and deletes them via the backend', async () => {

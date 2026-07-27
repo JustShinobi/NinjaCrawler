@@ -154,6 +154,13 @@ describe('loadWorkspaceSnapshot', () => {
 
   it('subscribes to scheduler, queue, import, route, and runtime-log events from tauri', async () => {
     const desktop = await import('./desktop')
+    const pulledSnapshot = createEmptyWorkspaceSnapshot()
+    pulledSnapshot.desktopRuntime.reportedByBackend = true
+    // The snapshot-changed event is now a payload-less ping: the handler pulls
+    // the snapshot via `get_workspace_snapshot`.
+    invokeMock.mockImplementation(async (command: string) =>
+      command === 'get_workspace_snapshot' ? pulledSnapshot : undefined,
+    )
     const onSchedulerTick = vi.fn()
     const onWorkspaceSnapshotChanged = vi.fn()
     const onRouteActivation = vi.fn()
@@ -171,9 +178,7 @@ describe('loadWorkspaceSnapshot', () => {
     })
 
     eventHandlers.get('runtime://scheduler-tick')?.({ payload: undefined })
-    const snapshot = createEmptyWorkspaceSnapshot()
-    snapshot.desktopRuntime.reportedByBackend = true
-    eventHandlers.get('runtime://workspace-snapshot-changed')?.({ payload: snapshot })
+    eventHandlers.get('runtime://workspace-snapshot-changed')?.({ payload: undefined })
     eventHandlers.get('runtime://source-sync-queue-changed')?.({
       payload: {
         queuedCount: 1,
@@ -245,6 +250,9 @@ describe('loadWorkspaceSnapshot', () => {
         detail: 'Requested by user.',
       },
     })
+
+    // Let the debounced snapshot pull settle before asserting.
+    await new Promise((resolve) => setTimeout(resolve, 200))
 
     expect(onSchedulerTick).toHaveBeenCalledTimes(1)
     expect(onWorkspaceSnapshotChanged).toHaveBeenCalledWith(

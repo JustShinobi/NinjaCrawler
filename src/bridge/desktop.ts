@@ -82,6 +82,7 @@ import type {
   SingleVideoQueueItem,
   SingleVideoQueueRecentResult,
   SingleVideoQueueStatus,
+  SingleVideosRootStatus,
   SourceMediaGallery,
   MediaGalleryPost,
   MediaThumbnailQueueStatus,
@@ -2163,6 +2164,12 @@ function normalizeMediaDedupeFile(value: unknown): MediaDedupeFile | null {
     width: optionalNumberValue(value, ['width']),
     height: optionalNumberValue(value, ['height']),
     durationMs: optionalNumberValue(value, ['durationMs', 'duration_ms']),
+    thumbnailPath: optionalStringValue(value, ['thumbnailPath', 'thumbnail_path']),
+    modifiedAt: optionalNumberValue(value, ['modifiedAt', 'modified_at', 'modifiedAtMs', 'modified_at_ms']),
+    bitrateKbps: optionalNumberValue(value, ['bitrateKbps', 'bitrate_kbps']),
+    videoCodec: optionalStringValue(value, ['videoCodec', 'video_codec']),
+    frameRate: optionalNumberValue(value, ['frameRate', 'frame_rate']),
+    audioSummary: optionalStringValue(value, ['audioSummary', 'audio_summary']),
   }
 }
 
@@ -2220,6 +2227,7 @@ function normalizeMediaDedupeJobStatus(raw: unknown): MediaDedupeJobStatus {
       : undefined,
     sourceScope: optionalStringValue(value, ['sourceScope', 'source_scope']),
     resourceProfile: enumValue(pick(value, 'resourceProfile', 'resource_profile'), ['quiet', 'balanced', 'fast'] as const, 'balanced'),
+    scanProfile: enumValue(pick(value, 'scanProfile', 'scan_profile'), ['recommended', 'ai', 'deep'] as const, 'recommended'),
     similarityScope: 'source',
     filesProcessed: numberValue(value, ['filesProcessed', 'files_processed'], 0),
     filesTotal: numberValue(value, ['filesTotal', 'files_total'], 0),
@@ -2337,8 +2345,27 @@ export async function loadWorkspaceSnapshot(): Promise<WorkspaceSnapshot> {
   return invokeWorkspaceCommand('bootstrap_workspace', undefined)
 }
 
+/**
+ * Cheap async pull for the current workspace snapshot. Backends the reaction to
+ * a "snapshot changed" ping: the event now carries no payload, so windows fetch
+ * the snapshot on demand instead of receiving ~8 MB per emission.
+ */
+export async function pullWorkspaceSnapshot(): Promise<WorkspaceSnapshot> {
+  return invokeWorkspaceCommand('get_workspace_snapshot', undefined)
+}
+
 export async function loadWorkspaceHealth(): Promise<WorkspaceHealthSnapshot> {
   return normalizeWorkspaceHealth(await invoke<unknown>('load_workspace_health'))
+}
+
+/** Open a file under the app logs directory (OS shell — not opener scope). */
+export async function openAppLogFile(path: string): Promise<void> {
+  await invoke<void>('open_app_log_file', { path })
+}
+
+/** Reveal a log file under the app logs directory in the file manager. */
+export async function revealAppLogFile(path: string): Promise<void> {
+  await invoke<void>('reveal_app_log_file', { path })
 }
 
 export async function loadMediaDedupeStatus(): Promise<MediaDedupeJobStatus> {
@@ -2421,12 +2448,28 @@ export async function subscribeToDesktopRuntimeEvents(handlers: {
   onConnectorRuntimeChanged?: () => void
   onRuntimeLogAppended?: (entry: RuntimeLogEntry) => void
 }): Promise<() => void> {
+  // The snapshot-changed event is now a payload-less ping; pull the snapshot
+  // asynchronously and debounce bursts (several pings can arrive back-to-back
+  // when multiple mutations land together).
+  let snapshotPullTimer: ReturnType<typeof setTimeout> | null = null
+  const requestSnapshotPull = () => {
+    if (snapshotPullTimer !== null) {
+      return
+    }
+    snapshotPullTimer = setTimeout(() => {
+      snapshotPullTimer = null
+      void pullWorkspaceSnapshot()
+        .then((snapshot) => handlers.onWorkspaceSnapshotChanged?.(snapshot))
+        .catch(() => {})
+    }, 150)
+  }
+
   const unlisteners = await Promise.all([
     listen(DESKTOP_SCHEDULER_TICK_EVENT_NAME, () => {
       handlers.onSchedulerTick?.()
     }),
-    listen(DESKTOP_WORKSPACE_SNAPSHOT_CHANGED_EVENT_NAME, (event) => {
-      handlers.onWorkspaceSnapshotChanged?.(replaceLocalSnapshot(event.payload))
+    listen(DESKTOP_WORKSPACE_SNAPSHOT_CHANGED_EVENT_NAME, () => {
+      requestSnapshotPull()
     }),
     listen(DESKTOP_CONNECTOR_RUNTIME_CHANGED_EVENT_NAME, () => {
       handlers.onConnectorRuntimeChanged?.()
@@ -2460,6 +2503,10 @@ export async function subscribeToDesktopRuntimeEvents(handlers: {
   ])
 
   return () => {
+    if (snapshotPullTimer !== null) {
+      clearTimeout(snapshotPullTimer)
+      snapshotPullTimer = null
+    }
     for (const unlisten of unlisteners) {
       unlisten()
     }
@@ -3027,6 +3074,8 @@ function parseSourceMediaGallery(raw: unknown, sourceId: string): SourceMediaGal
         absolutePath: stringValue(file, ['absolutePath', 'absolute_path'], ''),
         mediaType: stringValue(file, ['mediaType', 'media_type'], 'image'),
       })),
+      audioRelativePath: optionalStringValue(post, ['audioRelativePath', 'audio_relative_path']),
+      audioAbsolutePath: optionalStringValue(post, ['audioAbsolutePath', 'audio_absolute_path']),
     })),
   }
 }
@@ -3248,6 +3297,31 @@ export async function listSingleVideos(): Promise<SingleVideo[]> {
 
 export async function deleteSingleVideo(id: string): Promise<SingleVideo[]> {
   const raw = await invoke<unknown>('delete_single_video', buildInvokeArgs({ id }, { id }))
+  return (Array.isArray(raw) ? raw : []).map(parseSingleVideo)
+}
+
+export async function loadSingleVideosRootStatus(): Promise<SingleVideosRootStatus> {
+  const raw = await invoke<unknown>('single_videos_root_status')
+  const value = isRecord(raw) ? raw : {}
+  return {
+    root: stringValue(value, ['root'], ''),
+    mediaRootDefault: stringValue(value, ['mediaRootDefault', 'media_root_default'], ''),
+    totalCount: numberValue(value, ['totalCount', 'total_count'], 0),
+    missingCount: numberValue(value, ['missingCount', 'missing_count'], 0),
+  }
+}
+
+export async function setSingleVideosRoot(
+  targetBasePath: string,
+  moveMedia: boolean,
+): Promise<SingleVideo[]> {
+  const raw = await invoke<unknown>(
+    'set_single_videos_root',
+    buildInvokeArgs(
+      { targetBasePath, moveMedia },
+      { target_base_path: targetBasePath, move_media: moveMedia },
+    ),
+  )
   return (Array.isArray(raw) ? raw : []).map(parseSingleVideo)
 }
 
