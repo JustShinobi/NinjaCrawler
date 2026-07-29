@@ -266,6 +266,25 @@ fn derive_review_item_post_url_resolves_tiktok_from_file_name() {
 }
 
 #[test]
+fn slideshow_audio_is_not_treated_as_gallery_video_or_review_media() {
+    assert!(is_slideshow_audio_file("7359169533522840833_audio.mp4"));
+    assert!(derive_post_metadata("tiktok", "7359169533522840833_audio.mp4", None).is_none());
+}
+
+#[test]
+fn derive_review_item_post_url_resolves_timestamped_tiktok_imports() {
+    assert_eq!(
+        derive_review_item_post_url(
+            "tiktok",
+            "@mave884473",
+            "2025-12-18 10.25.28 7585188510769089810_031.mp4",
+        )
+        .as_deref(),
+        Some("https://www.tiktok.com/@mave884473/video/7585188510769089810")
+    );
+}
+
+#[test]
 fn derive_review_item_post_url_is_none_for_instagram_file_names() {
     // Instagram shortcodes only live in the ledger, never in the file name, so
     // the file-name-only review path can't recover them — the review item
@@ -497,8 +516,7 @@ fn find_slideshow_audio_discovers_post_id_audio_next_to_images() {
     }];
     fs::write(root.join("7658099397019831573_audio.m4a"), b"audio").expect("audio");
 
-    let (relative, absolute) =
-        find_slideshow_audio(root, &images, Some("7658099397019831573"));
+    let (relative, absolute) = find_slideshow_audio(root, &images, Some("7658099397019831573"));
     assert_eq!(relative.as_deref(), Some("7658099397019831573_audio.m4a"));
     assert!(absolute
         .as_deref()
@@ -570,14 +588,20 @@ fn merge_single_videos_directory_keeps_identical_duplicates_and_refuses_conflict
 
     merge_single_videos_directory(&from, &to).expect("merge");
     assert!(to.join("same.mp4").exists());
-    assert!(!from.join("same.mp4").exists(), "duplicata idêntica é descartada");
+    assert!(
+        !from.join("same.mp4").exists(),
+        "duplicata idêntica é descartada"
+    );
 
     fs::create_dir_all(&from).expect("old root again");
     fs::write(from.join("clash.mp4"), b"longer content").expect("source");
     fs::write(to.join("clash.mp4"), b"short").expect("destination");
 
     let error = merge_single_videos_directory(&from, &to).expect_err("conflito deve falhar");
-    assert!(error.contains("different size"), "mensagem inesperada: {error}");
+    assert!(
+        error.contains("different size"),
+        "mensagem inesperada: {error}"
+    );
     assert!(
         from.join("clash.mp4").exists(),
         "a mídia de origem não pode ser perdida no conflito"
@@ -788,12 +812,16 @@ fn deleted_post_keys_suppress_future_syncs_for_every_provider() {
             .expect("tombstone");
     }
 
-    assert!(load_provider_deleted_post_keys(&connection, "twitter", "source-1")
-        .expect("twitter keys")
-        .contains("12345"));
-    assert!(load_provider_deleted_post_keys(&connection, "tiktok", "source-1")
-        .expect("tiktok keys")
-        .contains("67890"));
+    assert!(
+        load_provider_deleted_post_keys(&connection, "twitter", "source-1")
+            .expect("twitter keys")
+            .contains("12345")
+    );
+    assert!(
+        load_provider_deleted_post_keys(&connection, "tiktok", "source-1")
+            .expect("tiktok keys")
+            .contains("67890")
+    );
     assert!(load_instagram_deleted_post_keys(&connection, "source-1")
         .expect("instagram keys")
         .contains("abc_12"));
@@ -1025,65 +1053,71 @@ fn purge_provider_ledgers_missing_on_disk_unblocks_redownload_after_partial_dele
 fn reconcile_tiktok_provider_ledgers_seeds_existing_files() {
     let (_temp_dir, layout) = create_test_layout();
 
-    let (recovered, post_count, media_count, thumbnail_count, liked_timeline_count, liked_likes_count) =
-        with_workspace_layout(layout, |connection, test_layout| {
-            upsert_provider_account_with_connection(
-                connection,
-                test_layout,
-                sample_account("account-1", "tiktok"),
-            )?;
-            let mut source = sample_source("source-1", "tiktok", Some("account-1"));
-            source.handle = "@archangelszxx".to_string();
-            upsert_source_profile_with_connection(connection, test_layout, source)?;
+    let (
+        recovered,
+        post_count,
+        media_count,
+        thumbnail_count,
+        liked_timeline_count,
+        liked_likes_count,
+    ) = with_workspace_layout(layout, |connection, test_layout| {
+        upsert_provider_account_with_connection(
+            connection,
+            test_layout,
+            sample_account("account-1", "tiktok"),
+        )?;
+        let mut source = sample_source("source-1", "tiktok", Some("account-1"));
+        source.handle = "@archangelszxx".to_string();
+        upsert_source_profile_with_connection(connection, test_layout, source)?;
 
-            let profile_root = test_layout.media_root.join("tiktok").join("@archangelszxx");
-            fs::create_dir_all(profile_root.join(".thumbs")).map_err(|error| error.to_string())?;
-            fs::create_dir_all(profile_root.join("Settings")).map_err(|error| error.to_string())?;
-            fs::write(
-                profile_root.join("2026-07-07 12.04.09 7659802061789302034_001.jpg"),
-                b"image",
-            )
+        let profile_root = test_layout.media_root.join("tiktok").join("@archangelszxx");
+        fs::create_dir_all(profile_root.join(".thumbs")).map_err(|error| error.to_string())?;
+        fs::create_dir_all(profile_root.join("Settings")).map_err(|error| error.to_string())?;
+        fs::write(
+            profile_root.join("2026-07-07 12.04.09 7659802061789302034_001.jpg"),
+            b"image",
+        )
+        .map_err(|error| error.to_string())?;
+        fs::write(
+            profile_root.join("archangelszxx_1775147243_7624199329925958920.mp4"),
+            b"video",
+        )
+        .map_err(|error| error.to_string())?;
+        fs::write(profile_root.join("ProfilePicture.jpg"), b"avatar")
             .map_err(|error| error.to_string())?;
-            fs::write(
-                profile_root.join("archangelszxx_1775147243_7624199329925958920.mp4"),
-                b"video",
-            )
-            .map_err(|error| error.to_string())?;
-            fs::write(profile_root.join("ProfilePicture.jpg"), b"avatar")
-                .map_err(|error| error.to_string())?;
-            fs::write(
-                profile_root
-                    .join(".thumbs")
-                    .join("2026-07-07 12.04.09 7659802061789302034_001.jpg"),
-                b"thumb",
-            )
-            .map_err(|error| error.to_string())?;
-            fs::write(
-                profile_root
-                    .join("Settings")
-                    .join("7659802061789302034_001.jpg"),
-                b"settings",
-            )
-            .map_err(|error| error.to_string())?;
-            // Liked videos are owned by the likes runtime (section "likes"); the
-            // timeline reconcile must skip them so it never shadows that section
-            // with a competing "timeline" row on the same relative path.
-            fs::create_dir_all(profile_root.join("Liked")).map_err(|error| error.to_string())?;
-            fs::write(
-                profile_root
-                    .join("Liked")
-                    .join("eujhulys_1743950164_7490208900055190789.mp4"),
-                b"liked video",
-            )
-            .map_err(|error| error.to_string())?;
-            // Simulate a database left behind by an older build: the same liked
-            // file has both the likes runtime's legitimate "likes" row and the
-            // bogus "timeline" row a previous reconcile wrote (keyed by file name,
-            // lowercased path). The reconcile must purge the latter and keep the
-            // former.
-            connection
-                .execute_batch(
-                    "INSERT INTO provider_sync_media_ledger
+        fs::write(
+            profile_root
+                .join(".thumbs")
+                .join("2026-07-07 12.04.09 7659802061789302034_001.jpg"),
+            b"thumb",
+        )
+        .map_err(|error| error.to_string())?;
+        fs::write(
+            profile_root
+                .join("Settings")
+                .join("7659802061789302034_001.jpg"),
+            b"settings",
+        )
+        .map_err(|error| error.to_string())?;
+        // Liked videos are owned by the likes runtime (section "likes"); the
+        // timeline reconcile must skip them so it never shadows that section
+        // with a competing "timeline" row on the same relative path.
+        fs::create_dir_all(profile_root.join("Liked")).map_err(|error| error.to_string())?;
+        fs::write(
+            profile_root
+                .join("Liked")
+                .join("eujhulys_1743950164_7490208900055190789.mp4"),
+            b"liked video",
+        )
+        .map_err(|error| error.to_string())?;
+        // Simulate a database left behind by an older build: the same liked
+        // file has both the likes runtime's legitimate "likes" row and the
+        // bogus "timeline" row a previous reconcile wrote (keyed by file name,
+        // lowercased path). The reconcile must purge the latter and keep the
+        // former.
+        connection
+            .execute_batch(
+                "INSERT INTO provider_sync_media_ledger
                         (provider, source_id, account_id, source_handle,
                          provider_media_key, media_type, media_section, relative_path,
                          first_seen_at, last_seen_at)
@@ -1094,74 +1128,74 @@ fn reconcile_tiktok_provider_ledgers_seeds_existing_files() {
                         ('tiktok','source-1','account-1','@archangelszxx',
                          'eujhulys_1743950164_7490208900055190789.mp4','video','timeline',
                          'liked/eujhulys_1743950164_7490208900055190789.mp4','t0','t0');",
-                )
-                .map_err(|error| error.to_string())?;
+            )
+            .map_err(|error| error.to_string())?;
 
-            let reconcile = reconcile_tiktok_provider_ledgers(
-                connection,
-                &profile_root,
-                "account-1",
-                "source-1",
-                "@archangelszxx",
-                "2026-07-08T00:00:00Z",
-            )?;
-            let recovered = reconcile.recovered_from_disk;
-            let post_count: i64 = connection
-                .query_row(
-                    "SELECT COUNT(*) FROM provider_sync_post_ledger
+        let reconcile = reconcile_tiktok_provider_ledgers(
+            connection,
+            &profile_root,
+            "account-1",
+            "source-1",
+            "@archangelszxx",
+            "2026-07-08T00:00:00Z",
+        )?;
+        let recovered = reconcile.recovered_from_disk;
+        let post_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM provider_sync_post_ledger
                      WHERE provider = 'tiktok' AND source_id = 'source-1'",
-                    [],
-                    |row| row.get(0),
-                )
-                .map_err(|error| error.to_string())?;
-            let media_count: i64 = connection
-                .query_row(
-                    "SELECT COUNT(*) FROM provider_sync_media_ledger
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())?;
+        let media_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM provider_sync_media_ledger
                      WHERE provider = 'tiktok' AND source_id = 'source-1'",
-                    [],
-                    |row| row.get(0),
-                )
-                .map_err(|error| error.to_string())?;
-            let thumbnail_count: i64 = connection
-                .query_row(
-                    "SELECT COUNT(*) FROM provider_sync_media_ledger
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())?;
+        let thumbnail_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM provider_sync_media_ledger
                      WHERE provider = 'tiktok' AND source_id = 'source-1'
                        AND relative_path LIKE '%.thumbs%'",
-                    [],
-                    |row| row.get(0),
-                )
-                .map_err(|error| error.to_string())?;
-            // Bogus reconciled row (lowercased `liked/...`, section "timeline").
-            let liked_timeline_count: i64 = connection
-                .query_row(
-                    "SELECT COUNT(*) FROM provider_sync_media_ledger
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())?;
+        // Bogus reconciled row (lowercased `liked/...`, section "timeline").
+        let liked_timeline_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM provider_sync_media_ledger
                      WHERE provider = 'tiktok' AND source_id = 'source-1'
                        AND media_section = 'timeline'
                        AND relative_path LIKE 'liked/%'",
-                    [],
-                    |row| row.get(0),
-                )
-                .map_err(|error| error.to_string())?;
-            // Legitimate likes runtime row (keyed by `liked_<id>`, section "likes").
-            let liked_likes_count: i64 = connection
-                .query_row(
-                    "SELECT COUNT(*) FROM provider_sync_media_ledger
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())?;
+        // Legitimate likes runtime row (keyed by `liked_<id>`, section "likes").
+        let liked_likes_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM provider_sync_media_ledger
                      WHERE provider = 'tiktok' AND source_id = 'source-1'
                        AND media_section = 'likes'",
-                    [],
-                    |row| row.get(0),
-                )
-                .map_err(|error| error.to_string())?;
-            Ok((
-                recovered,
-                post_count,
-                media_count,
-                thumbnail_count,
-                liked_timeline_count,
-                liked_likes_count,
-            ))
-        })
-        .expect("existing TikTok files should seed provider ledgers");
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())?;
+        Ok((
+            recovered,
+            post_count,
+            media_count,
+            thumbnail_count,
+            liked_timeline_count,
+            liked_likes_count,
+        ))
+    })
+    .expect("existing TikTok files should seed provider ledgers");
 
     assert_eq!(recovered, 2);
     assert_eq!(post_count, 2);
@@ -2978,41 +3012,45 @@ fn changing_the_account_media_path_pins_existing_sources_to_their_current_root()
     let (temp_dir, layout) = create_test_layout();
     let custom_media_root = temp_dir.path().join("custom-instagram-media");
 
-    let (resolved_root, expected_root) = with_workspace_layout(layout, |connection, test_layout| {
-        upsert_provider_account_with_connection(
-            connection,
-            test_layout,
-            sample_account("account-1", "instagram"),
-        )?;
-        upsert_source_profile_with_connection(
-            connection,
-            test_layout,
-            sample_source("source-1", "instagram", Some("account-1")),
-        )?;
+    let (resolved_root, expected_root) =
+        with_workspace_layout(layout, |connection, test_layout| {
+            upsert_provider_account_with_connection(
+                connection,
+                test_layout,
+                sample_account("account-1", "instagram"),
+            )?;
+            upsert_source_profile_with_connection(
+                connection,
+                test_layout,
+                sample_source("source-1", "instagram", Some("account-1")),
+            )?;
 
-        let before = load_sources(connection)?
-            .into_iter()
-            .find(|item| item.id == "source-1")
-            .ok_or_else(|| "source should exist".to_string())?;
-        let root_before =
-            resolved_source_media_output_root_with_connection(connection, test_layout, &before)?;
+            let before = load_sources(connection)?
+                .into_iter()
+                .find(|item| item.id == "source-1")
+                .ok_or_else(|| "source should exist".to_string())?;
+            let root_before = resolved_source_media_output_root_with_connection(
+                connection,
+                test_layout,
+                &before,
+            )?;
 
-        save_provider_account_settings_with_connection(
-            connection,
-            test_layout,
-            "account-1".to_string(),
-            vec![instagram_media_path_setting(&custom_media_root)],
-        )?;
+            save_provider_account_settings_with_connection(
+                connection,
+                test_layout,
+                "account-1".to_string(),
+                vec![instagram_media_path_setting(&custom_media_root)],
+            )?;
 
-        let after = load_sources(connection)?
-            .into_iter()
-            .find(|item| item.id == "source-1")
-            .ok_or_else(|| "source should exist".to_string())?;
-        let root_after =
-            resolved_source_media_output_root_with_connection(connection, test_layout, &after)?;
-        Ok((root_after, root_before))
-    })
-    .expect("source root should resolve");
+            let after = load_sources(connection)?
+                .into_iter()
+                .find(|item| item.id == "source-1")
+                .ok_or_else(|| "source should exist".to_string())?;
+            let root_after =
+                resolved_source_media_output_root_with_connection(connection, test_layout, &after)?;
+            Ok((root_after, root_before))
+        })
+        .expect("source root should resolve");
 
     assert_eq!(
         resolved_root, expected_root,
@@ -3928,9 +3966,7 @@ fn ensure_avatar_thumbnail_generates_and_invalidates_by_mtime() {
             .map(|entries| {
                 entries
                     .flatten()
-                    .filter(|entry| {
-                        entry.file_name().to_string_lossy().starts_with("source-1.")
-                    })
+                    .filter(|entry| entry.file_name().to_string_lossy().starts_with("source-1."))
                     .count()
             })
             .unwrap_or(0)
@@ -3970,8 +4006,14 @@ fn ensure_avatar_thumbnail_generates_and_invalidates_by_mtime() {
         .expect("replacement avatar");
     let regenerated = ensure_avatar_thumbnail(&layout, "source-1", &original_path)
         .expect("thumbnail should regenerate");
-    assert_ne!(regenerated, thumb_path, "a changed avatar yields a new thumb path");
-    assert!(!Path::new(&thumb_path).exists(), "the stale thumb is removed");
+    assert_ne!(
+        regenerated, thumb_path,
+        "a changed avatar yields a new thumb path"
+    );
+    assert!(
+        !Path::new(&thumb_path).exists(),
+        "the stale thumb is removed"
+    );
     assert_eq!(count_thumbs(), 1, "old versions must not accumulate");
     let decoded = image::open(&regenerated).expect("regenerated thumb should decode");
     assert_eq!(
@@ -4000,7 +4042,10 @@ fn ensure_image_thumbnail_generates_beside_media_and_invalidates_by_mtime() {
     let thumb = ensure_image_thumbnail(&photo).expect("thumbnail should generate");
     let thumb_path = PathBuf::from(&thumb);
     // Convenção `.thumbs/<arquivo>.jpg` ao lado da mídia (mesma dos vídeos).
-    assert_eq!(thumb_path.parent(), Some(media_dir.join(".thumbs").as_path()));
+    assert_eq!(
+        thumb_path.parent(),
+        Some(media_dir.join(".thumbs").as_path())
+    );
     assert_eq!(
         thumb_path.file_name().and_then(|n| n.to_str()),
         Some("2026-05-19_photo.jpg.jpg")
@@ -4016,9 +4061,14 @@ fn ensure_image_thumbnail_generates_beside_media_and_invalidates_by_mtime() {
     let first_mtime = fs::metadata(&thumb_path)
         .and_then(|m| m.modified())
         .expect("mtime");
-    assert_eq!(ensure_image_thumbnail(&photo).as_deref(), Some(thumb.as_str()));
     assert_eq!(
-        fs::metadata(&thumb_path).and_then(|m| m.modified()).unwrap(),
+        ensure_image_thumbnail(&photo).as_deref(),
+        Some(thumb.as_str())
+    );
+    assert_eq!(
+        fs::metadata(&thumb_path)
+            .and_then(|m| m.modified())
+            .unwrap(),
         first_mtime,
         "thumb atual não deve ser reescrito"
     );
@@ -4138,7 +4188,9 @@ fn non_visual_mp4_thumbnail_is_invalid_media_not_hard_fail() {
         return;
     };
     let temp_dir = tempfile::tempdir().expect("temp dir");
-    let audio_only = temp_dir.path().join("audio-only.mp4");
+    let audio_only = temp_dir
+        .path()
+        .join("14.rosaaa_1763805807_7575488232796851478.mp4");
     let status = std::process::Command::new(&ffmpeg)
         .args([
             "-hide_banner",
@@ -4175,11 +4227,79 @@ fn non_visual_mp4_thumbnail_is_invalid_media_not_hard_fail() {
         other => panic!("expected InvalidMedia for non-visual media, got {other:?}"),
     }
     assert!(
+        media_has_audio_stream(&audio_only),
+        "the legacy MP4 soundtrack must be preserved during carousel reconciliation"
+    );
+    assert!(
         !video_thumbnail_path(&audio_only)
             .map(|path| path.is_file())
             .unwrap_or(false),
         "non-visual media must not produce a thumb file"
     );
+    let candidates = tiktok_thumbnail_reconcile_candidates(temp_dir.path());
+    assert_eq!(
+        candidates
+            .get("7575488232796851478")
+            .map(Vec::as_slice),
+        Some([audio_only].as_slice()),
+        "TikTok sync must discover legacy audio-only MP4s without waiting for a thumbnail job"
+    );
+}
+
+#[test]
+fn tiktok_carousel_without_soundtrack_is_retried_until_audio_exists() {
+    let temp_dir = tempfile::tempdir().expect("temp dir");
+    let post_id = "7526796784824257848";
+    fs::write(
+        temp_dir.path().join(format!("{post_id}_001.jpeg")),
+        b"image one",
+    )
+    .expect("first image");
+    fs::write(
+        temp_dir.path().join(format!("{post_id}_002.jpeg")),
+        b"image two",
+    )
+    .expect("second image");
+    assert_eq!(
+        tiktok_carousel_posts_missing_audio(temp_dir.path()),
+        HashSet::from([post_id.to_string()])
+    );
+
+    fs::write(
+        temp_dir.path().join(format!("{post_id}_audio.mp4")),
+        b"soundtrack",
+    )
+    .expect("soundtrack");
+    assert!(tiktok_carousel_posts_missing_audio(temp_dir.path()).is_empty());
+}
+
+#[test]
+fn tiktok_thumbnail_markers_drive_reconciliation_and_persistent_skip() {
+    let temp_dir = tempfile::tempdir().expect("temp dir");
+    let media = temp_dir
+        .path()
+        .join("14.rosaaa_1763805807_7575488232796851478.mp4");
+    fs::write(&media, b"legacy audio-only media").expect("legacy media");
+
+    mark_media_thumbnail_reconcile_candidate(&media).expect("reconcile marker");
+    assert!(media_thumbnail_needs_reconciliation(&media));
+    let candidates = tiktok_thumbnail_reconcile_candidates(temp_dir.path());
+    assert_eq!(
+        candidates
+            .get("7575488232796851478")
+            .map(Vec::as_slice),
+        Some([media.clone()].as_slice())
+    );
+
+    let thumbs = temp_dir.path().join(".thumbs");
+    fs::write(
+        thumbs.join("14.rosaaa_1763805807_7575488232796851478.mp4.skip"),
+        b"thumbnail-skip-v1\n",
+    )
+    .expect("skip marker");
+    assert!(media_thumbnail_is_skipped(&media));
+    assert!(!media_thumbnail_needs_reconciliation(&media));
+    assert!(tiktok_thumbnail_reconcile_candidates(temp_dir.path()).is_empty());
 }
 
 #[test]
@@ -4189,7 +4309,10 @@ fn ensure_avatar_thumbnail_returns_none_for_undecodable_input() {
     fs::write(&original_path, b"not an image at all").expect("bogus avatar");
 
     let result = ensure_avatar_thumbnail(&layout, "source-1", &original_path);
-    assert!(result.is_none(), "undecodable input should not produce a thumb");
+    assert!(
+        result.is_none(),
+        "undecodable input should not produce a thumb"
+    );
     let thumbs_dir = layout.cache_root.join("avatar-thumbs");
     let generated = fs::read_dir(&thumbs_dir)
         .map(|entries| {
@@ -4198,7 +4321,10 @@ fn ensure_avatar_thumbnail_returns_none_for_undecodable_input() {
                 .any(|entry| entry.file_name().to_string_lossy().starts_with("source-1."))
         })
         .unwrap_or(false);
-    assert!(!generated, "no thumb file should be written for undecodable input");
+    assert!(
+        !generated,
+        "no thumb file should be written for undecodable input"
+    );
 }
 
 #[test]

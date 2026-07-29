@@ -11,7 +11,7 @@
 use chrono::{Local, TimeZone};
 use reqwest::blocking::Client;
 use serde_json::Value;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -20,7 +20,7 @@ use std::thread;
 use std::time::Duration;
 use std::time::Instant;
 
-use crate::infrastructure::{atomic_file, connector_debug};
+use crate::infrastructure::{atomic_file, connector_debug, media_tool_runtime};
 
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
@@ -184,6 +184,9 @@ struct EnumeratedPost {
     post_id: String,
     webpage_url: String,
     likely_photo_post: bool,
+    listing_photo_urls: Vec<String>,
+    listing_audio_url: Option<String>,
+    captured_at_timestamp: Option<i64>,
     view_count: Option<i64>,
     like_count: Option<i64>,
     comment_count: Option<i64>,
@@ -912,6 +915,9 @@ fn enumerate_posts<C>(
 where
     C: Fn() -> bool,
 {
+    let listing_pages_dir = request.cache_root.join("listing-pages");
+    let _ = fs::remove_dir_all(&listing_pages_dir);
+    fs::create_dir_all(&listing_pages_dir).map_err(|error| error.to_string())?;
     let mut command = Command::new(&request.yt_dlp_executable);
     command
         .arg("--ignore-errors")
@@ -919,6 +925,10 @@ where
         .arg("--impersonate")
         .arg(YT_DLP_IMPERSONATE)
         .arg("--flat-playlist")
+        // Keep the provider responses temporarily. TikTok can include a post in
+        // itemList while yt-dlp filters it from the flat-playlist entries (for
+        // example, audience-sensitive posts that remain playable when logged in).
+        .arg("--write-pages")
         .arg("--print")
         .arg("%(id)s\t%(webpage_url)s\t%(uploader_id)s\t%(view_count)s\t%(like_count)s\t%(comment_count)s\t%(repost_count)s\t%(thumbnails.0.url)s\t%(thumbnails.1.url)s\t%(thumbnails.2.url)s")
         .arg("--no-cookies-from-browser")
@@ -927,19 +937,27 @@ where
     apply_user_agent(&mut command, request);
     command
         .arg(profile_url)
+        .current_dir(&listing_pages_dir)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     #[cfg(windows)]
     command.creation_flags(CREATE_NO_WINDOW);
 
-    let (stdout, stderr) = run_capturing_streaming(
+    let listing_result = run_capturing_streaming(
         command,
         YT_DLP_LIST_TIMEOUT_SECS,
         is_cancelled,
         "yt-dlp (listing)",
         on_listed_line,
-    )?;
+    );
+    let (stdout, stderr) = match listing_result {
+        Ok(output) => output,
+        Err(error) => {
+            let _ = fs::remove_dir_all(&listing_pages_dir);
+            return Err(error);
+        }
+    };
     let rate_limited = output_is_rate_limited(&stderr);
 
     let mut posts = Vec::new();
@@ -980,6 +998,9 @@ where
             post_id: post_id.to_string(),
             likely_photo_post: is_likely_tiktok_photo_post(&url, &thumbnail_urls),
             webpage_url: url,
+            listing_photo_urls: Vec::new(),
+            listing_audio_url: None,
+            captured_at_timestamp: timestamp_from_tiktok_id(post_id),
             view_count,
             like_count,
             comment_count,
@@ -987,11 +1008,154 @@ where
         });
     }
 
+    let recovered = recover_posts_from_listing_pages(request, &listing_pages_dir, &mut posts);
+    if !recovered.is_empty() {
+        connector_debug::append_current(
+            "internal.tiktok",
+            "system",
+            "listing.filtered_posts_recovered",
+            format!(
+                "count={}\npost_ids={}",
+                recovered.len(),
+                recovered
+                    .iter()
+                    .map(|post| post.post_id.as_str())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ),
+        );
+        posts.extend(recovered);
+    }
+    let _ = fs::remove_dir_all(&listing_pages_dir);
+
     Ok(EnumeratedPosts {
         posts,
         uploader_id,
         rate_limited,
     })
+}
+
+fn recover_posts_from_listing_pages(
+    request: &TikTokConnectorRequest,
+    listing_pages_dir: &Path,
+    listed_posts: &mut [EnumeratedPost],
+) -> Vec<EnumeratedPost> {
+    let known: HashMap<String, usize> = listed_posts
+        .iter()
+        .enumerate()
+        .map(|(index, post)| (post.post_id.clone(), index))
+        .collect();
+    let mut recovered_ids = HashSet::new();
+    let mut recovered = Vec::new();
+    let Ok(entries) = fs::read_dir(listing_pages_dir) else {
+        return recovered;
+    };
+    for path in entries.flatten().map(|entry| entry.path()) {
+        if !path.is_file() {
+            continue;
+        }
+        let Ok(body) = fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(payload) = serde_json::from_str::<Value>(&body) else {
+            continue;
+        };
+        let Some(items) = payload.get("itemList").and_then(Value::as_array) else {
+            continue;
+        };
+        for item in items {
+            let Some(post_id) = item
+                .get("id")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            else {
+                continue;
+            };
+            let listing_photo_urls = tiktok_photo_urls_from_item(item);
+            let listing_audio_url = tiktok_audio_url_from_item(item);
+            let captured_at_timestamp = item
+                .get("createTime")
+                .and_then(parse_unix_timestamp)
+                .filter(|value| *value > 0)
+                .or_else(|| timestamp_from_tiktok_id(post_id));
+            if let Some(index) = known.get(post_id).copied() {
+                if !listing_photo_urls.is_empty() {
+                    let post = &mut listed_posts[index];
+                    post.likely_photo_post = true;
+                    post.webpage_url = format!(
+                        "https://www.tiktok.com/@{}/photo/{post_id}",
+                        request.handle.trim().trim_start_matches('@')
+                    );
+                    post.listing_photo_urls = listing_photo_urls;
+                    post.listing_audio_url = listing_audio_url;
+                    post.captured_at_timestamp = captured_at_timestamp;
+                }
+                continue;
+            }
+            if !recovered_ids.insert(post_id.to_string()) {
+                continue;
+            }
+            let handle = item
+                .pointer("/author/uniqueId")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| request.handle.trim().trim_start_matches('@'));
+            let likely_photo_post = !listing_photo_urls.is_empty();
+            let kind = if likely_photo_post { "photo" } else { "video" };
+            recovered.push(EnumeratedPost {
+                post_id: post_id.to_string(),
+                webpage_url: format!("https://www.tiktok.com/@{handle}/{kind}/{post_id}"),
+                likely_photo_post,
+                listing_photo_urls,
+                listing_audio_url,
+                captured_at_timestamp,
+                view_count: parse_item_count(item, "playCount"),
+                like_count: parse_item_count(item, "diggCount"),
+                comment_count: parse_item_count(item, "commentCount"),
+                share_count: parse_item_count(item, "shareCount"),
+            });
+        }
+    }
+    recovered
+}
+
+fn tiktok_photo_urls_from_item(item: &Value) -> Vec<String> {
+    item.pointer("/imagePost/images")
+        .and_then(Value::as_array)
+        .map(|images| {
+            images
+                .iter()
+                .filter_map(|image| {
+                    image
+                        .pointer("/imageURL/urlList")
+                        .and_then(Value::as_array)
+                        .and_then(|urls| urls.iter().find_map(Value::as_str))
+                        .map(str::to_string)
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn tiktok_audio_url_from_item(item: &Value) -> Option<String> {
+    item.pointer("/music/playUrl")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+        .map(str::to_string)
+}
+
+fn parse_item_count(item: &Value, key: &str) -> Option<i64> {
+    item.get("statsV2")
+        .or_else(|| item.get("stats"))
+        .and_then(|stats| stats.get(key))
+        .and_then(|value| {
+            value
+                .as_i64()
+                .or_else(|| value.as_str().and_then(|text| text.parse::<i64>().ok()))
+        })
 }
 
 fn parse_optional_count(value: Option<&str>) -> Option<i64> {
@@ -1252,19 +1416,65 @@ where
             .unwrap_or("")
             .to_ascii_lowercase();
         if is_audio_only_video_download(&extension, video_codec) {
-            // TikTok photo-mode: track becomes an MP4 with no video stream. Save as
-            // `<post_id>_audio.<ext>` for Profile View / lightbox; the post still
-            // falls through to the image fallback (do not mark as produced).
-            connector_debug::append_current(
-                "internal.tiktok",
-                "system",
-                "media.audio_only_saved_as_soundtrack",
-                format!(
-                    "source={}\npost_id={post_id}\nextension={extension}\nvcodec={video_codec}",
-                    source_path.display()
-                ),
-            );
-            let _ = persist_slideshow_audio(request, &source_path, post_id, &extension);
+            let is_photo_post = batch
+                .iter()
+                .find(|post| post.post_id == post_id)
+                .is_some_and(|post| post.likely_photo_post);
+            if is_photo_post {
+                if !request.download_photos {
+                    let _ = fs::remove_file(&source_path);
+                    produced.insert(post_id.to_string());
+                    continue;
+                }
+                // Photo-mode audio remains an auxiliary soundtrack while the
+                // post falls through to the image fallback.
+                connector_debug::append_current(
+                    "internal.tiktok",
+                    "system",
+                    "media.audio_only_saved_as_soundtrack",
+                    format!(
+                        "source={}\npost_id={post_id}\nextension={extension}\nvcodec={video_codec}",
+                        source_path.display()
+                    ),
+                );
+                let _ = persist_slideshow_audio(request, &source_path, post_id, &extension);
+                continue;
+            }
+
+            if !request.download_videos {
+                let _ = fs::remove_file(&source_path);
+                produced.insert(post_id.to_string());
+                continue;
+            }
+
+            // Some regular TikTok posts intentionally expose only an audio MP4;
+            // the web player supplies a black visual canvas. Materialize that
+            // canvas locally so the file is playable and thumbnailable as video.
+            match synthesize_black_video_for_audio(request, &source_path) {
+                Ok(visual_source) => {
+                    match finalize_media_file(
+                        request,
+                        &visual_source,
+                        post_id,
+                        captured_at_timestamp,
+                    ) {
+                        Ok(item) => {
+                            produced.insert(post_id.to_string());
+                            media.push(item);
+                            let _ = fs::remove_file(&source_path);
+                        }
+                        Err(error) => errors.push(format!(
+                            "audio-only video {post_id} could not be finalized: {error}"
+                        )),
+                    }
+                    if let Some(parent) = visual_source.parent() {
+                        let _ = fs::remove_dir_all(parent);
+                    }
+                }
+                Err(error) => errors.push(format!(
+                    "audio-only video {post_id} could not get a visual stream: {error}"
+                )),
+            }
             continue;
         }
         if AUDIO_EXTENSIONS.contains(&extension.as_str()) {
@@ -1314,7 +1524,7 @@ where
             if is_cancelled() {
                 return Err("source sync cancelled by user".to_string());
             }
-            match download_post_photos(request, &post.post_id, is_cancelled) {
+            match download_post_photos(request, post, is_cancelled) {
                 Ok(mut images) => media.append(&mut images),
                 Err(error) => {
                     if error.to_ascii_lowercase().contains("cancelled by user") {
@@ -1341,6 +1551,55 @@ fn is_audio_only_video_download(extension: &str, video_codec: &str) -> bool {
         )
 }
 
+fn synthesize_black_video_for_audio(
+    request: &TikTokConnectorRequest,
+    audio_source: &Path,
+) -> Result<PathBuf, String> {
+    let ffmpeg = media_tool_runtime::ffmpeg_executable()
+        .ok_or_else(|| "FFmpeg is not available".to_string())?;
+    let output_dir = request.cache_root.join("audio-visual");
+    let _ = fs::remove_dir_all(&output_dir);
+    fs::create_dir_all(&output_dir).map_err(|error| error.to_string())?;
+    let file_name = audio_source
+        .file_name()
+        .ok_or_else(|| "audio-only download has no file name".to_string())?;
+    let output = output_dir.join(file_name);
+    let mut command = Command::new(ffmpeg);
+    media_tool_runtime::configure_tool_path(&mut command);
+    command
+        .arg("-hide_banner")
+        .arg("-loglevel")
+        .arg("error")
+        .arg("-y")
+        .arg("-f")
+        .arg("lavfi")
+        .arg("-i")
+        .arg("color=c=black:s=720x1280:r=1")
+        .arg("-i")
+        .arg(audio_source)
+        .args(["-map", "0:v:0", "-map", "1:a:0?", "-shortest"])
+        .args(["-c:v", "libx264", "-preset", "ultrafast", "-crf", "35"])
+        .args(["-pix_fmt", "yuv420p", "-c:a", "copy"])
+        .args(["-movflags", "+faststart"])
+        .arg(&output)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+    #[cfg(windows)]
+    command.creation_flags(CREATE_NO_WINDOW);
+    let result = command.output().map_err(|error| error.to_string())?;
+    if !result.status.success() || !atomic_file::is_nonempty_file(&output) {
+        let detail = String::from_utf8_lossy(&result.stderr).trim().to_string();
+        let _ = fs::remove_file(&output);
+        return Err(if detail.is_empty() {
+            format!("FFmpeg exited with {}", result.status)
+        } else {
+            detail
+        });
+    }
+    Ok(output)
+}
+
 /// Persist a photo-mode post soundtrack as `<post_id>_audio.<ext>` at the
 /// profile root (same convention as Single Videos / gallery lookup).
 /// Does not mark the post as produced — images still need to be downloaded.
@@ -1350,7 +1609,10 @@ fn persist_slideshow_audio(
     post_id: &str,
     extension: &str,
 ) -> Result<PathBuf, String> {
-    let ext = extension.trim().trim_start_matches('.').to_ascii_lowercase();
+    let ext = extension
+        .trim()
+        .trim_start_matches('.')
+        .to_ascii_lowercase();
     if ext.is_empty() {
         let _ = fs::remove_file(source_path);
         return Err("missing audio extension".to_string());
@@ -1360,9 +1622,7 @@ fn persist_slideshow_audio(
         return Err("empty audio source".to_string());
     }
     fs::create_dir_all(&request.profile_root).map_err(|error| error.to_string())?;
-    let destination = request
-        .profile_root
-        .join(format!("{post_id}_audio.{ext}"));
+    let destination = request.profile_root.join(format!("{post_id}_audio.{ext}"));
     if atomic_file::is_nonempty_file(&destination) {
         let _ = fs::remove_file(source_path);
         return Ok(destination);
@@ -1390,12 +1650,42 @@ fn persist_slideshow_audio(
 /// extraímos as URLs das imagens do JSON de rehydration e baixamos via reqwest.
 fn download_post_photos<C>(
     request: &TikTokConnectorRequest,
-    post_id: &str,
+    post: &EnumeratedPost,
     is_cancelled: &C,
 ) -> Result<Vec<DownloadedTikTokMedia>, String>
 where
     C: Fn() -> bool,
 {
+    let post_id = post.post_id.as_str();
+    if !post.listing_photo_urls.is_empty() {
+        connector_debug::append_current(
+            "internal.tiktok",
+            "system",
+            "photo.listing_metadata_reused",
+            format!(
+                "post_id={post_id}\nimage_count={}\nreason=individual post page not required",
+                post.listing_photo_urls.len()
+            ),
+        );
+        let media = download_post_photo_urls(
+            request,
+            post_id,
+            post.captured_at_timestamp,
+            &post.listing_photo_urls,
+            is_cancelled,
+        )?;
+        if let Some(audio_url) = post.listing_audio_url.as_deref() {
+            if let Err(error) = download_slideshow_audio_url(request, post_id, audio_url) {
+                connector_debug::append_current(
+                    "tiktok-http",
+                    "error",
+                    "GET slideshow audio",
+                    format!("post_id={post_id}\nerror={error}"),
+                );
+            }
+        }
+        return Ok(media);
+    }
     let photo_dir = request.cache_root.join(format!("photo-{post_id}"));
     let _ = fs::remove_dir_all(&photo_dir);
     fs::create_dir_all(&photo_dir).map_err(|error| error.to_string())?;
@@ -1495,6 +1785,7 @@ where
                 .collect()
         })
         .unwrap_or_default();
+    let audio_url = item.and_then(tiktok_audio_url_from_item);
     let _ = fs::remove_dir_all(&photo_dir);
 
     if image_urls.is_empty() {
@@ -1502,6 +1793,68 @@ where
         return Ok(Vec::new());
     }
 
+    let media = download_post_photo_urls(
+        request,
+        post_id,
+        captured_at_timestamp,
+        &image_urls,
+        is_cancelled,
+    )?;
+    if let Some(audio_url) = audio_url.as_deref() {
+        if let Err(error) = download_slideshow_audio_url(request, post_id, audio_url) {
+            connector_debug::append_current(
+                "tiktok-http",
+                "error",
+                "GET slideshow audio",
+                format!("post_id={post_id}\nerror={error}"),
+            );
+        }
+    }
+    Ok(media)
+}
+
+fn download_slideshow_audio_url(
+    request: &TikTokConnectorRequest,
+    post_id: &str,
+    audio_url: &str,
+) -> Result<PathBuf, String> {
+    let destination = request.profile_root.join(format!("{post_id}_audio.mp4"));
+    if atomic_file::is_nonempty_file(&destination) {
+        return Ok(destination);
+    }
+    connector_debug::append_current(
+        "tiktok-http",
+        "call",
+        "GET slideshow audio",
+        format!("GET {audio_url}"),
+    );
+    let response = build_download_client(request)?
+        .get(audio_url)
+        .header("Referer", "https://www.tiktok.com/")
+        .header("Origin", "https://www.tiktok.com")
+        .send()
+        .map_err(|error| error.to_string())?;
+    if !response.status().is_success() {
+        return Err(format!("HTTP {}", response.status()));
+    }
+    let bytes = response.bytes().map_err(|error| error.to_string())?;
+    if bytes.is_empty() {
+        return Err("TikTok returned an empty slideshow soundtrack.".to_string());
+    }
+    atomic_file::write_bytes_replacing_empty(&destination, bytes.as_ref())?;
+    Ok(destination)
+}
+
+fn download_post_photo_urls<C>(
+    request: &TikTokConnectorRequest,
+    post_id: &str,
+    captured_at_timestamp: Option<i64>,
+    image_urls: &[String],
+    is_cancelled: &C,
+) -> Result<Vec<DownloadedTikTokMedia>, String>
+where
+    C: Fn() -> bool,
+{
     let client = build_download_client(request)?;
     let count = image_urls.len();
     let pad = count.to_string().len().max(3);
@@ -2269,6 +2622,98 @@ mod tests {
                 ),
             ]
         ));
+    }
+
+    #[test]
+    fn listing_page_recovery_restores_entries_filtered_by_ytdlp() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        fs::write(
+            temp.path().join("creator-item-list.dump"),
+            r#"{
+                "itemList": [{
+                    "id": "7667738705108552967",
+                    "author": {"uniqueId": "mave884473"},
+                    "statsV2": {
+                        "playCount": "80",
+                        "diggCount": "16",
+                        "commentCount": "5",
+                        "shareCount": "3"
+                    }
+                }]
+            }"#,
+        )
+        .expect("write listing page");
+        let request = test_request_with_history(HashSet::new(), HashSet::new(), HashSet::new());
+
+        let mut listed = Vec::new();
+        let recovered = recover_posts_from_listing_pages(&request, temp.path(), &mut listed);
+
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(recovered[0].post_id, "7667738705108552967");
+        assert_eq!(
+            recovered[0].webpage_url,
+            "https://www.tiktok.com/@mave884473/video/7667738705108552967"
+        );
+        assert!(!recovered[0].likely_photo_post);
+        assert_eq!(recovered[0].view_count, Some(80));
+        assert_eq!(recovered[0].like_count, Some(16));
+        assert_eq!(recovered[0].comment_count, Some(5));
+        assert_eq!(recovered[0].share_count, Some(3));
+    }
+
+    #[test]
+    fn listing_page_recovery_deduplicates_normal_entries_and_detects_photos() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        fs::write(
+            temp.path().join("creator-item-list.dump"),
+            r#"{
+                "itemList": [
+                    {
+                        "id": "1000000000000000001",
+                        "createTime": "1752468950",
+                        "music": {"playUrl": "https://cdn.example/audio.mp4"},
+                        "imagePost": {"images": [{"imageURL": {"urlList": ["https://cdn.example/one.jpeg"]}}]}
+                    },
+                    {
+                        "id": "1000000000000000002",
+                        "imagePost": {"images": [{"imageURL": {"urlList": ["https://cdn.example/two.jpeg"]}}]}
+                    }
+                ]
+            }"#,
+        )
+        .expect("write listing page");
+        let request = test_request_with_history(HashSet::new(), HashSet::new(), HashSet::new());
+        let mut listed = vec![EnumeratedPost {
+            post_id: "1000000000000000001".to_string(),
+            webpage_url: "https://www.tiktok.com/@mave884473/video/1000000000000000001".to_string(),
+            likely_photo_post: false,
+            listing_photo_urls: Vec::new(),
+            listing_audio_url: None,
+            captured_at_timestamp: None,
+            view_count: None,
+            like_count: None,
+            comment_count: None,
+            share_count: None,
+        }];
+
+        let recovered = recover_posts_from_listing_pages(&request, temp.path(), &mut listed);
+
+        assert_eq!(recovered.len(), 1);
+        assert!(listed[0].likely_photo_post);
+        assert_eq!(listed[0].listing_photo_urls.len(), 1);
+        assert_eq!(
+            listed[0].listing_audio_url.as_deref(),
+            Some("https://cdn.example/audio.mp4")
+        );
+        assert_eq!(listed[0].captured_at_timestamp, Some(1_752_468_950));
+        assert!(listed[0].webpage_url.contains("/photo/"));
+        assert_eq!(recovered[0].post_id, "1000000000000000002");
+        assert!(recovered[0].likely_photo_post);
+        assert_eq!(recovered[0].listing_photo_urls.len(), 1);
+        assert_eq!(
+            recovered[0].webpage_url,
+            "https://www.tiktok.com/@dalilahoo/photo/1000000000000000002"
+        );
     }
 
     #[test]

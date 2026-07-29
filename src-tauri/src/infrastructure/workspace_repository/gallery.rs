@@ -5,6 +5,16 @@ pub(super) const GALLERY_IMAGE_EXTS: [&str; 6] = ["jpg", "jpeg", "png", "webp", 
 /// Slideshow soundtrack extensions (TikTok photo-mode / single videos).
 pub(super) const GALLERY_AUDIO_EXTS: [&str; 6] = ["mp3", "m4a", "wav", "opus", "aac", "mp4"];
 
+/// Returns whether a file is the auxiliary soundtrack stored for a slideshow.
+/// An MP4 container is valid here even without a video stream.
+pub(super) fn is_slideshow_audio_file(file_name: &str) -> bool {
+    let Some((stem, ext)) = file_name.rsplit_once('.') else {
+        return false;
+    };
+    stem.to_ascii_lowercase().ends_with("_audio")
+        && GALLERY_AUDIO_EXTS.contains(&ext.to_ascii_lowercase().as_str())
+}
+
 /// Find `<post_id>_audio.<ext>` next to the post images (or at the profile root).
 /// Same convention as Single Videos — the profile connector now keeps this
 /// track instead of discarding it.
@@ -55,10 +65,7 @@ pub(super) fn find_slideshow_audio(
                 .unwrap_or(&path)
                 .to_string_lossy()
                 .replace('\\', "/");
-            return (
-                Some(relative),
-                Some(path.to_string_lossy().to_string()),
-            );
+            return (Some(relative), Some(path.to_string_lossy().to_string()));
         }
     }
     (None, None)
@@ -140,6 +147,9 @@ pub(super) fn derive_post_metadata(
     file_name: &str,
     mtime_unix: Option<i64>,
 ) -> Option<DerivedPost> {
+    if is_slideshow_audio_file(file_name) {
+        return None;
+    }
     let (stem, ext) = match file_name.rsplit_once('.') {
         Some((s, e)) => (s, e.to_ascii_lowercase()),
         None => return None,

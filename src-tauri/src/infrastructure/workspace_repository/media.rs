@@ -34,7 +34,8 @@ pub(super) fn load_gallery_media_ledger_links(
             });
             if let Ok(rows) = rows {
                 for row in rows.flatten() {
-                    let (relative_path, section, post_code, title, captured_at, first_seen_at) = row;
+                    let (relative_path, section, post_code, title, captured_at, first_seen_at) =
+                        row;
                     links.insert(
                         relative_path.to_ascii_lowercase(),
                         GalleryMediaLedgerLink {
@@ -85,8 +86,15 @@ pub(super) fn load_gallery_media_ledger_links(
     });
     if let Ok(rows) = rows {
         for row in rows.flatten() {
-            let (relative_path, section, post_key, captured_at, first_seen_at, title, duration_seconds) =
-                row;
+            let (
+                relative_path,
+                section,
+                post_key,
+                captured_at,
+                first_seen_at,
+                title,
+                duration_seconds,
+            ) = row;
             links.insert(
                 relative_path.to_ascii_lowercase(),
                 GalleryMediaLedgerLink {
@@ -212,17 +220,25 @@ pub(crate) enum MediaThumbnailGenerationOutcome {
     NotNeeded,
     /// Media has no usable visual content (audio-only / empty / corrupt container).
     /// Surfaces as a queue **warning** with manual review + recycle-bin option.
-    InvalidMedia { reason: String },
+    InvalidMedia {
+        reason: String,
+    },
     /// Tooling/IO failure while generating a thumb for otherwise valid media.
-    Failed { reason: String },
+    Failed {
+        reason: String,
+    },
 }
 
 #[derive(Debug)]
 enum VideoThumbnailEnsureResult {
     Ready(String),
     /// Sem stream de vídeo / mídia sem conteúdo visual utilizável.
-    InvalidMedia { reason: String },
-    Failed { detail: String },
+    InvalidMedia {
+        reason: String,
+    },
+    Failed {
+        detail: String,
+    },
 }
 
 /// Generate (or classify) a media thumbnail beside the source file.
@@ -236,8 +252,8 @@ pub(crate) fn generate_media_thumbnail(source: &Path) -> MediaThumbnailGeneratio
             }
             Some(ImageThumbnailGeneration::NotNeeded) => MediaThumbnailGenerationOutcome::NotNeeded,
             None => {
-                let reason =
-                    "Image is undecodable or corrupt (thumbnail could not be generated).".to_string();
+                let reason = "Image is undecodable or corrupt (thumbnail could not be generated)."
+                    .to_string();
                 log_thumbnail_issue(source, "warn", "invalid_media", &reason);
                 MediaThumbnailGenerationOutcome::InvalidMedia { reason }
             }
@@ -337,7 +353,8 @@ pub fn media_thumbnail_source_paths(source_id: &str) -> Result<Vec<String>, Stri
         .into_iter()
         .flat_map(|post| post.files)
         .filter(|file| {
-            file.media_type == "video" || is_thumbnailable_image(Path::new(&file.absolute_path))
+            (file.media_type == "video" || is_thumbnailable_image(Path::new(&file.absolute_path)))
+                && !media_thumbnail_is_skipped(Path::new(&file.absolute_path))
         })
         .map(|file| file.absolute_path)
         .collect();
@@ -345,6 +362,95 @@ pub fn media_thumbnail_source_paths(source_id: &str) -> Result<Vec<String>, Stri
     paths.dedup();
     Ok(paths)
 }
+
+fn media_thumbnail_marker_path(source: &Path, marker: &str) -> Option<PathBuf> {
+    let media_dir = source.parent()?;
+    let source_name = source.file_name()?.to_string_lossy();
+    Some(
+        media_dir
+            .join(".thumbs")
+            .join(format!("{source_name}.{marker}")),
+    )
+}
+
+pub(crate) fn media_thumbnail_is_skipped(source: &Path) -> bool {
+    let Some(marker) = media_thumbnail_marker_path(source, "skip") else {
+        return false;
+    };
+    let source_mtime = fs::metadata(source).and_then(|meta| meta.modified()).ok();
+    fs::metadata(marker)
+        .ok()
+        .and_then(|meta| meta.modified().ok())
+        .zip(source_mtime)
+        .is_some_and(|(marker_mtime, media_mtime)| marker_mtime >= media_mtime)
+}
+
+pub(crate) fn media_thumbnail_needs_reconciliation(source: &Path) -> bool {
+    media_thumbnail_marker_path(source, "reconcile").is_some_and(|path| path.is_file())
+        && !media_thumbnail_is_skipped(source)
+}
+
+pub(crate) fn mark_media_thumbnail_reconcile_candidate(source: &Path) -> Result<(), String> {
+    let marker = media_thumbnail_marker_path(source, "reconcile").ok_or_else(|| {
+        format!(
+            "Could not derive reconciliation marker for '{}'.",
+            source.display()
+        )
+    })?;
+    let parent = marker.parent().ok_or_else(|| {
+        format!(
+            "Could not resolve marker directory for '{}'.",
+            source.display()
+        )
+    })?;
+    fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    fs::write(&marker, b"tiktok-invalid-video-v1\n").map_err(|error| {
+        format!(
+            "Failed to persist reconciliation marker '{}': {error}",
+            marker.display()
+        )
+    })
+}
+
+pub fn skip_media_thumbnail_review(
+    source_id: &str,
+    relative_paths: &[String],
+) -> Result<(), String> {
+    let profile_root = media_thumbnail_source_root(source_id)?;
+    let canonical_root = fs::canonicalize(&profile_root).unwrap_or_else(|_| profile_root.clone());
+    for raw_relative in relative_paths {
+        let relative = raw_relative.replace('\\', "/");
+        let relative = relative.trim_start_matches('/');
+        if relative.is_empty() {
+            continue;
+        }
+        let source = profile_root.join(relative);
+        let canonical_source = fs::canonicalize(&source).unwrap_or_else(|_| source.clone());
+        if !canonical_source.starts_with(&canonical_root) || !source.is_file() {
+            continue;
+        }
+        let marker = media_thumbnail_marker_path(&source, "skip")
+            .ok_or_else(|| format!("Could not derive skip marker for '{}'.", source.display()))?;
+        let parent = marker.parent().ok_or_else(|| {
+            format!(
+                "Could not resolve marker directory for '{}'.",
+                source.display()
+            )
+        })?;
+        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+        fs::write(&marker, b"thumbnail-skip-v1\n").map_err(|error| {
+            format!(
+                "Failed to persist skip marker '{}': {error}",
+                marker.display()
+            )
+        })?;
+        if let Some(reconcile) = media_thumbnail_marker_path(&source, "reconcile") {
+            let _ = fs::remove_file(reconcile);
+        }
+    }
+    Ok(())
+}
+
 pub(super) fn video_thumbnail_path(source: &Path) -> Option<PathBuf> {
     let media_dir = source.parent()?;
     let source_name = source.file_name()?.to_string_lossy();
@@ -517,7 +623,7 @@ fn ensure_video_thumbnail_result(source: &Path) -> VideoThumbnailEnsureResult {
 /// `true` quando o arquivo existe e o ffprobe confirma **ausência** de stream de
 /// vídeo. `false` quando há stream de vídeo **ou** o probe não pôde decidir
 /// (falha de ferramenta) — nesse caso o caller ainda tenta o ffmpeg.
-fn media_lacks_video_stream(source: &Path) -> bool {
+pub(super) fn media_lacks_video_stream(source: &Path) -> bool {
     let Some(ffprobe) = media_tool_runtime::ffprobe_executable() else {
         return false;
     };
@@ -545,6 +651,36 @@ fn media_lacks_video_stream(source: &Path) -> bool {
     }
     let stdout = String::from_utf8_lossy(&output.stdout);
     !ffprobe_csv_reports_video_stream(&stdout)
+}
+
+pub(super) fn media_has_audio_stream(source: &Path) -> bool {
+    let Some(ffprobe) = media_tool_runtime::ffprobe_executable() else {
+        return false;
+    };
+    let mut command = Command::new(&ffprobe);
+    configure_background_command(&mut command);
+    media_tool_runtime::configure_tool_path(&mut command);
+    let Ok(output) = command
+        .args([
+            "-v",
+            "error",
+            "-select_streams",
+            "a",
+            "-show_entries",
+            "stream=codec_type",
+            "-of",
+            "csv=p=0",
+        ])
+        .arg(source)
+        .output()
+    else {
+        return false;
+    };
+    output.status.success()
+        && String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .flat_map(|line| line.split(','))
+            .any(|field| field.trim().eq_ignore_ascii_case("audio"))
 }
 
 /// `csv=p=0` emite uma coluna extra vazia quando o stream carrega side data
