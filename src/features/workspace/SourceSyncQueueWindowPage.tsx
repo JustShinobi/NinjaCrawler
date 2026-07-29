@@ -7,10 +7,10 @@ import {
   enqueueMediaThumbnailGeneration,
   loadMediaThumbnailQueueStatus,
   loadMediaPathMigrationQueueStatus,
-  loadMediaDedupeStatus,
+  loadMediaDedupeSummaryStatus,
+  loadQueueReferenceData,
   loadSourceDeleteQueueStatus,
   loadSourceSyncQueueStatus,
-  loadWorkspaceSnapshot,
   openConnectorDebugWindow,
   openExternalTarget,
   openWorkspaceHealthWindow,
@@ -36,11 +36,11 @@ import type {
   MediaThumbnailQueueStatus,
   MediaThumbnailReviewItem,
   MediaPathMigrationQueueStatus,
-  MediaDedupeJobStatus,
-  SchedulerGroup,
+  MediaDedupeSummaryStatus,
+  QueueGroupReference,
+  QueueSourceReference,
   SingleVideoQueueRecentResult,
   SingleVideoQueueStatus,
-  SourceProfile,
 } from '../../domain/models'
 import { WindowShell } from '../brand/WindowShell'
 import { WindowTitlebar } from '../brand/WindowTitlebar'
@@ -343,29 +343,35 @@ export function SourceSyncQueueWindowPage() {
   const [error, setError] = useState<string>()
   const [singleVideoStatus, setSingleVideoStatus] = useState<SingleVideoQueueStatus | undefined>()
   const [openingDebugger, setOpeningDebugger] = useState(false)
-  const [librarySources, setLibrarySources] = useState<SourceProfile[]>([])
-  const [libraryGroups, setLibraryGroups] = useState<SchedulerGroup[]>([])
+  const [librarySources, setLibrarySources] = useState<QueueSourceReference[]>([])
+  const [libraryGroups, setLibraryGroups] = useState<QueueGroupReference[]>([])
   const [thumbnailScope, setThumbnailScope] = useState<'all' | 'provider' | 'group' | 'profile'>('profile')
   const [thumbnailScopeValue, setThumbnailScopeValue] = useState('')
   const [thumbnailStatus, setThumbnailStatus] = useState<MediaThumbnailQueueStatus>()
   const [migrationStatus, setMigrationStatus] = useState<MediaPathMigrationQueueStatus>()
-  const [dedupeStatus, setDedupeStatus] = useState<MediaDedupeJobStatus>()
+  const [dedupeStatus, setDedupeStatus] = useState<MediaDedupeSummaryStatus>()
   const [queueingThumbnails, setQueueingThumbnails] = useState(false)
   const [maintenanceOpen, setMaintenanceOpen] = useState(false)
   const [maintenanceError, setMaintenanceError] = useState<string>()
   const [cancellingMigrations, setCancellingMigrations] = useState(false)
   const [resolvingReviewKey, setResolvingReviewKey] = useState<string>()
   const maintenanceButtonRef = useRef<HTMLButtonElement>(null)
+  const queueRefreshInFlightRef = useRef(false)
+  const avatarRefreshInFlightRef = useRef(false)
+  const maintenanceRefreshInFlightRef = useRef(false)
 
   const refreshQueueStatus = useCallback(async (silent = false) => {
+    if (queueRefreshInFlightRef.current) return
+    queueRefreshInFlightRef.current = true
     try {
-      const [nextSyncStatus, nextDeleteStatus] = await Promise.all([
+      const [nextSyncStatus, nextDeleteStatus, nextMigrationStatus] = await Promise.all([
         loadSourceSyncQueueStatus(),
         loadSourceDeleteQueueStatus(),
+        loadMediaPathMigrationQueueStatus(),
       ])
-      void loadMediaPathMigrationQueueStatus().then(setMigrationStatus).catch(() => undefined)
       setSyncStatus(nextSyncStatus)
       setDeleteStatus(nextDeleteStatus)
+      setMigrationStatus(nextMigrationStatus)
       if (!silent) {
         setError(undefined)
       }
@@ -375,38 +381,56 @@ export function SourceSyncQueueWindowPage() {
           refreshError instanceof Error ? refreshError.message : 'Failed to load queue status.',
         )
       }
+    } finally {
+      queueRefreshInFlightRef.current = false
     }
   }, [])
 
-  // Avatares: o status da fila não traz o caminho da imagem, então mapeamos
-  // sourceId -> profileImagePath a partir do snapshot (carregado uma vez; avatar
-  // é estável). Recarrega periodicamente para captar perfis novos.
+  // Queue reference data intentionally excludes sync history and other workspace
+  // snapshot fields. The queue only needs lightweight profile/group labels and avatars.
   const refreshAvatars = useCallback(async () => {
+    if (avatarRefreshInFlightRef.current) return
+    avatarRefreshInFlightRef.current = true
     try {
-      const snapshot = await loadWorkspaceSnapshot()
-      setLibrarySources(snapshot.sources)
-      setLibraryGroups(snapshot.schedulerGroups)
+      const references = await loadQueueReferenceData()
+      setLibrarySources(references.sources)
+      setLibraryGroups(references.groups)
       const map: Record<string, string> = {}
-      for (const source of snapshot.sources) {
+      for (const source of references.sources) {
         if (source.profileImagePath) {
           map[source.id] = source.profileImagePath
         }
       }
       setAvatarsBySource(map)
     } catch {
-      // avatar é cosmético; ignora falha
+      // Avatars are cosmetic and can wait for the next event or fallback refresh.
+    } finally {
+      avatarRefreshInFlightRef.current = false
+    }
+  }, [])
+
+  const refreshMaintenanceStatus = useCallback(async () => {
+    if (document.visibilityState === 'hidden' || maintenanceRefreshInFlightRef.current) return
+    maintenanceRefreshInFlightRef.current = true
+    try {
+      const [nextThumbnailStatus, nextDedupeStatus] = await Promise.all([
+        loadMediaThumbnailQueueStatus(),
+        loadMediaDedupeSummaryStatus(),
+      ])
+      setThumbnailStatus(nextThumbnailStatus)
+      setDedupeStatus(nextDedupeStatus)
+    } catch {
+      // Events remain authoritative; the fallback is deliberately best-effort.
+    } finally {
+      maintenanceRefreshInFlightRef.current = false
     }
   }, [])
 
   useEffect(() => {
-    const refresh = () => {
-      void loadMediaThumbnailQueueStatus().then(setThumbnailStatus).catch(() => undefined)
-      void loadMediaDedupeStatus().then(setDedupeStatus).catch(() => undefined)
-    }
-    refresh()
-    const timer = window.setInterval(refresh, 750)
+    void refreshMaintenanceStatus()
+    const timer = window.setInterval(() => void refreshMaintenanceStatus(), 5_000)
     return () => window.clearInterval(timer)
-  }, [])
+  }, [refreshMaintenanceStatus])
 
   const thumbnailTargetIds = useMemo(() => {
     switch (thumbnailScope) {
@@ -494,11 +518,6 @@ export function SourceSyncQueueWindowPage() {
   }, [migrationStatus?.recentResults.length, refreshAvatars])
 
   useEffect(() => {
-    const timer = window.setInterval(() => void loadMediaPathMigrationQueueStatus().then(setMigrationStatus).catch(() => undefined), 1000)
-    return () => window.clearInterval(timer)
-  }, [])
-
-  useEffect(() => {
     let disposed = false
     let unsubscribe: (() => void) | undefined
     void subscribeToSingleVideoQueue((next) => {
@@ -526,6 +545,7 @@ export function SourceSyncQueueWindowPage() {
         if (!disposed) setDeleteStatus(next)
       },
       onMediaPathMigrationQueueChanged: setMigrationStatus,
+      onMediaDedupeStatusChanged: setDedupeStatus,
     })
       .then((teardown) => {
         if (disposed) {
@@ -546,23 +566,27 @@ export function SourceSyncQueueWindowPage() {
     // even if a few IPC events are coalesced.
     const hasActiveDelete =
       deleteStatus.runningCount > 0 || deleteStatus.queuedCount > 0
-    const timer = window.setInterval(
-      () => void refreshQueueStatus(true),
-      hasActiveDelete ? 400 : 1200,
-    )
+    const timer = window.setInterval(() => {
+      if (document.visibilityState !== 'hidden') void refreshQueueStatus(true)
+    }, hasActiveDelete ? 2_000 : 5_000)
     return () => window.clearInterval(timer)
   }, [refreshQueueStatus, deleteStatus.runningCount, deleteStatus.queuedCount])
 
   useEffect(() => {
-    const timer = window.setInterval(() => void refreshAvatars(), 30_000)
+    const timer = window.setInterval(() => {
+      if (document.visibilityState !== 'hidden') void refreshAvatars()
+    }, 60_000)
     return () => window.clearInterval(timer)
   }, [refreshAvatars])
 
-  // Relógio de 1s para tempos relativos/durações ao vivo.
+  const hasLiveTiming =
+    syncStatus.runningCount > 0 || deleteStatus.runningCount > 0 || Boolean(singleVideoStatus?.active)
   useEffect(() => {
-    const timer = window.setInterval(() => setNow(Date.now()), 1000)
+    const timer = window.setInterval(() => {
+      if (document.visibilityState !== 'hidden') setNow(Date.now())
+    }, hasLiveTiming ? 1_000 : 30_000)
     return () => window.clearInterval(timer)
-  }, [])
+  }, [hasLiveTiming])
 
   const withProviderBusy = useCallback(
     async (provider: ProviderKey, action: () => Promise<unknown>, failureMessage: string) => {
@@ -1214,7 +1238,7 @@ export function SourceSyncQueueWindowPage() {
           <div className="maintenance-job-heading"><span className="queue-tag">Media cleanup</span><strong>{dedupeStatus?.state === 'applying' ? 'Applying reviewed changes' : dedupeStatus?.stage === 'perceptual_scan' ? 'Comparing similar media' : 'Scanning library'}</strong><span className="queue-data">{dedupeStatus?.stage === 'perceptual_scan' ? `${dedupeStatus.perceptualSourcesProcessed}/${dedupeStatus.perceptualSourcesTotal} sources` : `${dedupeStatus?.filesProcessed.toLocaleString()}/${dedupeStatus?.filesTotal.toLocaleString()} files`}</span></div>
           <div aria-label="Media cleanup progress" aria-valuemax={100} aria-valuemin={0} aria-valuenow={dedupeStatus?.filesTotal ? Math.round(dedupeStatus.filesProcessed * 100 / dedupeStatus.filesTotal) : 0} className="queue-status-progress-track" role="progressbar"><div className="queue-status-progress-fill" style={{ width: `${dedupeStatus?.filesTotal ? Math.round(dedupeStatus.filesProcessed * 100 / dedupeStatus.filesTotal) : 0}%` }} /></div>
           <small title={dedupeStatus?.currentPath}>{dedupeStatus?.stage.replaceAll('_', ' ')}{dedupeStatus?.currentRoot ? ` · ${dedupeStatus.currentRoot}` : ''} · Review and cleanup controls are available in Workspace Health.</small>
-          {dedupeStatus?.sourceJobs.find((job) => job.status === 'running') ? <small className="maintenance-current-file" title={dedupeStatus.sourceJobs.find((job) => job.status === 'running')?.currentPath}>Current source · {dedupeStatus.sourceJobs.find((job) => job.status === 'running')?.sourcePath}{dedupeStatus.perceptualSourcesFailed ? ` · ${dedupeStatus.perceptualSourcesFailed} failed` : ''}</small> : null}
+          {dedupeStatus?.currentPath ? <small className="maintenance-current-file" title={dedupeStatus.currentPath}>Current file · {migrationFileName(dedupeStatus.currentPath)}{dedupeStatus.perceptualSourcesFailed ? ` · ${dedupeStatus.perceptualSourcesFailed} failed` : ''}</small> : null}
         </article> : null}
       </section> : null}
 

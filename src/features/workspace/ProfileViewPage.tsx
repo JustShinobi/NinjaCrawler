@@ -6,7 +6,7 @@ import { getCurrentWindow } from '@tauri-apps/api/window'
 import {
   deleteSourceMedia,
   enqueueMediaDedupeScan,
-  loadMediaDedupeStatus,
+  loadMediaDedupeSummaryStatus,
   loadMediaThumbnails,
   loadSourceMediaGallery,
   loadWorkspaceSnapshot,
@@ -24,7 +24,7 @@ import type {
   ProviderKey,
   SourceMediaGallery,
   SourceProfile,
-  MediaDedupeJobStatus,
+  MediaDedupeSummaryStatus,
 } from '../../domain/models'
 import { WindowShell } from '../brand/WindowShell'
 import { WindowTitlebar } from '../brand/WindowTitlebar'
@@ -440,7 +440,7 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
   const [bioExpanded, setBioExpanded] = useState(false)
   // Estado ao vivo deste perfil na fila de sync (dirige o botão "Sync now").
   const [syncActivity, setSyncActivity] = useState<'idle' | 'queued' | 'running'>('idle')
-  const [dedupeStatus, setDedupeStatus] = useState<MediaDedupeJobStatus>()
+  const [dedupeStatus, setDedupeStatus] = useState<MediaDedupeSummaryStatus>()
   const [dedupeLaunching, setDedupeLaunching] = useState(false)
   const [dedupeFeedback, setDedupeFeedback] = useState<{
     tone: 'success' | 'error'
@@ -671,7 +671,7 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
   useEffect(() => {
     let unlisten: (() => void) | undefined
     let active = true
-    void loadMediaDedupeStatus()
+    void loadMediaDedupeSummaryStatus()
       .then((status) => {
         if (active) setDedupeStatus(status)
       })

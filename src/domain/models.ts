@@ -937,6 +937,24 @@ export interface SourceProfile {
   importedAt?: string
 }
 
+export interface QueueSourceReference {
+  id: string
+  provider: ProviderKey
+  handle: string
+  groupId?: string
+  profileImagePath?: string
+}
+
+export interface QueueGroupReference {
+  id: string
+  name: string
+}
+
+export interface QueueReferenceData {
+  sources: QueueSourceReference[]
+  groups: QueueGroupReference[]
+}
+
 export interface SourceSyncRun {
   id: string
   sourceId: string
@@ -1254,6 +1272,24 @@ export interface MediaDedupeJobStatus {
   sourceJobs: MediaDedupeSourceJobStatus[]
   latestScan?: MediaDedupeScanResult
   updatedAt: string
+}
+
+export type MediaDedupeSummaryStatus = Omit<
+  MediaDedupeJobStatus,
+  'sourceJobs' | 'latestScan'
+>
+
+export interface MediaDedupeResultPage {
+  scanId: string
+  exactGroups: MediaDedupeGroup[]
+  similarGroups: MediaDedupeGroup[]
+  exactOffset: number
+  similarOffset: number
+  exactTotal: number
+  consolidatableExactTotal: number
+  similarTotal: number
+  pageSize: number
+  hasMore: boolean
 }
 
 export interface MediaDedupeScanInput {

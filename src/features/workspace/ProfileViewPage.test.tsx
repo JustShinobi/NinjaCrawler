@@ -10,7 +10,7 @@ const bridgeMocks = vi.hoisted(() => ({
   loadMediaThumbnails: vi.fn(),
   deleteSourceMedia: vi.fn(),
   enqueueMediaDedupeScan: vi.fn(),
-  loadMediaDedupeStatus: vi.fn(),
+  loadMediaDedupeSummaryStatus: vi.fn(),
   loadWorkspaceSnapshot: vi.fn(),
   openExternalTarget: vi.fn(),
   openMediaFile: vi.fn(),
@@ -203,7 +203,7 @@ describe('ProfileViewPage', () => {
     bridgeMocks.subscribeToProfileViewSource.mockResolvedValue(() => undefined)
     bridgeMocks.subscribeToSourceSyncQueue.mockResolvedValue(() => undefined)
     bridgeMocks.subscribeToDesktopRuntimeEvents.mockResolvedValue(() => undefined)
-    bridgeMocks.loadMediaDedupeStatus.mockResolvedValue({
+    bridgeMocks.loadMediaDedupeSummaryStatus.mockResolvedValue({
       state: 'idle',
       stage: 'idle',
       resourceProfile: 'balanced',

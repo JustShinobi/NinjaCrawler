@@ -93,7 +93,10 @@ import type {
   MediaDedupeFile,
   MediaDedupeGroup,
   MediaDedupeJobStatus,
+  MediaDedupeResultPage,
   MediaDedupeScanResult,
+  MediaDedupeSummaryStatus,
+  QueueReferenceData,
   SchedulerSet,
   SchedulerGroup,
   SchedulerGroupUpsert,
@@ -157,6 +160,7 @@ const DESKTOP_SOURCE_SYNC_QUEUE_CHANGED_EVENT_NAME = 'runtime://source-sync-queu
 const DESKTOP_SOURCE_DELETE_QUEUE_CHANGED_EVENT_NAME = 'runtime://source-delete-queue-changed'
 const DESKTOP_MEDIA_PATH_MIGRATION_QUEUE_CHANGED_EVENT_NAME = 'runtime://media-path-migration-queue-changed'
 const DESKTOP_MEDIA_DEDUPE_STATUS_CHANGED_EVENT_NAME = 'media-dedupe://status-changed'
+const DESKTOP_MEDIA_DEDUPE_RESULTS_CHANGED_EVENT_NAME = 'media-dedupe://results-changed'
 const DESKTOP_IMPORT_QUEUE_CHANGED_EVENT_NAME = 'runtime://import-queue-changed'
 const DESKTOP_CONNECTOR_RUNTIME_CHANGED_EVENT_NAME = 'runtime://connector-runtime-changed'
 const DESKTOP_ACCOUNTS_WINDOW_INTENT_EVENT_NAME = 'runtime://accounts-window-intent'
@@ -2278,6 +2282,37 @@ function normalizeMediaDedupeJobStatus(raw: unknown): MediaDedupeJobStatus {
   }
 }
 
+function normalizeMediaDedupeSummaryStatus(raw: unknown): MediaDedupeSummaryStatus {
+  const summary = { ...normalizeMediaDedupeJobStatus(raw) }
+  Reflect.deleteProperty(summary, 'sourceJobs')
+  Reflect.deleteProperty(summary, 'latestScan')
+  return summary
+}
+
+function normalizeMediaDedupeResultPage(raw: unknown): MediaDedupeResultPage | undefined {
+  if (!isRecord(raw)) return undefined
+  return {
+    scanId: stringValue(raw, ['scanId', 'scan_id'], ''),
+    exactGroups: arrayValue(raw, ['exactGroups', 'exact_groups'])
+      .map(normalizeMediaDedupeGroup)
+      .filter((group): group is MediaDedupeGroup => group !== null),
+    similarGroups: arrayValue(raw, ['similarGroups', 'similar_groups'])
+      .map(normalizeMediaDedupeGroup)
+      .filter((group): group is MediaDedupeGroup => group !== null),
+    exactOffset: numberValue(raw, ['exactOffset', 'exact_offset'], 0),
+    similarOffset: numberValue(raw, ['similarOffset', 'similar_offset'], 0),
+    exactTotal: numberValue(raw, ['exactTotal', 'exact_total'], 0),
+    consolidatableExactTotal: numberValue(
+      raw,
+      ['consolidatableExactTotal', 'consolidatable_exact_total'],
+      0,
+    ),
+    similarTotal: numberValue(raw, ['similarTotal', 'similar_total'], 0),
+    pageSize: numberValue(raw, ['pageSize', 'page_size'], 0),
+    hasMore: booleanValue(raw, ['hasMore', 'has_more'], false),
+  }
+}
+
 function normalizeStringMap(raw: unknown): Record<string, string> {
   if (!isRecord(raw)) {
     return {}
@@ -2354,6 +2389,30 @@ export async function pullWorkspaceSnapshot(): Promise<WorkspaceSnapshot> {
   return invokeWorkspaceCommand('get_workspace_snapshot', undefined)
 }
 
+export async function loadQueueReferenceData(): Promise<QueueReferenceData> {
+  const raw = await invoke<unknown>('load_queue_reference_data')
+  const value = isRecord(raw) ? raw : {}
+  return {
+    sources: arrayValue(value, ['sources']).flatMap((rawSource) => {
+      if (!isRecord(rawSource)) return []
+      return [{
+        id: stringValue(rawSource, ['id'], ''),
+        provider: normalizeProviderKey(pick(rawSource, 'provider')),
+        handle: stringValue(rawSource, ['handle'], ''),
+        groupId: optionalStringValue(rawSource, ['groupId', 'group_id']),
+        profileImagePath: optionalStringValue(rawSource, ['profileImagePath', 'profile_image_path']),
+      }]
+    }),
+    groups: arrayValue(value, ['groups']).flatMap((rawGroup) => {
+      if (!isRecord(rawGroup)) return []
+      return [{
+        id: stringValue(rawGroup, ['id'], ''),
+        name: stringValue(rawGroup, ['name'], ''),
+      }]
+    }),
+  }
+}
+
 export async function loadWorkspaceHealth(): Promise<WorkspaceHealthSnapshot> {
   return normalizeWorkspaceHealth(await invoke<unknown>('load_workspace_health'))
 }
@@ -2372,24 +2431,40 @@ export async function loadMediaDedupeStatus(): Promise<MediaDedupeJobStatus> {
   return normalizeMediaDedupeJobStatus(await invoke<unknown>('media_dedupe_status'))
 }
 
-export async function installMediaDedupeSimilarityEngine(): Promise<MediaDedupeJobStatus> {
-  return normalizeMediaDedupeJobStatus(await invoke<unknown>('install_media_dedupe_similarity_engine'))
+export async function loadMediaDedupeSummaryStatus(): Promise<MediaDedupeSummaryStatus> {
+  return normalizeMediaDedupeSummaryStatus(await invoke<unknown>('media_dedupe_summary_status'))
 }
 
-export async function installMediaToolRuntime(): Promise<MediaDedupeJobStatus> {
-  return normalizeMediaDedupeJobStatus(await invoke<unknown>('install_media_tool_runtime'))
+export async function loadMediaDedupeResultPage(
+  exactOffset: number,
+  similarOffset: number,
+  pageSize = 50,
+): Promise<MediaDedupeResultPage | undefined> {
+  return normalizeMediaDedupeResultPage(await invoke<unknown>('media_dedupe_result_page', {
+    exactOffset,
+    similarOffset,
+    pageSize,
+  }))
 }
 
-export async function enqueueMediaDedupeScan(input: MediaDedupeScanInput): Promise<MediaDedupeJobStatus> {
-  return normalizeMediaDedupeJobStatus(await invoke<unknown>('enqueue_media_dedupe_scan', { input }))
+export async function installMediaDedupeSimilarityEngine(): Promise<MediaDedupeSummaryStatus> {
+  return normalizeMediaDedupeSummaryStatus(await invoke<unknown>('install_media_dedupe_similarity_engine'))
 }
 
-export async function cancelMediaDedupe(): Promise<MediaDedupeJobStatus> {
-  return normalizeMediaDedupeJobStatus(await invoke<unknown>('cancel_media_dedupe'))
+export async function installMediaToolRuntime(): Promise<MediaDedupeSummaryStatus> {
+  return normalizeMediaDedupeSummaryStatus(await invoke<unknown>('install_media_tool_runtime'))
 }
 
-export async function applyMediaDedupe(input: MediaDedupeApplyInput): Promise<MediaDedupeJobStatus> {
-  return normalizeMediaDedupeJobStatus(await invoke<unknown>('apply_media_dedupe', { input }))
+export async function enqueueMediaDedupeScan(input: MediaDedupeScanInput): Promise<MediaDedupeSummaryStatus> {
+  return normalizeMediaDedupeSummaryStatus(await invoke<unknown>('enqueue_media_dedupe_scan', { input }))
+}
+
+export async function cancelMediaDedupe(): Promise<MediaDedupeSummaryStatus> {
+  return normalizeMediaDedupeSummaryStatus(await invoke<unknown>('cancel_media_dedupe'))
+}
+
+export async function applyMediaDedupe(input: MediaDedupeApplyInput): Promise<MediaDedupeSummaryStatus> {
+  return normalizeMediaDedupeSummaryStatus(await invoke<unknown>('apply_media_dedupe', { input }))
 }
 
 export async function getAppBuildInfo(): Promise<AppBuildInfo> {
@@ -2443,7 +2518,8 @@ export async function subscribeToDesktopRuntimeEvents(handlers: {
   onSourceSyncQueueChanged?: (status: SourceSyncQueueStatus) => void
   onSourceDeleteQueueChanged?: (status: SourceDeleteQueueStatus) => void
   onMediaPathMigrationQueueChanged?: (status: MediaPathMigrationQueueStatus) => void
-  onMediaDedupeStatusChanged?: (status: MediaDedupeJobStatus) => void
+  onMediaDedupeStatusChanged?: (status: MediaDedupeSummaryStatus) => void
+  onMediaDedupeResultsChanged?: () => void
   onImportQueueChanged?: (status: ImportQueueStatus) => void
   onConnectorRuntimeChanged?: () => void
   onRuntimeLogAppended?: (entry: RuntimeLogEntry) => void
@@ -2484,7 +2560,10 @@ export async function subscribeToDesktopRuntimeEvents(handlers: {
       handlers.onMediaPathMigrationQueueChanged?.(normalizeMediaPathMigrationQueueStatus(event.payload))
     }),
     listen(DESKTOP_MEDIA_DEDUPE_STATUS_CHANGED_EVENT_NAME, (event) => {
-      handlers.onMediaDedupeStatusChanged?.(normalizeMediaDedupeJobStatus(event.payload))
+      handlers.onMediaDedupeStatusChanged?.(normalizeMediaDedupeSummaryStatus(event.payload))
+    }),
+    listen(DESKTOP_MEDIA_DEDUPE_RESULTS_CHANGED_EVENT_NAME, () => {
+      handlers.onMediaDedupeResultsChanged?.()
     }),
     listen(DESKTOP_IMPORT_QUEUE_CHANGED_EVENT_NAME, (event) => {
       handlers.onImportQueueChanged?.(normalizeImportQueueStatus(event.payload))
