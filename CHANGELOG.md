@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.29.0](https://github.com/JustShinobi/NinjaCrawler/compare/v0.28.0...v0.29.0) (2026-07-31)
+
+
+### Features
+
+* **profile-view:** render post captions and improve lightbox interaction UX ([#106](https://github.com/JustShinobi/NinjaCrawler/issues/106)) ([d0e5dc8](https://github.com/JustShinobi/NinjaCrawler/commit/d0e5dc8dcba84f0ce372717ac6e2725bbb603d08))
+* **queue-status:** surface what each job downloads and group thumbnail runs ([#111](https://github.com/JustShinobi/NinjaCrawler/issues/111)) ([38c9edd](https://github.com/JustShinobi/NinjaCrawler/commit/38c9edd9ad2a0e780abe73a2fc028a771136d2cb))
+* **workspace:** overhaul duplicate results UI and calibrate VDF scan ([#102](https://github.com/JustShinobi/NinjaCrawler/issues/102)) ([51e87ec](https://github.com/JustShinobi/NinjaCrawler/commit/51e87ec9db6ea566e32681878f35b8a2837a58a5))
+
+
+### Bug Fixes
+
+* **profile-view:** improve lightbox navigation and support slideshow audio ([#103](https://github.com/JustShinobi/NinjaCrawler/issues/103)) ([08d2b53](https://github.com/JustShinobi/NinjaCrawler/commit/08d2b531c6e5da9faaf113e6df5a43c13d1106dc))
+* **tiktok:** reconcile legacy carousels with audio ([#108](https://github.com/JustShinobi/NinjaCrawler/issues/108)) ([dfba8ee](https://github.com/JustShinobi/NinjaCrawler/commit/dfba8ee4b54fd8832b72382109838a71642cbd50))
+* **windows:** restore queue status responsiveness ([#110](https://github.com/JustShinobi/NinjaCrawler/issues/110)) ([22a360e](https://github.com/JustShinobi/NinjaCrawler/commit/22a360e63946a4cbe65f3169e8eea9d7c6c7fff0))
+
 ## [0.28.0](https://github.com/JustShinobi/NinjaCrawler/compare/v0.27.0...v0.28.0) (2026-07-19)
 
 
