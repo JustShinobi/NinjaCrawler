@@ -17,6 +17,7 @@ import {
   enqueueMediaDedupeScan,
   installMediaDedupeSimilarityEngine,
   installMediaToolRuntime,
+  loadMediaDedupeResultPage,
   loadMediaDedupeStatus,
   loadWorkspaceHealth,
   openAccountsWindow,
@@ -32,9 +33,11 @@ import type {
   MediaDedupeFile,
   MediaDedupeGroup,
   MediaDedupeJobStatus,
+  MediaDedupeResultPage,
   MediaDedupeResourceProfile,
   MediaDedupeScanProfile,
   MediaDedupeSimilarSelection,
+  MediaDedupeSummaryStatus,
   SourceHealthItem,
   WorkspaceHealthIncident,
   WorkspaceHealthSeverity,
@@ -135,6 +138,45 @@ const idleDedupeStatus: MediaDedupeJobStatus = {
   sourceJobs: [],
   updatedAt: "",
 };
+
+function mergeDedupeSummary(
+  current: MediaDedupeJobStatus | undefined,
+  summary: MediaDedupeSummaryStatus,
+): MediaDedupeJobStatus {
+  return {
+    ...(current ?? idleDedupeStatus),
+    ...summary,
+    sourceJobs: current?.sourceJobs ?? [],
+    latestScan: current?.latestScan,
+  };
+}
+
+function attachDedupeResultPage(
+  status: MediaDedupeJobStatus,
+  page: MediaDedupeResultPage | undefined,
+): MediaDedupeJobStatus {
+  if (!status.latestScan || !page || status.latestScan.scanId !== page.scanId) {
+    return status;
+  }
+  return {
+    ...status,
+    latestScan: {
+      ...status.latestScan,
+      exactGroups: page.exactGroups,
+      similarGroups: page.similarGroups,
+    },
+  };
+}
+
+async function loadDedupeDetails(): Promise<{
+  status: MediaDedupeJobStatus;
+  page?: MediaDedupeResultPage;
+}> {
+  const status = await loadMediaDedupeStatus();
+  if (!status.latestScan) return { status };
+  const page = await loadMediaDedupeResultPage(0, 0);
+  return { status: attachDedupeResultPage(status, page), page };
+}
 
 function dedupeStageLabel(status: MediaDedupeJobStatus): string {
   switch (status.stage) {
@@ -331,6 +373,9 @@ export function WorkspaceHealthWindowPage({
 }) {
   const [health, setHealth] = useState<WorkspaceHealthSnapshot>();
   const [dedupe, setDedupe] = useState<MediaDedupeJobStatus>();
+  const [dedupeResultPage, setDedupeResultPage] =
+    useState<MediaDedupeResultPage>();
+  const [loadingMoreDedupeResults, setLoadingMoreDedupeResults] = useState(false);
   const [tab, setTab] = useState<HealthTab>(initialIntent?.initialTab ?? "overview");
   const [selectedIncident, setSelectedIncident] =
     useState<WorkspaceHealthIncident>();
@@ -367,7 +412,7 @@ export function WorkspaceHealthWindowPage({
     if (!silent) setLoading(true);
     const [healthResult, dedupeResult] = await Promise.allSettled([
       loadWorkspaceHealth(),
-      loadMediaDedupeStatus(),
+      loadDedupeDetails(),
     ]);
     if (healthResult.status === "fulfilled") {
       setHealth(healthResult.value);
@@ -378,7 +423,8 @@ export function WorkspaceHealthWindowPage({
       );
     }
     if (dedupeResult.status === "fulfilled") {
-      setDedupe(dedupeResult.value);
+      setDedupe(dedupeResult.value.status);
+      setDedupeResultPage(dedupeResult.value.page);
       setCleanupError(undefined);
     } else {
       setCleanupError(
@@ -418,7 +464,16 @@ export function WorkspaceHealthWindowPage({
     let unsubscribe: (() => void) | undefined;
     void subscribeToDesktopRuntimeEvents({
       onWorkspaceSnapshotChanged: () => void refresh(true),
-      onMediaDedupeStatusChanged: (status) => setDedupe(status),
+      onMediaDedupeStatusChanged: (status) =>
+        setDedupe((current) => mergeDedupeSummary(current, status)),
+      onMediaDedupeResultsChanged: () => {
+        void loadDedupeDetails()
+          .then(({ status, page }) => {
+            setDedupe(status);
+            setDedupeResultPage(page);
+          })
+          .catch(() => undefined);
+      },
     })
       .then((value) => {
         unsubscribe = value;
@@ -443,7 +498,7 @@ export function WorkspaceHealthWindowPage({
   );
 
   const runCleanupAction = useCallback(
-    async (key: string, action: () => Promise<MediaDedupeJobStatus>) => {
+    async (key: string, action: () => Promise<MediaDedupeSummaryStatus>) => {
       setBusyAction(key);
       setCleanupError(undefined);
       if (key === "scan") {
@@ -464,7 +519,7 @@ export function WorkspaceHealthWindowPage({
       }
       try {
         const status = await action();
-        setDedupe(status);
+        setDedupe((current) => mergeDedupeSummary(current, status));
         await refresh(true);
       } catch (actionError) {
         setCleanupError(
@@ -476,6 +531,37 @@ export function WorkspaceHealthWindowPage({
     },
     [refresh],
   );
+
+  const loadMoreDedupeResults = useCallback(async () => {
+    const scan = dedupe?.latestScan;
+    if (!scan || !dedupeResultPage?.hasMore || loadingMoreDedupeResults) return;
+    setLoadingMoreDedupeResults(true);
+    try {
+      const page = await loadMediaDedupeResultPage(
+        scan.exactGroups.length,
+        scan.similarGroups.length,
+      );
+      if (!page || page.scanId !== scan.scanId) return;
+      setDedupe((current) => {
+        if (!current?.latestScan || current.latestScan.scanId !== page.scanId) {
+          return current;
+        }
+        return {
+          ...current,
+          latestScan: {
+            ...current.latestScan,
+            exactGroups: [...current.latestScan.exactGroups, ...page.exactGroups],
+            similarGroups: [...current.latestScan.similarGroups, ...page.similarGroups],
+          },
+        };
+      });
+      setDedupeResultPage(page);
+    } catch (pageError) {
+      setCleanupError(errorMessage(pageError, "Failed to load more duplicate results."));
+    } finally {
+      setLoadingMoreDedupeResults(false);
+    }
+  }, [dedupe?.latestScan, dedupeResultPage?.hasMore, loadingMoreDedupeResults]);
 
   if (loading && !health) {
     return (
@@ -688,6 +774,10 @@ export function WorkspaceHealthWindowPage({
               onResourceProfile={setCleanupResourceProfile}
               scanProfile={cleanupScanProfile}
               onScanProfile={setCleanupScanProfile}
+              hasMoreDedupeResults={Boolean(dedupeResultPage?.hasMore)}
+              loadingMoreDedupeResults={loadingMoreDedupeResults}
+              onLoadMoreDedupeResults={loadMoreDedupeResults}
+              consolidatableExactTotal={dedupeResultPage?.consolidatableExactTotal ?? 0}
             />
           ) : null}
         </main>
@@ -1121,6 +1211,10 @@ function Storage({
   onResourceProfile,
   scanProfile,
   onScanProfile,
+  hasMoreDedupeResults,
+  loadingMoreDedupeResults,
+  onLoadMoreDedupeResults,
+  consolidatableExactTotal,
 }: {
   health: WorkspaceHealthSnapshot;
   dedupe?: MediaDedupeJobStatus;
@@ -1128,7 +1222,7 @@ function Storage({
   busyAction?: string;
   runCleanupAction: (
     key: string,
-    action: () => Promise<MediaDedupeJobStatus>,
+    action: () => Promise<MediaDedupeSummaryStatus>,
   ) => Promise<void>;
   reviewSelections: Record<string, { keepPath: string; removePaths: string[] }>;
   setReviewSelections: Dispatch<
@@ -1140,6 +1234,10 @@ function Storage({
   onResourceProfile: (profile: MediaDedupeResourceProfile) => void;
   scanProfile: MediaDedupeScanProfile;
   onScanProfile: (profile: MediaDedupeScanProfile) => void;
+  hasMoreDedupeResults: boolean;
+  loadingMoreDedupeResults: boolean;
+  onLoadMoreDedupeResults: () => Promise<void>;
+  consolidatableExactTotal: number;
 }) {
   const scan = dedupe?.latestScan;
   const similarityEngine =
@@ -1175,8 +1273,6 @@ function Storage({
   const active = Boolean(
     dedupe && ["queued", "scanning", "applying"].includes(dedupe.state),
   );
-  const consolidatableExactGroups =
-    scan?.exactGroups.filter((group) => group.consolidatable) ?? [];
   const similarSelections: MediaDedupeSimilarSelection[] = Object.entries(
     reviewSelections,
   )
@@ -1588,14 +1684,24 @@ function Storage({
             setSelections={setReviewSelections}
             similarGroups={scan.similarGroups}
           />
-          {consolidatableExactGroups.length > 0 ? (
+          {hasMoreDedupeResults ? (
+            <button
+              className="ghost-button health-apply-button"
+              disabled={loadingMoreDedupeResults}
+              onClick={() => void onLoadMoreDedupeResults()}
+              type="button"
+            >
+              {loadingMoreDedupeResults ? "Loading more results…" : "Load more duplicate results"}
+            </button>
+          ) : null}
+          {consolidatableExactTotal > 0 ? (
             <button
               className="primary-button health-apply-button"
               disabled={busyAction === "apply-exact"}
               onClick={() => {
                 if (
                   window.confirm(
-                    `Consolidate ${consolidatableExactGroups.length} exact duplicate groups using hardlinks? All paths will be preserved.`,
+                    `Consolidate ${consolidatableExactTotal} exact duplicate groups using hardlinks? All paths will be preserved.`,
                   )
                 )
                   void runCleanupAction("apply-exact", () =>

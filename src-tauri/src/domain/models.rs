@@ -1419,6 +1419,30 @@ pub struct SourceProfile {
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct QueueSourceReference {
+    pub id: String,
+    pub provider: String,
+    pub handle: String,
+    pub group_id: Option<String>,
+    pub profile_image_path: Option<String>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QueueGroupReference {
+    pub id: String,
+    pub name: String,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QueueReferenceData {
+    pub sources: Vec<QueueSourceReference>,
+    pub groups: Vec<QueueGroupReference>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct BatchSourceProfilePatch {
     pub source_ids: Vec<String>,
     pub labels_to_add: Vec<String>,
@@ -1761,6 +1785,50 @@ pub struct MediaDedupeJobStatus {
     pub source_jobs: Vec<MediaDedupeSourceJobStatus>,
     pub latest_scan: Option<MediaDedupeScanResult>,
     pub updated_at: String,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaDedupeSummaryStatus {
+    pub state: String,
+    pub stage: String,
+    pub scan_id: Option<String>,
+    pub provider_scope: Option<String>,
+    pub source_scope: Option<String>,
+    pub resource_profile: String,
+    pub scan_profile: String,
+    pub similarity_scope: String,
+    pub files_processed: u64,
+    pub files_total: u64,
+    pub bytes_processed: u64,
+    pub bytes_total: u64,
+    pub current_path: Option<String>,
+    pub current_root: Option<String>,
+    pub cancellable: bool,
+    pub error: Option<String>,
+    pub similarity_engine: MediaDedupeEngineStatus,
+    pub perceptual_sources_processed: u32,
+    pub perceptual_sources_total: u32,
+    pub perceptual_sources_failed: u32,
+    pub elapsed_seconds: u64,
+    pub estimated_seconds_remaining: Option<u64>,
+    pub throughput_per_second: Option<f64>,
+    pub updated_at: String,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaDedupeResultPage {
+    pub scan_id: String,
+    pub exact_groups: Vec<MediaDedupeGroup>,
+    pub similar_groups: Vec<MediaDedupeGroup>,
+    pub exact_offset: usize,
+    pub similar_offset: usize,
+    pub exact_total: usize,
+    pub consolidatable_exact_total: usize,
+    pub similar_total: usize,
+    pub page_size: usize,
+    pub has_more: bool,
 }
 
 #[derive(Clone, Default, Serialize, Deserialize)]

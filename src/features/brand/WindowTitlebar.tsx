@@ -1,5 +1,5 @@
 import { getCurrentWindow } from '@tauri-apps/api/window'
-import { useEffect, useRef, useState, type MouseEvent, type ReactNode } from 'react'
+import { useEffect, useState, type ReactNode } from 'react'
 import { BrandLockup } from './BrandLockup'
 
 export interface WindowController {
@@ -60,8 +60,6 @@ export function WindowTitlebar({
   const [maximized, setMaximized] = useState(false)
   // Defaults to focused so first paint / browser tests keep full contrast chrome.
   const [windowFocused, setWindowFocused] = useState(true)
-  const dragStartRef = useRef<{ x: number; y: number } | undefined>(undefined)
-  const dragStartedRef = useRef(false)
 
   useEffect(() => {
     if (!controller) {
@@ -137,40 +135,6 @@ export function WindowTitlebar({
     }
   }
 
-  const handleDragMouseDown = (event: MouseEvent<HTMLDivElement>) => {
-    if (event.button !== 0) {
-      return
-    }
-
-    if (event.detail >= 2) {
-      resetDragGesture()
-      runWindowCommand(controller?.toggleMaximize)
-      return
-    }
-
-    dragStartRef.current = { x: event.clientX, y: event.clientY }
-    dragStartedRef.current = false
-  }
-
-  const handleDragMouseMove = (event: MouseEvent<HTMLDivElement>) => {
-    const start = dragStartRef.current
-    if (!controller || !start || dragStartedRef.current || event.buttons !== 1) {
-      return
-    }
-
-    if (Math.hypot(event.clientX - start.x, event.clientY - start.y) < 3) {
-      return
-    }
-
-    dragStartedRef.current = true
-    runWindowCommand(controller.startDragging)
-  }
-
-  const resetDragGesture = () => {
-    dragStartRef.current = undefined
-    dragStartedRef.current = false
-  }
-
   const hasMenus = Boolean(children)
 
   return (
@@ -197,10 +161,7 @@ export function WindowTitlebar({
       <div
         aria-hidden="true"
         className="window-titlebar-drag-region main-titlebar-drag-region"
-        onMouseDown={handleDragMouseDown}
-        onMouseLeave={resetDragGesture}
-        onMouseMove={handleDragMouseMove}
-        onMouseUp={resetDragGesture}
+        data-tauri-drag-region
       />
       {trailing ? <div className="window-titlebar-trailing">{trailing}</div> : null}
       <div aria-label="Window controls" className="window-titlebar-controls main-titlebar-controls" role="group">

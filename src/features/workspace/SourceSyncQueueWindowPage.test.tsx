@@ -15,10 +15,10 @@ const bridgeMocks = vi.hoisted(() => ({
   runSourceSync: vi.fn(),
   loadSourceDeleteQueueStatus: vi.fn(),
   loadSourceSyncQueueStatus: vi.fn(),
-  loadWorkspaceSnapshot: vi.fn(),
+  loadQueueReferenceData: vi.fn(),
   loadMediaThumbnailQueueStatus: vi.fn(),
   loadMediaPathMigrationQueueStatus: vi.fn(),
-  loadMediaDedupeStatus: vi.fn(),
+  loadMediaDedupeSummaryStatus: vi.fn(),
   enqueueMediaThumbnailGeneration: vi.fn(),
   openConnectorDebugWindow: vi.fn(),
   openWorkspaceHealthWindow: vi.fn(),
@@ -119,7 +119,7 @@ describe('SourceSyncQueueWindowPage', () => {
     bridgeMocks.runSourceSync.mockResolvedValue({})
     bridgeMocks.loadSourceSyncQueueStatus.mockResolvedValue(statusFixture())
     bridgeMocks.loadSourceDeleteQueueStatus.mockResolvedValue(deleteStatusFixture())
-    bridgeMocks.loadWorkspaceSnapshot.mockResolvedValue({ sources: [], schedulerGroups: [] })
+    bridgeMocks.loadQueueReferenceData.mockResolvedValue({ sources: [], schedulerGroups: [] })
     bridgeMocks.loadMediaThumbnailQueueStatus.mockResolvedValue({
       queuedCount: 0,
       runningCount: 0,
@@ -140,7 +140,7 @@ describe('SourceSyncQueueWindowPage', () => {
       recentResults: [],
       updatedAt: '',
     })
-    bridgeMocks.loadMediaDedupeStatus.mockResolvedValue({
+    bridgeMocks.loadMediaDedupeSummaryStatus.mockResolvedValue({
       state: 'idle', stage: 'idle', filesProcessed: 0, filesTotal: 0,
       bytesProcessed: 0, bytesTotal: 0, cancellable: false, updatedAt: '',
     })
@@ -475,7 +475,7 @@ describe('SourceSyncQueueWindowPage', () => {
   })
 
   it('queues missing thumbnails for a provider scope', async () => {
-    bridgeMocks.loadWorkspaceSnapshot.mockResolvedValue({
+    bridgeMocks.loadQueueReferenceData.mockResolvedValue({
       sources: [
         { id: 'tk-1', provider: 'tiktok', handle: '@one' },
         { id: 'tk-2', provider: 'tiktok', handle: '@two' },
@@ -553,7 +553,7 @@ describe('SourceSyncQueueWindowPage', () => {
   })
 
   it('uses the refreshed profile avatar for completed migrations in Recent', async () => {
-    bridgeMocks.loadWorkspaceSnapshot.mockResolvedValue({
+    bridgeMocks.loadQueueReferenceData.mockResolvedValue({
       sources: [{ id: 'tw-1', provider: 'twitter', handle: '@moved', profileImagePath: 'S:\\moved\\ProfilePicture.jpg' }],
       schedulerGroups: [],
     })

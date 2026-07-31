@@ -1,6 +1,7 @@
 use crate::domain::models::{
-    MediaDedupeApplyInput, MediaDedupeEngineStatus, MediaDedupeJobStatus, MediaDedupeScanInput,
-    MediaDedupeScanResult,
+    MediaDedupeApplyInput, MediaDedupeEngineStatus, MediaDedupeJobStatus,
+    MediaDedupeResultPage, MediaDedupeScanInput, MediaDedupeScanResult,
+    MediaDedupeSummaryStatus,
 };
 use crate::infrastructure::{
     media_dedupe_vdf, media_metadata_probe, media_path_migration_runtime, media_tool_runtime,
@@ -20,6 +21,7 @@ use tauri::{AppHandle, Emitter};
 use uuid::Uuid;
 
 pub const MEDIA_DEDUPE_STATUS_CHANGED_EVENT: &str = "media-dedupe://status-changed";
+pub const MEDIA_DEDUPE_RESULTS_CHANGED_EVENT: &str = "media-dedupe://results-changed";
 
 struct RuntimeState {
     job_id: Option<String>,
@@ -84,13 +86,19 @@ fn runtime_state() -> &'static Mutex<RuntimeState> {
     STATE.get_or_init(|| Mutex::new(RuntimeState::default()))
 }
 
-pub fn recover_interrupted_jobs() {
+pub fn recover_interrupted_jobs(app: &AppHandle) {
     let _ = workspace_repository::recover_interrupted_media_dedupe_jobs();
-    if let Ok(latest) = workspace_repository::load_latest_media_dedupe_scan() {
-        if let Ok(mut state) = runtime_state().lock() {
-            state.latest_scan = latest;
-        }
+    let latest = workspace_repository::load_latest_media_dedupe_scan().ok().flatten();
+    if let Ok(mut state) = runtime_state().lock() {
+        state.engine_status = Some(media_dedupe_vdf::status());
+        state.latest_scan = latest.clone();
     }
+    if let Some(scan) = latest.as_ref() {
+        spawn_missing_video_thumbnail_generation(app, scan);
+        spawn_missing_media_metadata_probe(app, scan);
+    }
+    publish(app);
+    publish_results_changed(app);
 }
 
 pub fn is_source_locked(source_id: &str) -> bool {
@@ -101,27 +109,7 @@ pub fn is_source_locked(source_id: &str) -> bool {
 }
 
 pub fn media_dedupe_status() -> Result<MediaDedupeJobStatus, String> {
-    let mut state = runtime_state().lock().map_err(|error| error.to_string())?;
-    if state.latest_scan.is_none() {
-        state.latest_scan = workspace_repository::load_latest_media_dedupe_scan()?;
-    }
-    if let Some(latest_scan) = state.latest_scan.as_mut() {
-        // The in-memory cache can outlive the scan by a long time (it is only replaced
-        // when another scan completes), while the thumbnail queue keeps generating
-        // thumbnails in the background. Re-resolve on every serve so `thumbnailPath`
-        // reflects whatever has been generated since the result was first cached.
-        workspace_repository::refresh_media_dedupe_thumbnail_paths(latest_scan);
-        workspace_repository::refresh_media_dedupe_metadata(latest_scan);
-        spawn_missing_video_thumbnail_generation(latest_scan);
-        spawn_missing_media_metadata_probe(latest_scan);
-    }
-    if state
-        .engine_status
-        .as_ref()
-        .is_none_or(|status| status.status != "installing" && status.ffmpeg_status != "installing")
-    {
-        state.engine_status = Some(media_dedupe_vdf::status());
-    }
+    let state = runtime_state().lock().map_err(|error| error.to_string())?;
     let source_job_scan_id = state
         .scan_id
         .clone()
@@ -134,7 +122,29 @@ pub fn media_dedupe_status() -> Result<MediaDedupeJobStatus, String> {
     Ok(status)
 }
 
-pub fn install_similarity_engine(app: &AppHandle) -> Result<MediaDedupeJobStatus, String> {
+pub fn media_dedupe_summary_status() -> Result<MediaDedupeSummaryStatus, String> {
+    let state = runtime_state().lock().map_err(|error| error.to_string())?;
+    Ok(summary_from_state(&state))
+}
+
+pub fn media_dedupe_result_page(
+    exact_offset: usize,
+    similar_offset: usize,
+    page_size: usize,
+) -> Result<Option<MediaDedupeResultPage>, String> {
+    let state = runtime_state().lock().map_err(|error| error.to_string())?;
+    let Some(scan) = state.latest_scan.as_ref() else {
+        return Ok(None);
+    };
+    Ok(Some(result_page_from_scan(
+        scan,
+        exact_offset,
+        similar_offset,
+        page_size,
+    )))
+}
+
+pub fn install_similarity_engine(app: &AppHandle) -> Result<MediaDedupeSummaryStatus, String> {
     {
         let mut state = runtime_state().lock().map_err(|error| error.to_string())?;
         if matches!(state.state.as_str(), "queued" | "scanning" | "applying") {
@@ -147,7 +157,7 @@ pub fn install_similarity_engine(app: &AppHandle) -> Result<MediaDedupeJobStatus
             .as_ref()
             .is_some_and(|status| status.status == "installing")
         {
-            return Ok(status_from_state(&state));
+            return Ok(summary_from_state(&state));
         }
         let tools = media_tool_runtime::status();
         state.engine_status = Some(MediaDedupeEngineStatus {
@@ -190,10 +200,10 @@ pub fn install_similarity_engine(app: &AppHandle) -> Result<MediaDedupeJobStatus
             });
         });
     });
-    media_dedupe_status()
+    media_dedupe_summary_status()
 }
 
-pub fn install_ffmpeg_runtime(app: &AppHandle) -> Result<MediaDedupeJobStatus, String> {
+pub fn install_ffmpeg_runtime(app: &AppHandle) -> Result<MediaDedupeSummaryStatus, String> {
     {
         let mut state = runtime_state().lock().map_err(|error| error.to_string())?;
         if matches!(state.state.as_str(), "queued" | "scanning" | "applying") {
@@ -203,7 +213,7 @@ pub fn install_ffmpeg_runtime(app: &AppHandle) -> Result<MediaDedupeJobStatus, S
         }
         let mut engine = media_dedupe_vdf::status();
         if engine.ffmpeg_status == "installing" {
-            return Ok(status_from_state(&state));
+            return Ok(summary_from_state(&state));
         }
         engine.ffmpeg_status = "installing".to_string();
         engine.ffmpeg_available = false;
@@ -224,13 +234,13 @@ pub fn install_ffmpeg_runtime(app: &AppHandle) -> Result<MediaDedupeJobStatus, S
             state.engine_status = Some(engine);
         });
     });
-    media_dedupe_status()
+    media_dedupe_summary_status()
 }
 
 pub fn enqueue_scan(
     app: &AppHandle,
     input: MediaDedupeScanInput,
-) -> Result<MediaDedupeJobStatus, String> {
+) -> Result<MediaDedupeSummaryStatus, String> {
     let provider_scope = normalize_provider_scope(input.provider)?;
     let source_scope = normalize_source_scope(input.source_id);
     let resource_profile = normalize_resource_profile(input.resource_profile)?;
@@ -306,25 +316,25 @@ pub fn enqueue_scan(
             cancel,
         )
     });
-    media_dedupe_status()
+    media_dedupe_summary_status()
 }
 
-pub fn cancel(app: &AppHandle) -> Result<MediaDedupeJobStatus, String> {
+pub fn cancel(app: &AppHandle) -> Result<MediaDedupeSummaryStatus, String> {
     {
         let state = runtime_state().lock().map_err(|error| error.to_string())?;
         if !matches!(state.state.as_str(), "queued" | "scanning") {
-            return Ok(status_from_state(&state));
+            return Ok(summary_from_state(&state));
         }
         state.cancel.store(true, Ordering::Release);
     }
     update_state(app, |state| state.stage = "cancelling".to_string());
-    media_dedupe_status()
+    media_dedupe_summary_status()
 }
 
 pub fn enqueue_apply(
     app: &AppHandle,
     input: MediaDedupeApplyInput,
-) -> Result<MediaDedupeJobStatus, String> {
+) -> Result<MediaDedupeSummaryStatus, String> {
     let scan = workspace_repository::load_media_dedupe_scan_result(&input.scan_id)?;
     if scan.status != "completed" {
         return Err("Only a completed media scan can be applied.".to_string());
@@ -386,7 +396,7 @@ pub fn enqueue_apply(
     publish(app);
     let app = app.clone();
     std::thread::spawn(move || run_apply(app, scan, input));
-    media_dedupe_status()
+    media_dedupe_summary_status()
 }
 
 fn run_scan(
@@ -413,8 +423,7 @@ fn run_scan(
     );
     match outcome {
         Ok(result) => {
-            spawn_missing_video_thumbnail_generation(&result);
-            spawn_missing_media_metadata_probe(&result);
+            let enrichment_scan = result.clone();
             update_state(&app, |state| {
                 state.state = "completed".to_string();
                 state.stage = "completed".to_string();
@@ -423,6 +432,9 @@ fn run_scan(
                 state.latest_scan = Some(result);
                 state.error = None;
             });
+            publish_results_changed(&app);
+            spawn_missing_video_thumbnail_generation(&app, &enrichment_scan);
+            spawn_missing_media_metadata_probe(&app, &enrichment_scan);
         }
         Err(error) if cancel.load(Ordering::Acquire) => {
             let _ = workspace_repository::finish_media_dedupe_scan_with_error(
@@ -1531,7 +1543,7 @@ fn update_state(app: &AppHandle, update: impl FnOnce(&mut RuntimeState)) {
     publish(app);
 }
 
-fn status_from_state(state: &RuntimeState) -> MediaDedupeJobStatus {
+fn progress_metrics(state: &RuntimeState) -> (u64, Option<u64>, Option<f64>) {
     let elapsed_seconds = state
         .started_at
         .as_deref()
@@ -1563,7 +1575,33 @@ fn status_from_state(state: &RuntimeState) -> MediaDedupeJobStatus {
         (enough_samples && progress_total > progress_done && throughput > 0.0)
             .then_some(((progress_total - progress_done) as f64 / throughput).ceil() as u64)
     });
-    MediaDedupeJobStatus {
+    (
+        elapsed_seconds,
+        estimated_seconds_remaining,
+        throughput_per_second,
+    )
+}
+
+fn default_engine_status() -> MediaDedupeEngineStatus {
+    MediaDedupeEngineStatus {
+        status: "not_installed".to_string(),
+        version: media_dedupe_vdf::VDF_VERSION.to_string(),
+        installed: false,
+        ffmpeg_available: false,
+        ffmpeg_status: "not_installed".to_string(),
+        ffmpeg_source: None,
+        ffmpeg_version: None,
+        ffmpeg_install_path: None,
+        ffmpeg_error: None,
+        install_path: None,
+        error: None,
+    }
+}
+
+fn summary_from_state(state: &RuntimeState) -> MediaDedupeSummaryStatus {
+    let (elapsed_seconds, estimated_seconds_remaining, throughput_per_second) =
+        progress_metrics(state);
+    MediaDedupeSummaryStatus {
         state: state.state.clone(),
         stage: state.stage.clone(),
         scan_id: state.scan_id.clone(),
@@ -1583,28 +1621,100 @@ fn status_from_state(state: &RuntimeState) -> MediaDedupeJobStatus {
         similarity_engine: state
             .engine_status
             .clone()
-            .unwrap_or_else(|| MediaDedupeEngineStatus {
-                status: "not_installed".to_string(),
-                version: media_dedupe_vdf::VDF_VERSION.to_string(),
-                installed: false,
-                ffmpeg_available: false,
-                ffmpeg_status: "not_installed".to_string(),
-                ffmpeg_source: None,
-                ffmpeg_version: None,
-                ffmpeg_install_path: None,
-                ffmpeg_error: None,
-                install_path: None,
-                error: None,
-            }),
+            .unwrap_or_else(default_engine_status),
         perceptual_sources_processed: state.perceptual_sources_processed,
         perceptual_sources_total: state.perceptual_sources_total,
         perceptual_sources_failed: state.perceptual_sources_failed,
         elapsed_seconds,
         estimated_seconds_remaining,
         throughput_per_second,
-        source_jobs: Vec::new(),
-        latest_scan: state.latest_scan.clone(),
         updated_at: Utc::now().to_rfc3339(),
+    }
+}
+
+fn scan_summary(scan: &MediaDedupeScanResult) -> MediaDedupeScanResult {
+    MediaDedupeScanResult {
+        scan_id: scan.scan_id.clone(),
+        provider_scope: scan.provider_scope.clone(),
+        source_scope: scan.source_scope.clone(),
+        resource_profile: scan.resource_profile.clone(),
+        similarity_scope: scan.similarity_scope.clone(),
+        status: scan.status.clone(),
+        files_scanned: scan.files_scanned,
+        bytes_scanned: scan.bytes_scanned,
+        exact_group_count: scan.exact_group_count,
+        similar_group_count: scan.similar_group_count,
+        reclaimable_bytes: scan.reclaimable_bytes,
+        skipped_video_similarity_count: scan.skipped_video_similarity_count,
+        started_at: scan.started_at.clone(),
+        finished_at: scan.finished_at.clone(),
+        exact_groups: Vec::new(),
+        similar_groups: Vec::new(),
+    }
+}
+
+fn result_page_from_scan(
+    scan: &MediaDedupeScanResult,
+    exact_offset: usize,
+    similar_offset: usize,
+    page_size: usize,
+) -> MediaDedupeResultPage {
+    let page_size = page_size.clamp(1, 100);
+    let exact_offset = exact_offset.min(scan.exact_groups.len());
+    let similar_offset = similar_offset.min(scan.similar_groups.len());
+    let exact_end = exact_offset
+        .saturating_add(page_size)
+        .min(scan.exact_groups.len());
+    let similar_end = similar_offset
+        .saturating_add(page_size)
+        .min(scan.similar_groups.len());
+    MediaDedupeResultPage {
+        scan_id: scan.scan_id.clone(),
+        exact_groups: scan.exact_groups[exact_offset..exact_end].to_vec(),
+        similar_groups: scan.similar_groups[similar_offset..similar_end].to_vec(),
+        exact_offset,
+        similar_offset,
+        exact_total: scan.exact_groups.len(),
+        consolidatable_exact_total: scan
+            .exact_groups
+            .iter()
+            .filter(|group| group.consolidatable)
+            .count(),
+        similar_total: scan.similar_groups.len(),
+        page_size,
+        has_more: exact_end < scan.exact_groups.len() || similar_end < scan.similar_groups.len(),
+    }
+}
+
+fn status_from_state(state: &RuntimeState) -> MediaDedupeJobStatus {
+    let summary = summary_from_state(state);
+    MediaDedupeJobStatus {
+        state: summary.state,
+        stage: summary.stage,
+        scan_id: summary.scan_id,
+        provider_scope: summary.provider_scope,
+        source_scope: summary.source_scope,
+        resource_profile: summary.resource_profile,
+        scan_profile: summary.scan_profile,
+        similarity_scope: summary.similarity_scope,
+        files_processed: summary.files_processed,
+        files_total: summary.files_total,
+        bytes_processed: summary.bytes_processed,
+        bytes_total: summary.bytes_total,
+        current_path: summary.current_path,
+        current_root: summary.current_root,
+        cancellable: summary.cancellable,
+        error: summary.error,
+        similarity_engine: summary.similarity_engine,
+        perceptual_sources_processed: summary.perceptual_sources_processed,
+        perceptual_sources_total: summary.perceptual_sources_total,
+        perceptual_sources_failed: summary.perceptual_sources_failed,
+        elapsed_seconds: summary.elapsed_seconds,
+        estimated_seconds_remaining: summary.estimated_seconds_remaining,
+        throughput_per_second: summary.throughput_per_second,
+        source_jobs: Vec::new(),
+        latest_scan: state.latest_scan.as_ref().map(scan_summary),
+        updated_at: summary.updated_at,
     }
 }
 
@@ -1661,9 +1771,35 @@ fn normalize_source_scope(source_id: Option<String>) -> Option<String> {
 }
 
 fn publish(app: &AppHandle) {
-    if let Ok(status) = media_dedupe_status() {
+    if let Ok(status) = media_dedupe_summary_status() {
         let _ = app.emit(MEDIA_DEDUPE_STATUS_CHANGED_EVENT, status);
     }
+}
+
+fn publish_results_changed(app: &AppHandle) {
+    let _ = app.emit(MEDIA_DEDUPE_RESULTS_CHANGED_EVENT, ());
+}
+
+fn refresh_cached_scan_assets(app: &AppHandle) {
+    let mut refreshed = runtime_state()
+        .lock()
+        .ok()
+        .and_then(|state| state.latest_scan.clone());
+    let Some(scan) = refreshed.as_mut() else {
+        return;
+    };
+    workspace_repository::refresh_media_dedupe_thumbnail_paths(scan);
+    workspace_repository::refresh_media_dedupe_metadata(scan);
+    if let Ok(mut state) = runtime_state().lock() {
+        if state
+            .latest_scan
+            .as_ref()
+            .is_some_and(|current| current.scan_id == scan.scan_id)
+        {
+            state.latest_scan = refreshed;
+        }
+    }
+    publish_results_changed(app);
 }
 
 /// Paths of grouped video files (exact + similar duplicate groups) that don't have a
@@ -1693,10 +1829,9 @@ fn video_thumbnail_generation_in_flight() -> &'static Mutex<HashSet<String>> {
 /// UI stops showing the "VIDEO" placeholder for files the scan already flagged as
 /// duplicates. Deliberately scoped to grouped files only (not the whole scanned
 /// inventory) and runs off the calling thread — thumbnail generation (ffmpeg) must never
-/// block serving scan results. `refresh_media_dedupe_thumbnail_paths` re-resolves
-/// `thumbnailPath` on every status serve, so the UI picks up thumbnails as they land
-/// without any extra signalling from here.
-fn spawn_missing_video_thumbnail_generation(scan: &MediaDedupeScanResult) {
+/// block serving scan results. The cached scan is refreshed once after generation
+/// finishes and the UI is notified through the results-changed event.
+fn spawn_missing_video_thumbnail_generation(app: &AppHandle, scan: &MediaDedupeScanResult) {
     let candidates = grouped_video_files_missing_thumbnails(scan);
     if candidates.is_empty() {
         return;
@@ -1713,6 +1848,7 @@ fn spawn_missing_video_thumbnail_generation(scan: &MediaDedupeScanResult) {
     if to_generate.is_empty() {
         return;
     }
+    let app = app.clone();
     std::thread::spawn(move || {
         for path in &to_generate {
             // `generate_media_thumbnail` is idempotent (skips already-current thumbs)
@@ -1725,6 +1861,7 @@ fn spawn_missing_video_thumbnail_generation(scan: &MediaDedupeScanResult) {
                 in_flight.remove(path);
             }
         }
+        refresh_cached_scan_assets(&app);
     });
 }
 
@@ -1762,10 +1899,9 @@ fn media_metadata_probe_in_flight() -> &'static Mutex<HashSet<String>> {
 /// Probes ffprobe metadata (bitrate/codec/fps/audio) for videos that ended up in
 /// a dedupe result group, so the UI's metadata columns fill in progressively
 /// instead of showing `–` forever. Scoped to grouped files only, runs off the
-/// calling thread — ffprobe must never block serving scan results.
-/// `refresh_media_dedupe_metadata` re-resolves the cache on every status serve,
-/// so the UI picks up results as they land without any extra signalling here.
-fn spawn_missing_media_metadata_probe(scan: &MediaDedupeScanResult) {
+/// calling thread — ffprobe must never block serving scan results. The cached scan
+/// is refreshed once after probing finishes and then published to interested views.
+fn spawn_missing_media_metadata_probe(app: &AppHandle, scan: &MediaDedupeScanResult) {
     let candidates = grouped_video_files_missing_metadata(scan);
     if candidates.is_empty() {
         return;
@@ -1782,6 +1918,7 @@ fn spawn_missing_media_metadata_probe(scan: &MediaDedupeScanResult) {
     if to_probe.is_empty() {
         return;
     }
+    let app = app.clone();
     std::thread::spawn(move || {
         for path in &to_probe {
             media_metadata_probe::probe_and_cache(Path::new(path));
@@ -1791,6 +1928,7 @@ fn spawn_missing_media_metadata_probe(scan: &MediaDedupeScanResult) {
                 in_flight.remove(path);
             }
         }
+        refresh_cached_scan_assets(&app);
     });
 }
 
@@ -1963,6 +2101,66 @@ mod tests {
             exact_groups,
             similar_groups,
         }
+    }
+
+    #[test]
+    fn summary_status_size_does_not_grow_with_scan_results() {
+        let exact_groups = (0..3_000)
+            .map(|index| {
+                group(
+                    "exact",
+                    vec![media_file(
+                        &format!(r"S:\library\unique-large-result-{index}.mp4"),
+                        "video",
+                        None,
+                    )],
+                )
+            })
+            .collect();
+        let mut state = RuntimeState::default();
+        state.latest_scan = Some(scan_result(exact_groups, Vec::new()));
+
+        let payload = serde_json::to_vec(&summary_from_state(&state)).expect("summary payload");
+        let detail = status_from_state(&state);
+
+        assert!(payload.len() < 4_096, "summary grew to {} bytes", payload.len());
+        assert!(!String::from_utf8_lossy(&payload).contains("unique-large-result"));
+        assert!(detail.latest_scan.expect("scan metadata").exact_groups.is_empty());
+    }
+
+    #[test]
+    fn result_pages_are_bounded_and_report_remaining_groups() {
+        let exact_groups = (0..250)
+            .map(|index| {
+                group(
+                    "exact",
+                    vec![media_file(&format!(r"S:\library\exact-{index}.jpg"), "image", None)],
+                )
+            })
+            .collect();
+        let similar_groups = (0..3)
+            .map(|index| {
+                group(
+                    "similar",
+                    vec![media_file(&format!(r"S:\library\similar-{index}.jpg"), "image", None)],
+                )
+            })
+            .collect();
+        let scan = scan_result(exact_groups, similar_groups);
+
+        let first = result_page_from_scan(&scan, 0, 0, 1_000);
+        assert_eq!(first.page_size, 100);
+        assert_eq!(first.exact_groups.len(), 100);
+        assert_eq!(first.similar_groups.len(), 3);
+        assert_eq!(first.exact_total, 250);
+        assert_eq!(first.consolidatable_exact_total, 250);
+        assert_eq!(first.similar_total, 3);
+        assert!(first.has_more);
+
+        let last = result_page_from_scan(&scan, 200, 3, 100);
+        assert_eq!(last.exact_groups.len(), 50);
+        assert!(last.similar_groups.is_empty());
+        assert!(!last.has_more);
     }
 
     #[test]
