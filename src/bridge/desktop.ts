@@ -114,6 +114,7 @@ import type {
   SourceProfileDeleteMode,
   SourceProfileUpsert,
   SourceSyncOptions,
+  SourceSyncOptionsOverride,
   TikTokSourceSyncOptions,
   TwitterSourceSyncOptions,
   SourceSyncRun,
@@ -272,6 +273,11 @@ function guessSettingCategory(key: string): string {
 function optionalStringValue(record: UnknownRecord, keys: string[]): string | undefined {
   const value = pick(record, ...keys)
   return typeof value === 'string' && value.trim().length > 0 ? value : undefined
+}
+
+function optionalBooleanValue(record: UnknownRecord, keys: string[]): boolean | undefined {
+  const value = pick(record, ...keys)
+  return typeof value === 'boolean' ? value : undefined
 }
 
 function optionalNumberValue(record: UnknownRecord, keys: string[]): number | undefined {
@@ -1086,7 +1092,82 @@ function normalizeSourceSyncQueueItem(value: unknown): SourceSyncQueueItem | nul
     ),
     downloadedItems,
     holdUntil: optionalStringValue(value, ['holdUntil', 'hold_until']),
+    trigger: optionalStringValue(value, ['trigger']),
+    runMode: optionalStringValue(value, ['runMode', 'run_mode']),
+    syncOptionsOverride: normalizeSyncOptionsOverride(
+      pick(value, 'syncOptionsOverride', 'sync_options_override'),
+    ),
   }
+}
+
+/**
+ * Normaliza o override preservando ausência: só copia as chaves realmente
+ * presentes no payload. Usar `normalizeSourceSyncOptions` aqui seria errado —
+ * ela preenche os defaults do provider, e um override que só carrega
+ * `targetStoryMediaId` passaria a parecer um sync completo do perfil.
+ *
+ * Só os campos que a janela da fila consome são copiados; o resto do override
+ * não muda o que é exibido.
+ */
+function normalizeSyncOptionsOverride(value: unknown): SourceSyncOptionsOverride | undefined {
+  if (!isRecord(value)) {
+    return undefined
+  }
+
+  const override: SourceSyncOptionsOverride = {}
+
+  const instagram = pick(value, 'instagram')
+  if (isRecord(instagram)) {
+    override.instagram = compactRecord({
+      timeline: optionalBooleanValue(instagram, ['timeline']),
+      reels: optionalBooleanValue(instagram, ['reels']),
+      stories: optionalBooleanValue(instagram, ['stories']),
+      storiesUser: optionalBooleanValue(instagram, ['storiesUser', 'stories_user']),
+      tagged: optionalBooleanValue(instagram, ['tagged']),
+      downloadImages: optionalBooleanValue(instagram, ['downloadImages', 'download_images']),
+      downloadVideos: optionalBooleanValue(instagram, ['downloadVideos', 'download_videos']),
+      missingOnly: optionalBooleanValue(instagram, ['missingOnly', 'missing_only']),
+      fullScan: optionalBooleanValue(instagram, ['fullScan', 'full_scan']),
+      dateFrom: optionalStringValue(instagram, ['dateFrom', 'date_from']),
+      dateTo: optionalStringValue(instagram, ['dateTo', 'date_to']),
+      targetStoryMediaId: optionalStringValue(instagram, [
+        'targetStoryMediaId',
+        'target_story_media_id',
+      ]),
+    })
+  }
+
+  const tiktok = pick(value, 'tiktok')
+  if (isRecord(tiktok)) {
+    override.tiktok = compactRecord({
+      getTimeline: optionalBooleanValue(tiktok, ['getTimeline', 'get_timeline']),
+      getStoriesUser: optionalBooleanValue(tiktok, ['getStoriesUser', 'get_stories_user']),
+      getReposts: optionalBooleanValue(tiktok, ['getReposts', 'get_reposts']),
+      getLikedVideos: optionalBooleanValue(tiktok, ['getLikedVideos', 'get_liked_videos']),
+      downloadVideos: optionalBooleanValue(tiktok, ['downloadVideos', 'download_videos']),
+      downloadPhotos: optionalBooleanValue(tiktok, ['downloadPhotos', 'download_photos']),
+      targetVideoUrl: optionalStringValue(tiktok, ['targetVideoUrl', 'target_video_url']),
+    })
+  }
+
+  const twitter = pick(value, 'twitter')
+  if (isRecord(twitter)) {
+    override.twitter = compactRecord({
+      mediaModel: optionalBooleanValue(twitter, ['mediaModel', 'media_model']),
+      profileModel: optionalBooleanValue(twitter, ['profileModel', 'profile_model']),
+      searchModel: optionalBooleanValue(twitter, ['searchModel', 'search_model']),
+      likesModel: optionalBooleanValue(twitter, ['likesModel', 'likes_model']),
+    })
+  }
+
+  return Object.keys(override).length > 0 ? override : undefined
+}
+
+/** Remove as chaves `undefined` para que a ausência continue significando "herda do perfil". */
+function compactRecord<T extends object>(value: T): T {
+  return Object.fromEntries(
+    Object.entries(value).filter(([, entry]) => entry !== undefined),
+  ) as T
 }
 
 function normalizeSourceSyncQueueRecentResult(value: unknown): SourceSyncQueueRecentResult | null {
@@ -2401,6 +2482,10 @@ export async function loadQueueReferenceData(): Promise<QueueReferenceData> {
         handle: stringValue(rawSource, ['handle'], ''),
         groupId: optionalStringValue(rawSource, ['groupId', 'group_id']),
         profileImagePath: optionalStringValue(rawSource, ['profileImagePath', 'profile_image_path']),
+        syncOptions: normalizeSourceSyncOptions(
+          pick(rawSource, 'syncOptions', 'sync_options'),
+          normalizeProviderKey(pick(rawSource, 'provider')),
+        ),
       }]
     }),
     groups: arrayValue(value, ['groups']).flatMap((rawGroup) => {

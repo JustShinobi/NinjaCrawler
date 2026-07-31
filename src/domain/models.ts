@@ -147,6 +147,8 @@ export interface TwitterSourceSyncOptions {
 }
 
 export interface TikTokSourceSyncOptions {
+  /** Baixa um único vídeo/slideshow em vez de percorrer o perfil (Companion). */
+  targetVideoUrl?: string
   getTimeline?: boolean
   getStoriesUser?: boolean
   getReposts?: boolean
@@ -211,6 +213,20 @@ export interface SourceSyncOptions {
   tiktok?: TikTokSourceSyncOptions
   youtube?: YouTubeSourceSyncOptions
   vsco?: VscoSourceSyncOptions
+}
+
+/**
+ * Override parcial enviado ao enfileirar um sync. Diferente de
+ * `SourceSyncOptions`, nenhum campo é preenchido com default: a ausência de uma
+ * chave significa "usa o que está no perfil", e é isso que permite reconstruir a
+ * configuração efetiva de um job da fila.
+ */
+export interface SourceSyncOptionsOverride {
+  instagram?: Partial<InstagramSourceSyncOptions>
+  twitter?: Partial<TwitterSourceSyncOptions>
+  tiktok?: Partial<TikTokSourceSyncOptions>
+  youtube?: Partial<YouTubeSourceSyncOptions>
+  vsco?: Partial<VscoSourceSyncOptions>
 }
 
 export interface RunSourceSyncOptions {
@@ -792,6 +808,15 @@ export interface SourceSyncQueueItem {
   progressIndeterminate?: boolean
   downloadedItems?: number
   holdUntil?: string
+  /** Origem do job ('manual', 'companion', 'scheduler', …). */
+  trigger?: string
+  runMode?: string
+  /**
+   * Override aplicado no enfileiramento. Combinado com a config do perfil,
+   * descreve o que este job baixa de fato — que nem sempre é o que está salvo
+   * no perfil (ex.: um único story enviado pelo Companion).
+   */
+  syncOptionsOverride?: SourceSyncOptionsOverride
 }
 
 export interface SourceSyncQueueRecentResult {
@@ -943,6 +968,8 @@ export interface QueueSourceReference {
   handle: string
   groupId?: string
   profileImagePath?: string
+  /** Config salva no perfil — base para a configuração efetiva de cada job. */
+  syncOptions: SourceSyncOptions
 }
 
 export interface QueueGroupReference {

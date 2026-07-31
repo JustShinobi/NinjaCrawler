@@ -8138,6 +8138,76 @@ p {
   max-width: 16rem;
 }
 
+/* O que o job vai baixar de fato, logo após o handle. Fica na headline (e não
+   numa linha própria) para não custar altura em cada item de uma fila longa. */
+.queue-job-plan {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  min-width: 0;
+}
+
+/* Mesma trilha do grid, mas inline: a versão do card é position: absolute
+   porque flutua sobre a thumbnail. Os chips em si são compartilhados. */
+.queue-plan-sections {
+  display: inline-flex;
+  gap: 2px;
+  padding: 2px 3px;
+  border-radius: 5px;
+  background: rgba(0, 0, 0, 0.32);
+  flex: 0 0 auto;
+}
+
+.queue-plan-sections[data-provider="instagram"] .profile-section-chip-on {
+  color: #ff9dbd;
+}
+
+.queue-plan-sections[data-provider="tiktok"] .profile-section-chip-on {
+  color: #6fe0ef;
+}
+
+.queue-plan-sections[data-provider="twitter"] .profile-section-chip-on {
+  color: #7fc0f0;
+}
+
+/* Alvo pontual do Companion: destaque quente para separar de um sync completo. */
+.queue-plan-target {
+  flex: 0 0 auto;
+  padding: 1px 6px;
+  border-radius: 3px;
+  background: rgba(239, 192, 106, 0.16);
+  color: #efc06a;
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+  letter-spacing: 0.04em;
+}
+
+.queue-plan-note {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 0.6rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.queue-plan-origin {
+  flex: 0 0 auto;
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 0.58rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.queue-plan-origin[data-origin="companion"] {
+  background: rgba(239, 192, 106, 0.16);
+  color: #efc06a;
+}
+
 .queue-task-meta {
   color: var(--muted);
   font-family: var(--font-mono);
@@ -8308,6 +8378,35 @@ p {
   color: var(--muted);
   font-size: 0.72rem;
   line-height: 1.35;
+}
+
+/* Etapas de um resultado agrupado (sync + a geração de thumbnails que ele
+   disparou). A régua à esquerda mostra que as linhas pertencem ao mesmo run. */
+.queue-recent-steps {
+  margin-top: 0.3rem;
+  padding-left: 0.5rem;
+  border-left: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.1));
+}
+
+.queue-recent-step {
+  display: flex;
+  gap: 0.4rem;
+  align-items: baseline;
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.7rem;
+  line-height: 1.4;
+}
+
+.queue-recent-step b {
+  flex: 0 0 auto;
+  min-width: 3.1rem;
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+  font-weight: 500;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
 }
 
 .queue-recent-error {

@@ -1327,6 +1327,9 @@ fn build_queue_status(state: &SourceSyncQueueState) -> SourceSyncQueueStatus {
             progress_indeterminate: job.progress_indeterminate,
             downloaded_items: job.downloaded_items,
             hold_until: job.hold_until.clone(),
+            trigger: Some(job.trigger.clone()),
+            run_mode: job.run_mode.clone(),
+            sync_options_override: job.sync_options_override.clone(),
         }));
     }
 
@@ -1348,6 +1351,9 @@ fn build_queue_status(state: &SourceSyncQueueState) -> SourceSyncQueueStatus {
             progress_indeterminate: job.progress_indeterminate,
             downloaded_items: job.downloaded_items,
             hold_until: job.hold_until.clone(),
+            trigger: Some(job.trigger.clone()),
+            run_mode: job.run_mode.clone(),
+            sync_options_override: job.sync_options_override.clone(),
         })
         .collect::<Vec<_>>();
     running_items.sort_by(|a, b| a.provider.cmp(&b.provider));

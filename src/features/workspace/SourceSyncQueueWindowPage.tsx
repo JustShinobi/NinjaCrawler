@@ -34,6 +34,7 @@ import type {
   SourceSyncQueueProviderStatus,
   SourceSyncQueueRecentResult,
   SourceSyncQueueStatus,
+  SourceSyncOptions,
   MediaThumbnailQueueStatus,
   MediaThumbnailReviewItem,
   MediaPathMigrationQueueStatus,
@@ -45,6 +46,8 @@ import type {
 } from '../../domain/models'
 import { WindowShell } from '../brand/WindowShell'
 import { WindowTitlebar } from '../brand/WindowTitlebar'
+import { resolveQueueJobPlan, type QueueJobPlan } from './queueJobPlan'
+import { groupRecentTasks, stripSyncSummaryPrefix } from './queueRecentGroups'
 
 type QueueOperation = 'Sync' | 'Delete' | 'Single' | 'Migration' | 'Thumbnail'
 
@@ -70,6 +73,8 @@ interface QueueLiveTask {
   filesTotal?: number
   holdUntil?: string
   cancelSourceId?: string
+  /** O que este job baixa de fato. Só jobs Sync carregam plano. */
+  plan?: QueueJobPlan
 }
 
 interface QueueResultTask {
@@ -203,9 +208,19 @@ function formatDeleteModeDetail(mode: 'user_only' | 'with_media'): string {
   return mode === 'user_only' ? 'user only' : 'with media'
 }
 
-function createSyncLiveTask(item: SourceSyncQueueItem): QueueLiveTask {
+function createSyncLiveTask(
+  item: SourceSyncQueueItem,
+  profileSyncOptions: Record<string, SourceSyncOptions>,
+): QueueLiveTask {
   const jobKey = item.jobKey ?? item.sourceId
   return {
+    plan: resolveQueueJobPlan({
+      provider: item.provider,
+      trigger: item.trigger,
+      runMode: item.runMode,
+      syncOptionsOverride: item.syncOptionsOverride,
+      profileSyncOptions: profileSyncOptions[item.sourceId],
+    }),
     key: `sync-${item.state}-${jobKey}`,
     queueKey: jobKey,
     sourceId: item.sourceId,
@@ -326,6 +341,42 @@ function TaskAvatar({ handle, provider, imagePath }: TaskAvatarProps) {
       ) : (
         <span className="queue-task-avatar-fallback">{avatarInitial(handle)}</span>
       )}
+    </span>
+  )
+}
+
+/**
+ * Trilha do que o job vai baixar, logo após o handle. Alvos pontuais (um story,
+ * um vídeo) não mostram a trilha de sections: os chips do perfil não descrevem
+ * o que roda, e exibi-los sugeriria um sync completo que não vai acontecer.
+ */
+function renderJobPlan(plan: QueueJobPlan, provider: ProviderKey) {
+  return (
+    <span className="queue-job-plan" title={plan.summary}>
+      {plan.scope === 'profile' ? (
+        plan.sections.length > 0 ? (
+          <span className="queue-plan-sections" data-provider={provider}>
+            {plan.sections.map((chip) => (
+              <span
+                className={`profile-section-chip ${chip.enabled ? 'profile-section-chip-on' : 'profile-section-chip-off'}`}
+                key={chip.code}
+              >
+                {chip.code}
+              </span>
+            ))}
+          </span>
+        ) : null
+      ) : (
+        <span className="queue-plan-target">
+          {plan.scope === 'single_story' ? '1 story' : '1 video'}
+        </span>
+      )}
+      {plan.notes.length > 0 ? (
+        <span className="queue-plan-note">{plan.notes.join(' · ')}</span>
+      ) : null}
+      <span className="queue-plan-origin" data-origin={plan.origin}>
+        {plan.originLabel}
+      </span>
     </span>
   )
 }
@@ -700,20 +751,30 @@ export function SourceSyncQueueWindowPage() {
     })
   }, [])
 
+  // Config salva de cada perfil: base sobre a qual o override do job é aplicado
+  // para descobrir o que o item vai baixar de fato.
+  const syncOptionsBySource = useMemo(() => {
+    const map: Record<string, SourceSyncOptions> = {}
+    for (const source of librarySources) {
+      map[source.id] = source.syncOptions
+    }
+    return map
+  }, [librarySources])
+
   const runningTasks = useMemo(
     () => [
-      ...syncStatus.runningItems.map(createSyncLiveTask),
+      ...syncStatus.runningItems.map((item) => createSyncLiveTask(item, syncOptionsBySource)),
       ...deleteStatus.runningItems.map(createDeleteLiveTask),
     ],
-    [deleteStatus.runningItems, syncStatus.runningItems],
+    [deleteStatus.runningItems, syncStatus.runningItems, syncOptionsBySource],
   )
 
   const queuedTasks = useMemo(
     () => [
-      ...syncStatus.queuedItems.map(createSyncLiveTask),
+      ...syncStatus.queuedItems.map((item) => createSyncLiveTask(item, syncOptionsBySource)),
       ...deleteStatus.queuedItems.map(createDeleteLiveTask),
     ],
-    [deleteStatus.queuedItems, syncStatus.queuedItems],
+    [deleteStatus.queuedItems, syncStatus.queuedItems, syncOptionsBySource],
   )
 
   const recentTasks = useMemo(
@@ -764,6 +825,10 @@ export function SourceSyncQueueWindowPage() {
       ].sort((left, right) => Date.parse(right.finishedAt) - Date.parse(left.finishedAt)),
     [deleteStatus.recentResults, migrationStatus?.recentResults, syncStatus.recentResults, singleVideoStatus?.recentResults, thumbnailStatus?.recentResults],
   )
+
+  // A geração de thumbnails é disparada pelo próprio sync, então ela é uma etapa
+  // dele — não um resultado independente que mereça a mesma linha na lista.
+  const recentGroups = useMemo(() => groupRecentTasks(recentTasks), [recentTasks])
 
   const providerStatusByKey = useMemo(() => {
     const map = new Map<ProviderKey, SourceSyncQueueProviderStatus>()
@@ -1131,6 +1196,7 @@ export function SourceSyncQueueWindowPage() {
         <div className="queue-task-main">
           <div className="queue-task-headline">
             <strong title={task.handle}>{task.handle}</strong>
+            {task.plan ? renderJobPlan(task.plan, task.provider) : null}
             {task.operation === 'Delete' ? (
               <span className="queue-tag queue-tag-delete">Delete{task.modeDetail ? ` · ${task.modeDetail}` : ''}</span>
             ) : null}
@@ -1540,14 +1606,21 @@ export function SourceSyncQueueWindowPage() {
         <aside className="queue-recent-panel">
           <div className="queue-status-section-header">
             <span className="eyebrow">Recent</span>
-            <span className="pill">{recentTasks.length}</span>
+            <span className="pill">{recentGroups.length}</span>
           </div>
-          {recentTasks.length === 0 ? (
+          {recentGroups.length === 0 ? (
             <p className="queue-lane-idle">Nothing finished yet this session.</p>
           ) : (
             <div className="queue-recent-list" role="list" aria-label="Recent results">
-              {recentTasks.map((task) => (
-                <article className={`queue-recent-item queue-recent-${task.status}`} key={task.key} role="listitem">
+              {recentGroups.map((group) => {
+                const task = group.primary
+                // Thumbnails fundidas ao sync viram uma etapa; as avulsas (rodadas
+                // pela Maintenance) continuam sendo a operação principal do item.
+                const thumbnail = group.thumbnail ?? (task.operation === 'Thumbnail' ? task : undefined)
+                const reviewTask = thumbnail
+                const isGrouped = group.thumbnail !== undefined
+                return (
+                <article className={`queue-recent-item queue-recent-${group.status}`} key={group.key} role="listitem">
                   <TaskAvatar handle={task.handle} provider={task.provider} imagePath={avatarsBySource[task.sourceId]} />
                   <div className="queue-task-main">
                     <div className="queue-task-headline">
@@ -1557,25 +1630,41 @@ export function SourceSyncQueueWindowPage() {
                       {task.operation === 'Single' ? <span className="queue-tag">Single</span> : null}
                       {task.operation === 'Migration' ? <span className="queue-tag">Migration</span> : null}
                       {task.operation === 'Thumbnail' ? <span className="queue-tag">Thumbnail</span> : null}
-                      <span className={resultStatusClassName(task.status)}>{task.status}</span>
+                      <span className={resultStatusClassName(group.status)}>{group.status}</span>
                     </div>
-                    <small className="queue-task-meta" title={absoluteTimestamp(task.finishedAt)}>
-                      {relativeTime(task.finishedAt, now)}
+                    <small className="queue-task-meta" title={absoluteTimestamp(group.finishedAt)}>
+                      {relativeTime(group.finishedAt, now)}
                     </small>
-                    <p className="queue-recent-summary">{task.summary}</p>
+                    {isGrouped ? (
+                      <div className="queue-recent-steps">
+                        <p className="queue-recent-step">
+                          <b>Sync</b>
+                          <span>{stripSyncSummaryPrefix(task.summary)}</span>
+                        </p>
+                        <p className="queue-recent-step">
+                          <b>Thumbs</b>
+                          <span>{thumbnail!.summary}</span>
+                        </p>
+                      </div>
+                    ) : (
+                      <p className="queue-recent-summary">
+                        {task.operation === 'Sync' ? stripSyncSummaryPrefix(task.summary) : task.summary}
+                      </p>
+                    )}
                     {task.error ? <p className="queue-recent-error">{task.error}</p> : null}
-                    {task.operation === 'Thumbnail' && (task.reviewItems?.length ?? 0) > 0 ? (
+                    {thumbnail?.error ? <p className="queue-recent-error">{thumbnail.error}</p> : null}
+                    {reviewTask && (reviewTask.reviewItems?.length ?? 0) > 0 ? (
                       <div className="thumbnail-review-panel">
                         <p className="thumbnail-review-lead">
                           Manual check recommended
-                          {task.invalidMedia ? ` · ${task.invalidMedia} invalid media` : ''}
-                          {task.generationFailed ? ` · ${task.generationFailed} generation failure(s)` : ''}
+                          {reviewTask.invalidMedia ? ` · ${reviewTask.invalidMedia} invalid media` : ''}
+                          {reviewTask.generationFailed ? ` · ${reviewTask.generationFailed} generation failure(s)` : ''}
                           . TikTok posts are retried as possible carousels on the next sync. If the
                           post is gone, keep the local file and skip future thumbnail attempts.
                         </p>
                         <ul className="thumbnail-review-list">
-                          {(task.reviewItems ?? []).map((item) => (
-                            <li key={`${task.key}-${item.relativePath}`}>
+                          {(reviewTask.reviewItems ?? []).map((item) => (
+                            <li key={`${reviewTask.key}-${item.relativePath}`}>
                               <code title={item.absolutePath}>{item.fileName}</code>
                               <span className="thumbnail-review-kind">
                                 {item.kind === 'invalid_media' ? 'invalid media' : 'generation failed'}
@@ -1596,35 +1685,35 @@ export function SourceSyncQueueWindowPage() {
                         </ul>
                         <button
                           className="ghost-button thumbnail-review-skip"
-                          disabled={resolvingReviewKey === task.key}
+                          disabled={resolvingReviewKey === reviewTask.key}
                           onClick={() =>
                             void handleSkipThumbnailReview(
-                              task.key,
-                              task.sourceId,
-                              task.reviewItems ?? [],
+                              reviewTask.key,
+                              reviewTask.sourceId,
+                              reviewTask.reviewItems ?? [],
                             )
                           }
                           type="button"
                           title="Keep listed files and stop retrying thumbnails until a file is replaced"
                         >
-                          {resolvingReviewKey === task.key
+                          {resolvingReviewKey === reviewTask.key
                             ? 'Saving…'
                             : 'Keep files and skip thumbnails'}
                         </button>
                         <button
                           className="ghost-button profile-view-delete thumbnail-review-delete"
-                          disabled={resolvingReviewKey === task.key}
+                          disabled={resolvingReviewKey === reviewTask.key}
                           onClick={() =>
                             void handleResolveThumbnailReview(
-                              task.key,
-                              task.sourceId,
-                              task.reviewItems ?? [],
+                              reviewTask.key,
+                              reviewTask.sourceId,
+                              reviewTask.reviewItems ?? [],
                             )
                           }
                           type="button"
                           title="Move listed files to the Recycle Bin and mark posts so they are not re-downloaded"
                         >
-                          {resolvingReviewKey === task.key
+                          {resolvingReviewKey === reviewTask.key
                             ? 'Moving to Recycle Bin…'
                             : 'Move invalid media to Recycle Bin'}
                         </button>
@@ -1642,7 +1731,8 @@ export function SourceSyncQueueWindowPage() {
                     </button>
                   ) : null}
                 </article>
-              ))}
+                )
+              })}
             </div>
           )}
         </aside>

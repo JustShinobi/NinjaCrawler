@@ -271,7 +271,7 @@ pub fn load_queue_reference_data() -> Result<QueueReferenceData, String> {
     with_workspace(|connection, _| {
         let mut source_statement = connection
             .prepare(
-                "SELECT id, provider, handle, group_id, profile_image_path
+                "SELECT id, provider, handle, group_id, profile_image_path, sync_options_json
                  FROM source_profiles
                  WHERE deleted_at IS NULL
                  ORDER BY provider, handle",
@@ -279,12 +279,15 @@ pub fn load_queue_reference_data() -> Result<QueueReferenceData, String> {
             .map_err(|error| error.to_string())?;
         let sources = source_statement
             .query_map([], |row| {
+                let provider: String = row.get(1)?;
+                let sync_options_json: String = row.get(5)?;
                 Ok(QueueSourceReference {
                     id: row.get(0)?,
-                    provider: row.get(1)?,
+                    provider: provider.clone(),
                     handle: row.get(2)?,
                     group_id: row.get(3)?,
                     profile_image_path: row.get(4)?,
+                    sync_options: deserialize_source_sync_options(&provider, &sync_options_json),
                 })
             })
             .map_err(|error| error.to_string())?
