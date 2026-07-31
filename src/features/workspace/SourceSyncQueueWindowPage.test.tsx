@@ -192,6 +192,137 @@ describe('SourceSyncQueueWindowPage', () => {
     expect(screen.getByText(/^Next$/i)).toBeTruthy()
   })
 
+  it('shows the effective sync sections and origin next to the handle', async () => {
+    bridgeMocks.loadQueueReferenceData.mockResolvedValue({
+      sources: [{
+        id: 'source-running',
+        provider: 'instagram',
+        handle: '@running',
+        syncOptions: {
+          instagram: {
+            timeline: true,
+            reels: false,
+            stories: false,
+            storiesUser: false,
+            tagged: false,
+          },
+        },
+      }],
+      groups: [],
+    })
+    bridgeMocks.loadSourceSyncQueueStatus.mockResolvedValue(
+      statusFixture({
+        runningCount: 1,
+        runningItems: [{
+          sourceId: 'source-running',
+          provider: 'instagram',
+          handle: '@running',
+          state: 'running',
+          queuedAt: '2026-03-11T11:59:00Z',
+          startedAt: '2026-03-11T12:00:00Z',
+          trigger: 'manual',
+          // O override liga Reels só neste job: a trilha deve refletir o job,
+          // não a config salva no perfil.
+          syncOptionsOverride: { instagram: { reels: true } },
+        }],
+      }),
+    )
+    render(<SourceSyncQueueWindowPage />)
+
+    expect(await screen.findByText('TL')).toBeTruthy()
+    const reels = await screen.findByText('RE')
+    expect(reels.className).toContain('profile-section-chip-on')
+    expect(screen.getByText('ST').className).toContain('profile-section-chip-off')
+    expect(screen.getByText('Grid')).toBeTruthy()
+  })
+
+  it('shows a single-story job as a pinpoint target instead of the profile sections', async () => {
+    bridgeMocks.loadQueueReferenceData.mockResolvedValue({
+      sources: [{
+        id: 'source-story',
+        provider: 'instagram',
+        handle: '@story',
+        syncOptions: {
+          instagram: {
+            timeline: true,
+            reels: true,
+            stories: true,
+            storiesUser: false,
+            tagged: false,
+          },
+        },
+      }],
+      groups: [],
+    })
+    bridgeMocks.loadSourceSyncQueueStatus.mockResolvedValue(
+      statusFixture({
+        queuedCount: 1,
+        queuedItems: [{
+          sourceId: 'source-story',
+          jobKey: 'source-story:instagram-story:3612345678901234567',
+          provider: 'instagram',
+          handle: '@story',
+          state: 'queued',
+          queuedAt: '2026-03-11T12:00:00Z',
+          trigger: 'companion',
+          syncOptionsOverride: { instagram: { targetStoryMediaId: '3612345678901234567' } },
+        }],
+      }),
+    )
+    render(<SourceSyncQueueWindowPage />)
+
+    expect(await screen.findByText('1 story')).toBeTruthy()
+    expect(screen.getByText('Companion')).toBeTruthy()
+    // A trilha do perfil não aparece: só um story vai ser baixado.
+    expect(screen.queryByText('TL')).toBeNull()
+  })
+
+  it('folds the automatic thumbnail run into the sync entry that triggered it', async () => {
+    bridgeMocks.loadSourceSyncQueueStatus.mockResolvedValue(
+      statusFixture({
+        completedCount: 1,
+        recentResults: [{
+          sourceId: 'source-done',
+          provider: 'instagram',
+          handle: '@done',
+          status: 'succeeded',
+          summary: 'Instagram sync succeeded. Downloaded 2 media items.',
+          finishedAt: '2026-03-11T12:00:00Z',
+        }],
+      }),
+    )
+    bridgeMocks.loadMediaThumbnailQueueStatus.mockResolvedValue({
+      queuedCount: 0,
+      runningCount: 0,
+      completedCount: 1,
+      failedCount: 0,
+      queuedItems: [],
+      recentResults: [{
+        sourceId: 'source-done',
+        provider: 'instagram',
+        handle: '@done',
+        // Mídia inválida marca o resultado como warning: a entrada agrupada
+        // precisa herdar o pior status das duas etapas.
+        status: 'warning',
+        summary: 'Generated 2, kept 195 existing.',
+        generated: 2,
+        skippedExisting: 195,
+        failed: 0,
+        invalidMedia: 3,
+        finishedAt: '2026-03-11T12:00:30Z',
+      }],
+      updatedAt: '',
+    })
+    render(<SourceSyncQueueWindowPage />)
+
+    // Uma entrada só, com as duas etapas e o prefixo redundante removido.
+    expect(await screen.findByText('Sync')).toBeTruthy()
+    expect(screen.getByText('Thumbs')).toBeTruthy()
+    expect(screen.getByText('Downloaded 2 media items.')).toBeTruthy()
+    expect(screen.getAllByText('@done')).toHaveLength(1)
+    expect(screen.getByText('warning')).toBeTruthy()
+  })
+
   it('shows an automatic Account hold with its retry deadline', async () => {
     bridgeMocks.loadSourceSyncQueueStatus.mockResolvedValue(
       statusFixture({

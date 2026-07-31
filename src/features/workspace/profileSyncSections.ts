@@ -1,4 +1,4 @@
-import type { SourceProfile } from '../../domain/models'
+import type { ProviderKey, SourceProfile, SourceSyncOptions } from '../../domain/models'
 import {
   createInstagramSourceSyncOptions,
   createTikTokSourceSyncOptions,
@@ -19,9 +19,21 @@ export interface SyncSectionChip {
 // funções create* preenchem os defaults do provider (ex.: Instagram timeline
 // ligada, resto desligado), então o fingerprint mostra o que de fato roda.
 export function resolveSyncSectionChips(source: SourceProfile): SyncSectionChip[] {
-  switch (source.provider) {
+  return resolveSyncSectionChipsFor(source.provider, source.syncOptions)
+}
+
+/**
+ * Mesma trilha, a partir de provider + options soltos. A janela da fila usa esta
+ * variante porque o que ela precisa descrever é a config *efetiva do job*
+ * (perfil + override), não um `SourceProfile` salvo.
+ */
+export function resolveSyncSectionChipsFor(
+  provider: ProviderKey,
+  syncOptions: SourceSyncOptions | undefined,
+): SyncSectionChip[] {
+  switch (provider) {
     case 'instagram': {
-      const options = createInstagramSourceSyncOptions(source.syncOptions?.instagram)
+      const options = createInstagramSourceSyncOptions(syncOptions?.instagram)
       return [
         { code: 'TL', label: 'Timeline', enabled: options.timeline },
         { code: 'RE', label: 'Reels', enabled: options.reels },
@@ -31,7 +43,7 @@ export function resolveSyncSectionChips(source: SourceProfile): SyncSectionChip[
       ]
     }
     case 'tiktok': {
-      const options = createTikTokSourceSyncOptions(source.syncOptions?.tiktok)
+      const options = createTikTokSourceSyncOptions(syncOptions?.tiktok)
       return [
         { code: 'TL', label: 'Timeline', enabled: Boolean(options.getTimeline) },
         { code: 'US', label: 'User stories', enabled: Boolean(options.getStoriesUser) },
@@ -40,7 +52,7 @@ export function resolveSyncSectionChips(source: SourceProfile): SyncSectionChip[
       ]
     }
     case 'twitter': {
-      const options = createTwitterSourceSyncOptions(source.syncOptions?.twitter)
+      const options = createTwitterSourceSyncOptions(syncOptions?.twitter)
       return [
         { code: 'MD', label: 'Media', enabled: Boolean(options.mediaModel) },
         { code: 'PR', label: 'Profile', enabled: Boolean(options.profileModel) },

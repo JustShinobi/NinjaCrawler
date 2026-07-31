@@ -751,6 +751,14 @@ pub struct SourceSyncQueueItem {
     /// Prazo do hold automatico da Account, quando o item esta aguardando rate
     /// limit. Ausente para jobs normais e pausas manuais por provider.
     pub hold_until: Option<String>,
+    /// Origem do job ("manual", "companion", "scheduler", ...). A UI da fila usa
+    /// isso para dizer de onde o item veio.
+    pub trigger: Option<String>,
+    pub run_mode: Option<String>,
+    /// Override enviado no enfileiramento (ex.: um unico story do Companion).
+    /// Combinado com a config do perfil, descreve o que este job vai baixar de
+    /// fato -- que nem sempre e o que esta salvo no perfil.
+    pub sync_options_override: Option<SourceSyncOptions>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -1425,6 +1433,9 @@ pub struct QueueSourceReference {
     pub handle: String,
     pub group_id: Option<String>,
     pub profile_image_path: Option<String>,
+    /// Config de sync salva no perfil. A janela da fila combina isso com o
+    /// override do job para mostrar a configuracao efetiva de cada item.
+    pub sync_options: SourceSyncOptions,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
