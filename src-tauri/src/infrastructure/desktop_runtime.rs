@@ -150,7 +150,7 @@ pub fn start_runtime_services(app: tauri::AppHandle) -> Result<(), String> {
     std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_millis(2000));
         media_path_migration_runtime::restore_persisted_queue(&app_handle);
-        media_dedupe_runtime::recover_interrupted_jobs();
+        media_dedupe_runtime::recover_interrupted_jobs(&app_handle);
         source_sync_runtime::restore_persisted_queue(&app_handle);
     });
     Ok(())

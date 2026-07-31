@@ -19,6 +19,7 @@ const bridgeMocks = vi.hoisted(() => ({
   enqueueMediaDedupeScan: vi.fn(),
   installMediaDedupeSimilarityEngine: vi.fn(),
   installMediaToolRuntime: vi.fn(),
+  loadMediaDedupeResultPage: vi.fn(),
   loadMediaDedupeStatus: vi.fn(),
   loadWorkspaceHealth: vi.fn(),
   openAccountsWindow: vi.fn(),
@@ -138,6 +139,7 @@ describe("WorkspaceHealthWindowPage", () => {
       sourceJobs: [],
       updatedAt: "",
     });
+    bridgeMocks.loadMediaDedupeResultPage.mockResolvedValue(null);
     bridgeMocks.subscribeToDesktopRuntimeEvents.mockResolvedValue(
       () => undefined,
     );

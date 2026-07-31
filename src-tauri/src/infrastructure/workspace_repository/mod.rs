@@ -31,7 +31,8 @@ use crate::domain::models::{
     ProviderAccountCookie, ProviderAccountCookieImport, ProviderAccountEditor,
     ProviderAccountImportState, ProviderAccountSession, ProviderAccountSettingValue,
     ProviderAccountSettingValueKind, ProviderAccountUpsert, RunSyncPlanNowInput, RuntimeLogContext,
-    RuntimeLogEntry, RuntimeLogQuery, SchedulerGroup, SchedulerGroupUpsert, SchedulerPlanCriteria,
+    QueueGroupReference, QueueReferenceData, QueueSourceReference, RuntimeLogEntry, RuntimeLogQuery,
+    SchedulerGroup, SchedulerGroupUpsert, SchedulerPlanCriteria,
     SchedulerPlanNotifications, SchedulerSet, SchedulerSetUpsert, SetSyncPlanPauseInput,
     SingleVideo, SingleVideoFile, SingleVideosRootStatus, SkipSyncPlanInput,
     SourceAvailabilityCheckItem,
@@ -264,6 +265,50 @@ fn log_runtime_event(
 
 pub fn bootstrap_workspace() -> Result<WorkspaceSnapshot, String> {
     with_workspace(load_snapshot)
+}
+
+pub fn load_queue_reference_data() -> Result<QueueReferenceData, String> {
+    with_workspace(|connection, _| {
+        let mut source_statement = connection
+            .prepare(
+                "SELECT id, provider, handle, group_id, profile_image_path, sync_options_json
+                 FROM source_profiles
+                 WHERE deleted_at IS NULL
+                 ORDER BY provider, handle",
+            )
+            .map_err(|error| error.to_string())?;
+        let sources = source_statement
+            .query_map([], |row| {
+                let provider: String = row.get(1)?;
+                let sync_options_json: String = row.get(5)?;
+                Ok(QueueSourceReference {
+                    id: row.get(0)?,
+                    provider: provider.clone(),
+                    handle: row.get(2)?,
+                    group_id: row.get(3)?,
+                    profile_image_path: row.get(4)?,
+                    sync_options: deserialize_source_sync_options(&provider, &sync_options_json),
+                })
+            })
+            .map_err(|error| error.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())?;
+
+        let mut group_statement = connection
+            .prepare("SELECT id, name FROM scheduler_groups ORDER BY sort_index, name")
+            .map_err(|error| error.to_string())?;
+        let groups = group_statement
+            .query_map([], |row| {
+                Ok(QueueGroupReference {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                })
+            })
+            .map_err(|error| error.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())?;
+        Ok(QueueReferenceData { sources, groups })
+    })
 }
 
 pub fn load_all_asset_media_paths() -> Result<Vec<PathBuf>, String> {

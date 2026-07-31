@@ -161,7 +161,11 @@ pub fn dismiss_review_items(
 ) -> Result<MediaThumbnailQueueStatus, String> {
     let mut removed: HashSet<String> = relative_paths
         .iter()
-        .map(|path| path.replace('\\', "/").trim_start_matches('/').to_ascii_lowercase())
+        .map(|path| {
+            path.replace('\\', "/")
+                .trim_start_matches('/')
+                .to_ascii_lowercase()
+        })
         .collect();
     let mut queue = state()
         .lock()
@@ -288,7 +292,12 @@ fn run_job(mut job: MediaThumbnailQueueItem) {
                 let Some(path) = path else { break };
                 set_current_file(&source_id, &path);
                 let outcome = workspace_repository::generate_media_thumbnail(Path::new(&path));
-                record_file_result(&source_id, Path::new(&path), profile_root.as_path(), outcome);
+                record_file_result(
+                    &source_id,
+                    Path::new(&path),
+                    profile_root.as_path(),
+                    outcome,
+                );
             });
         }
     });
@@ -394,6 +403,11 @@ fn record_file_result(
                     active.skipped_existing += 1;
                 }
                 workspace_repository::MediaThumbnailGenerationOutcome::InvalidMedia { reason } => {
+                    if active.provider.eq_ignore_ascii_case("tiktok") && post_url.is_some() {
+                        let _ = workspace_repository::mark_media_thumbnail_reconcile_candidate(
+                            absolute,
+                        );
+                    }
                     active.invalid_media += 1;
                     active.review_items.push(MediaThumbnailReviewItem {
                         absolute_path: absolute.to_string_lossy().into_owned(),

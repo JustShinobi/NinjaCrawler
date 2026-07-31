@@ -4,16 +4,16 @@ use crate::domain::models::{
     CheckSourceAvailabilityInput, CloneSyncPlanInput, ConnectorDebugEntry, ConnectorDebugQuery,
     DesktopRuntimeState, ImportMethodDescriptor, ImportPreview, ImportPreviewOptions,
     ImportProviderDescriptor, ImportQueueStatus, ImportRootDescriptor, ImportRunRequest,
-    ImportRunResult, MediaDedupeApplyInput, MediaDedupeJobStatus, MediaDedupeScanInput,
-    MoveSyncPlanInput, PlanEditorWindowIntent, ProviderAccountCookie, ProviderAccountCookieImport,
+    ImportRunResult, MediaDedupeApplyInput, MediaDedupeJobStatus, MediaDedupeResultPage,
+    MediaDedupeScanInput, MediaDedupeSummaryStatus, MoveSyncPlanInput,
+    PlanEditorWindowIntent, ProviderAccountCookie, ProviderAccountCookieImport, QueueReferenceData,
     ProviderAccountEditor, ProviderAccountSettingValue, ProviderAccountUpsert, RunSourceSyncInput,
     RunSyncPlanNowInput, RuntimeLogContext, RuntimeLogEntry, RuntimeLogQuery,
     RuntimeLogWindowIntent, RuntimeLogWindowStatus, SchedulerGroupUpsert, SchedulerSetUpsert,
     SetSyncPlanPauseInput, SkipSyncPlanInput, SourceAvailabilityCheckResult,
     SourceDeleteQueueStatus, SourceEditorWindowIntent, SourceProfileDeleteInput,
-    SourceProfileUpsert, SourceSyncQueueStatus, SyncPlanTargetPreview,
-    SyncPlanTargetPreviewInput, SyncPlanUpsert, WorkspaceHealthSnapshot,
-    WorkspaceHealthWindowIntent, WorkspaceSnapshot,
+    SourceProfileUpsert, SourceSyncQueueStatus, SyncPlanTargetPreview, SyncPlanTargetPreviewInput,
+    SyncPlanUpsert, WorkspaceHealthSnapshot, WorkspaceHealthWindowIntent, WorkspaceSnapshot,
 };
 use crate::infrastructure::{
     app_update, companion_install, connector_debug, connector_runtime, database, desktop_runtime,
@@ -162,6 +162,13 @@ pub async fn get_workspace_snapshot() -> Result<WorkspaceSnapshot, String> {
 }
 
 #[tauri::command]
+pub async fn load_queue_reference_data() -> Result<QueueReferenceData, String> {
+    tauri::async_runtime::spawn_blocking(workspace_repository::load_queue_reference_data)
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
 pub async fn load_workspace_health() -> Result<WorkspaceHealthSnapshot, String> {
     tauri::async_runtime::spawn_blocking(workspace_repository::load_workspace_health)
         .await
@@ -181,19 +188,45 @@ pub fn reveal_app_log_file(path: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn media_dedupe_status() -> Result<MediaDedupeJobStatus, String> {
-    media_dedupe_runtime::media_dedupe_status()
+pub async fn media_dedupe_status() -> Result<MediaDedupeJobStatus, String> {
+    tauri::async_runtime::spawn_blocking(media_dedupe_runtime::media_dedupe_status)
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+pub fn media_dedupe_summary_status() -> Result<MediaDedupeSummaryStatus, String> {
+    media_dedupe_runtime::media_dedupe_summary_status()
+}
+
+#[tauri::command]
+pub async fn media_dedupe_result_page(
+    exact_offset: usize,
+    similar_offset: usize,
+    page_size: usize,
+) -> Result<Option<MediaDedupeResultPage>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        media_dedupe_runtime::media_dedupe_result_page(
+            exact_offset,
+            similar_offset,
+            page_size,
+        )
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
 pub fn install_media_dedupe_similarity_engine(
     app: tauri::AppHandle,
-) -> Result<MediaDedupeJobStatus, String> {
+) -> Result<MediaDedupeSummaryStatus, String> {
     media_dedupe_runtime::install_similarity_engine(&app)
 }
 
 #[tauri::command]
-pub fn install_media_tool_runtime(app: tauri::AppHandle) -> Result<MediaDedupeJobStatus, String> {
+pub fn install_media_tool_runtime(
+    app: tauri::AppHandle,
+) -> Result<MediaDedupeSummaryStatus, String> {
     media_dedupe_runtime::install_ffmpeg_runtime(&app)
 }
 
@@ -201,12 +234,12 @@ pub fn install_media_tool_runtime(app: tauri::AppHandle) -> Result<MediaDedupeJo
 pub fn enqueue_media_dedupe_scan(
     app: tauri::AppHandle,
     input: MediaDedupeScanInput,
-) -> Result<MediaDedupeJobStatus, String> {
+) -> Result<MediaDedupeSummaryStatus, String> {
     media_dedupe_runtime::enqueue_scan(&app, input)
 }
 
 #[tauri::command]
-pub fn cancel_media_dedupe(app: tauri::AppHandle) -> Result<MediaDedupeJobStatus, String> {
+pub fn cancel_media_dedupe(app: tauri::AppHandle) -> Result<MediaDedupeSummaryStatus, String> {
     media_dedupe_runtime::cancel(&app)
 }
 
@@ -214,7 +247,7 @@ pub fn cancel_media_dedupe(app: tauri::AppHandle) -> Result<MediaDedupeJobStatus
 pub fn apply_media_dedupe(
     app: tauri::AppHandle,
     input: MediaDedupeApplyInput,
-) -> Result<MediaDedupeJobStatus, String> {
+) -> Result<MediaDedupeSummaryStatus, String> {
     media_dedupe_runtime::enqueue_apply(&app, input)
 }
 
@@ -871,6 +904,20 @@ pub fn resolve_media_thumbnail_review(
     media_thumbnail_runtime::dismiss_review_items(&source_id, &relative_paths)
 }
 
+/// Keeps reviewed media on disk and persists a source-mtime-aware thumbnail
+/// skip marker. Replacing the media invalidates the marker and enables retry.
+#[tauri::command]
+pub fn skip_media_thumbnail_review(
+    source_id: String,
+    relative_paths: Vec<String>,
+) -> Result<crate::domain::models::MediaThumbnailQueueStatus, String> {
+    if relative_paths.is_empty() {
+        return media_thumbnail_runtime::queue_status();
+    }
+    workspace_repository::skip_media_thumbnail_review(&source_id, &relative_paths)?;
+    media_thumbnail_runtime::dismiss_review_items(&source_id, &relative_paths)
+}
+
 #[tauri::command]
 pub fn enqueue_single_video_download(
     app: tauri::AppHandle,
@@ -896,8 +943,8 @@ pub fn delete_single_video(id: String) -> Result<Vec<crate::domain::models::Sing
 }
 
 #[tauri::command]
-pub fn single_videos_root_status(
-) -> Result<crate::domain::models::SingleVideosRootStatus, String> {
+pub fn single_videos_root_status() -> Result<crate::domain::models::SingleVideosRootStatus, String>
+{
     workspace_repository::single_videos_root_status()
 }
 

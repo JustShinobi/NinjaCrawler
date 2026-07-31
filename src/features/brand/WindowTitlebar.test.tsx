@@ -52,21 +52,18 @@ describe('WindowTitlebar', () => {
     await waitFor(() => expect(controller.isMaximized).toHaveBeenCalled())
   })
 
-  it('routes dragging, double-click, and window controls through the controller', async () => {
+  it('uses the native drag region and routes window controls through the controller', async () => {
     const { controller } = createWindowController()
     const rendered = render(<WindowTitlebar title="Runtime Log" windowController={controller} />)
     const dragRegion = rendered.container.querySelector('.window-titlebar-drag-region') as HTMLElement
 
-    fireEvent.mouseDown(dragRegion, { button: 0, clientX: 20, clientY: 20 })
-    fireEvent.mouseMove(dragRegion, { buttons: 1, clientX: 28, clientY: 20 })
-    fireEvent.mouseUp(dragRegion, { button: 0 })
-    fireEvent.mouseDown(dragRegion, { button: 0, detail: 2, clientX: 20, clientY: 20 })
     fireEvent.click(screen.getByRole('button', { name: 'Minimize window' }))
     fireEvent.click(screen.getByRole('button', { name: 'Maximize window' }))
     fireEvent.click(screen.getByRole('button', { name: 'Close window' }))
 
-    expect(controller.startDragging).toHaveBeenCalledTimes(1)
-    expect(controller.toggleMaximize).toHaveBeenCalledTimes(2)
+    expect(dragRegion.hasAttribute('data-tauri-drag-region')).toBe(true)
+    expect(controller.startDragging).not.toHaveBeenCalled()
+    expect(controller.toggleMaximize).toHaveBeenCalledTimes(1)
     expect(controller.minimize).toHaveBeenCalledTimes(1)
     expect(controller.close).toHaveBeenCalledTimes(1)
   })

@@ -93,7 +93,10 @@ import type {
   MediaDedupeFile,
   MediaDedupeGroup,
   MediaDedupeJobStatus,
+  MediaDedupeResultPage,
   MediaDedupeScanResult,
+  MediaDedupeSummaryStatus,
+  QueueReferenceData,
   SchedulerSet,
   SchedulerGroup,
   SchedulerGroupUpsert,
@@ -111,6 +114,7 @@ import type {
   SourceProfileDeleteMode,
   SourceProfileUpsert,
   SourceSyncOptions,
+  SourceSyncOptionsOverride,
   TikTokSourceSyncOptions,
   TwitterSourceSyncOptions,
   SourceSyncRun,
@@ -157,6 +161,7 @@ const DESKTOP_SOURCE_SYNC_QUEUE_CHANGED_EVENT_NAME = 'runtime://source-sync-queu
 const DESKTOP_SOURCE_DELETE_QUEUE_CHANGED_EVENT_NAME = 'runtime://source-delete-queue-changed'
 const DESKTOP_MEDIA_PATH_MIGRATION_QUEUE_CHANGED_EVENT_NAME = 'runtime://media-path-migration-queue-changed'
 const DESKTOP_MEDIA_DEDUPE_STATUS_CHANGED_EVENT_NAME = 'media-dedupe://status-changed'
+const DESKTOP_MEDIA_DEDUPE_RESULTS_CHANGED_EVENT_NAME = 'media-dedupe://results-changed'
 const DESKTOP_IMPORT_QUEUE_CHANGED_EVENT_NAME = 'runtime://import-queue-changed'
 const DESKTOP_CONNECTOR_RUNTIME_CHANGED_EVENT_NAME = 'runtime://connector-runtime-changed'
 const DESKTOP_ACCOUNTS_WINDOW_INTENT_EVENT_NAME = 'runtime://accounts-window-intent'
@@ -268,6 +273,11 @@ function guessSettingCategory(key: string): string {
 function optionalStringValue(record: UnknownRecord, keys: string[]): string | undefined {
   const value = pick(record, ...keys)
   return typeof value === 'string' && value.trim().length > 0 ? value : undefined
+}
+
+function optionalBooleanValue(record: UnknownRecord, keys: string[]): boolean | undefined {
+  const value = pick(record, ...keys)
+  return typeof value === 'boolean' ? value : undefined
 }
 
 function optionalNumberValue(record: UnknownRecord, keys: string[]): number | undefined {
@@ -1082,7 +1092,82 @@ function normalizeSourceSyncQueueItem(value: unknown): SourceSyncQueueItem | nul
     ),
     downloadedItems,
     holdUntil: optionalStringValue(value, ['holdUntil', 'hold_until']),
+    trigger: optionalStringValue(value, ['trigger']),
+    runMode: optionalStringValue(value, ['runMode', 'run_mode']),
+    syncOptionsOverride: normalizeSyncOptionsOverride(
+      pick(value, 'syncOptionsOverride', 'sync_options_override'),
+    ),
   }
+}
+
+/**
+ * Normaliza o override preservando ausência: só copia as chaves realmente
+ * presentes no payload. Usar `normalizeSourceSyncOptions` aqui seria errado —
+ * ela preenche os defaults do provider, e um override que só carrega
+ * `targetStoryMediaId` passaria a parecer um sync completo do perfil.
+ *
+ * Só os campos que a janela da fila consome são copiados; o resto do override
+ * não muda o que é exibido.
+ */
+function normalizeSyncOptionsOverride(value: unknown): SourceSyncOptionsOverride | undefined {
+  if (!isRecord(value)) {
+    return undefined
+  }
+
+  const override: SourceSyncOptionsOverride = {}
+
+  const instagram = pick(value, 'instagram')
+  if (isRecord(instagram)) {
+    override.instagram = compactRecord({
+      timeline: optionalBooleanValue(instagram, ['timeline']),
+      reels: optionalBooleanValue(instagram, ['reels']),
+      stories: optionalBooleanValue(instagram, ['stories']),
+      storiesUser: optionalBooleanValue(instagram, ['storiesUser', 'stories_user']),
+      tagged: optionalBooleanValue(instagram, ['tagged']),
+      downloadImages: optionalBooleanValue(instagram, ['downloadImages', 'download_images']),
+      downloadVideos: optionalBooleanValue(instagram, ['downloadVideos', 'download_videos']),
+      missingOnly: optionalBooleanValue(instagram, ['missingOnly', 'missing_only']),
+      fullScan: optionalBooleanValue(instagram, ['fullScan', 'full_scan']),
+      dateFrom: optionalStringValue(instagram, ['dateFrom', 'date_from']),
+      dateTo: optionalStringValue(instagram, ['dateTo', 'date_to']),
+      targetStoryMediaId: optionalStringValue(instagram, [
+        'targetStoryMediaId',
+        'target_story_media_id',
+      ]),
+    })
+  }
+
+  const tiktok = pick(value, 'tiktok')
+  if (isRecord(tiktok)) {
+    override.tiktok = compactRecord({
+      getTimeline: optionalBooleanValue(tiktok, ['getTimeline', 'get_timeline']),
+      getStoriesUser: optionalBooleanValue(tiktok, ['getStoriesUser', 'get_stories_user']),
+      getReposts: optionalBooleanValue(tiktok, ['getReposts', 'get_reposts']),
+      getLikedVideos: optionalBooleanValue(tiktok, ['getLikedVideos', 'get_liked_videos']),
+      downloadVideos: optionalBooleanValue(tiktok, ['downloadVideos', 'download_videos']),
+      downloadPhotos: optionalBooleanValue(tiktok, ['downloadPhotos', 'download_photos']),
+      targetVideoUrl: optionalStringValue(tiktok, ['targetVideoUrl', 'target_video_url']),
+    })
+  }
+
+  const twitter = pick(value, 'twitter')
+  if (isRecord(twitter)) {
+    override.twitter = compactRecord({
+      mediaModel: optionalBooleanValue(twitter, ['mediaModel', 'media_model']),
+      profileModel: optionalBooleanValue(twitter, ['profileModel', 'profile_model']),
+      searchModel: optionalBooleanValue(twitter, ['searchModel', 'search_model']),
+      likesModel: optionalBooleanValue(twitter, ['likesModel', 'likes_model']),
+    })
+  }
+
+  return Object.keys(override).length > 0 ? override : undefined
+}
+
+/** Remove as chaves `undefined` para que a ausência continue significando "herda do perfil". */
+function compactRecord<T extends object>(value: T): T {
+  return Object.fromEntries(
+    Object.entries(value).filter(([, entry]) => entry !== undefined),
+  ) as T
 }
 
 function normalizeSourceSyncQueueRecentResult(value: unknown): SourceSyncQueueRecentResult | null {
@@ -2278,6 +2363,37 @@ function normalizeMediaDedupeJobStatus(raw: unknown): MediaDedupeJobStatus {
   }
 }
 
+function normalizeMediaDedupeSummaryStatus(raw: unknown): MediaDedupeSummaryStatus {
+  const summary = { ...normalizeMediaDedupeJobStatus(raw) }
+  Reflect.deleteProperty(summary, 'sourceJobs')
+  Reflect.deleteProperty(summary, 'latestScan')
+  return summary
+}
+
+function normalizeMediaDedupeResultPage(raw: unknown): MediaDedupeResultPage | undefined {
+  if (!isRecord(raw)) return undefined
+  return {
+    scanId: stringValue(raw, ['scanId', 'scan_id'], ''),
+    exactGroups: arrayValue(raw, ['exactGroups', 'exact_groups'])
+      .map(normalizeMediaDedupeGroup)
+      .filter((group): group is MediaDedupeGroup => group !== null),
+    similarGroups: arrayValue(raw, ['similarGroups', 'similar_groups'])
+      .map(normalizeMediaDedupeGroup)
+      .filter((group): group is MediaDedupeGroup => group !== null),
+    exactOffset: numberValue(raw, ['exactOffset', 'exact_offset'], 0),
+    similarOffset: numberValue(raw, ['similarOffset', 'similar_offset'], 0),
+    exactTotal: numberValue(raw, ['exactTotal', 'exact_total'], 0),
+    consolidatableExactTotal: numberValue(
+      raw,
+      ['consolidatableExactTotal', 'consolidatable_exact_total'],
+      0,
+    ),
+    similarTotal: numberValue(raw, ['similarTotal', 'similar_total'], 0),
+    pageSize: numberValue(raw, ['pageSize', 'page_size'], 0),
+    hasMore: booleanValue(raw, ['hasMore', 'has_more'], false),
+  }
+}
+
 function normalizeStringMap(raw: unknown): Record<string, string> {
   if (!isRecord(raw)) {
     return {}
@@ -2354,6 +2470,34 @@ export async function pullWorkspaceSnapshot(): Promise<WorkspaceSnapshot> {
   return invokeWorkspaceCommand('get_workspace_snapshot', undefined)
 }
 
+export async function loadQueueReferenceData(): Promise<QueueReferenceData> {
+  const raw = await invoke<unknown>('load_queue_reference_data')
+  const value = isRecord(raw) ? raw : {}
+  return {
+    sources: arrayValue(value, ['sources']).flatMap((rawSource) => {
+      if (!isRecord(rawSource)) return []
+      return [{
+        id: stringValue(rawSource, ['id'], ''),
+        provider: normalizeProviderKey(pick(rawSource, 'provider')),
+        handle: stringValue(rawSource, ['handle'], ''),
+        groupId: optionalStringValue(rawSource, ['groupId', 'group_id']),
+        profileImagePath: optionalStringValue(rawSource, ['profileImagePath', 'profile_image_path']),
+        syncOptions: normalizeSourceSyncOptions(
+          pick(rawSource, 'syncOptions', 'sync_options'),
+          normalizeProviderKey(pick(rawSource, 'provider')),
+        ),
+      }]
+    }),
+    groups: arrayValue(value, ['groups']).flatMap((rawGroup) => {
+      if (!isRecord(rawGroup)) return []
+      return [{
+        id: stringValue(rawGroup, ['id'], ''),
+        name: stringValue(rawGroup, ['name'], ''),
+      }]
+    }),
+  }
+}
+
 export async function loadWorkspaceHealth(): Promise<WorkspaceHealthSnapshot> {
   return normalizeWorkspaceHealth(await invoke<unknown>('load_workspace_health'))
 }
@@ -2372,24 +2516,40 @@ export async function loadMediaDedupeStatus(): Promise<MediaDedupeJobStatus> {
   return normalizeMediaDedupeJobStatus(await invoke<unknown>('media_dedupe_status'))
 }
 
-export async function installMediaDedupeSimilarityEngine(): Promise<MediaDedupeJobStatus> {
-  return normalizeMediaDedupeJobStatus(await invoke<unknown>('install_media_dedupe_similarity_engine'))
+export async function loadMediaDedupeSummaryStatus(): Promise<MediaDedupeSummaryStatus> {
+  return normalizeMediaDedupeSummaryStatus(await invoke<unknown>('media_dedupe_summary_status'))
 }
 
-export async function installMediaToolRuntime(): Promise<MediaDedupeJobStatus> {
-  return normalizeMediaDedupeJobStatus(await invoke<unknown>('install_media_tool_runtime'))
+export async function loadMediaDedupeResultPage(
+  exactOffset: number,
+  similarOffset: number,
+  pageSize = 50,
+): Promise<MediaDedupeResultPage | undefined> {
+  return normalizeMediaDedupeResultPage(await invoke<unknown>('media_dedupe_result_page', {
+    exactOffset,
+    similarOffset,
+    pageSize,
+  }))
 }
 
-export async function enqueueMediaDedupeScan(input: MediaDedupeScanInput): Promise<MediaDedupeJobStatus> {
-  return normalizeMediaDedupeJobStatus(await invoke<unknown>('enqueue_media_dedupe_scan', { input }))
+export async function installMediaDedupeSimilarityEngine(): Promise<MediaDedupeSummaryStatus> {
+  return normalizeMediaDedupeSummaryStatus(await invoke<unknown>('install_media_dedupe_similarity_engine'))
 }
 
-export async function cancelMediaDedupe(): Promise<MediaDedupeJobStatus> {
-  return normalizeMediaDedupeJobStatus(await invoke<unknown>('cancel_media_dedupe'))
+export async function installMediaToolRuntime(): Promise<MediaDedupeSummaryStatus> {
+  return normalizeMediaDedupeSummaryStatus(await invoke<unknown>('install_media_tool_runtime'))
 }
 
-export async function applyMediaDedupe(input: MediaDedupeApplyInput): Promise<MediaDedupeJobStatus> {
-  return normalizeMediaDedupeJobStatus(await invoke<unknown>('apply_media_dedupe', { input }))
+export async function enqueueMediaDedupeScan(input: MediaDedupeScanInput): Promise<MediaDedupeSummaryStatus> {
+  return normalizeMediaDedupeSummaryStatus(await invoke<unknown>('enqueue_media_dedupe_scan', { input }))
+}
+
+export async function cancelMediaDedupe(): Promise<MediaDedupeSummaryStatus> {
+  return normalizeMediaDedupeSummaryStatus(await invoke<unknown>('cancel_media_dedupe'))
+}
+
+export async function applyMediaDedupe(input: MediaDedupeApplyInput): Promise<MediaDedupeSummaryStatus> {
+  return normalizeMediaDedupeSummaryStatus(await invoke<unknown>('apply_media_dedupe', { input }))
 }
 
 export async function getAppBuildInfo(): Promise<AppBuildInfo> {
@@ -2443,7 +2603,8 @@ export async function subscribeToDesktopRuntimeEvents(handlers: {
   onSourceSyncQueueChanged?: (status: SourceSyncQueueStatus) => void
   onSourceDeleteQueueChanged?: (status: SourceDeleteQueueStatus) => void
   onMediaPathMigrationQueueChanged?: (status: MediaPathMigrationQueueStatus) => void
-  onMediaDedupeStatusChanged?: (status: MediaDedupeJobStatus) => void
+  onMediaDedupeStatusChanged?: (status: MediaDedupeSummaryStatus) => void
+  onMediaDedupeResultsChanged?: () => void
   onImportQueueChanged?: (status: ImportQueueStatus) => void
   onConnectorRuntimeChanged?: () => void
   onRuntimeLogAppended?: (entry: RuntimeLogEntry) => void
@@ -2484,7 +2645,10 @@ export async function subscribeToDesktopRuntimeEvents(handlers: {
       handlers.onMediaPathMigrationQueueChanged?.(normalizeMediaPathMigrationQueueStatus(event.payload))
     }),
     listen(DESKTOP_MEDIA_DEDUPE_STATUS_CHANGED_EVENT_NAME, (event) => {
-      handlers.onMediaDedupeStatusChanged?.(normalizeMediaDedupeJobStatus(event.payload))
+      handlers.onMediaDedupeStatusChanged?.(normalizeMediaDedupeSummaryStatus(event.payload))
+    }),
+    listen(DESKTOP_MEDIA_DEDUPE_RESULTS_CHANGED_EVENT_NAME, () => {
+      handlers.onMediaDedupeResultsChanged?.()
     }),
     listen(DESKTOP_IMPORT_QUEUE_CHANGED_EVENT_NAME, (event) => {
       handlers.onImportQueueChanged?.(normalizeImportQueueStatus(event.payload))
@@ -3161,6 +3325,20 @@ export async function resolveMediaThumbnailReview(
 ): Promise<MediaThumbnailQueueStatus> {
   return invoke<MediaThumbnailQueueStatus>(
     'resolve_media_thumbnail_review',
+    buildInvokeArgs(
+      { sourceId, relativePaths },
+      { source_id: sourceId, relative_paths: relativePaths },
+    ),
+  )
+}
+
+/** Keep reviewed media and suppress thumbnail retries until the file changes. */
+export async function skipMediaThumbnailReview(
+  sourceId: string,
+  relativePaths: string[],
+): Promise<MediaThumbnailQueueStatus> {
+  return invoke<MediaThumbnailQueueStatus>(
+    'skip_media_thumbnail_review',
     buildInvokeArgs(
       { sourceId, relativePaths },
       { source_id: sourceId, relative_paths: relativePaths },

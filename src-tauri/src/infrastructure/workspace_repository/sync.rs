@@ -365,6 +365,134 @@ fn tiktok_timestamp_from_post_id(post_id: &str) -> Option<i64> {
     (timestamp > 0).then_some(timestamp)
 }
 
+pub(super) fn tiktok_thumbnail_reconcile_candidates(
+    profile_root: &Path,
+) -> HashMap<String, Vec<PathBuf>> {
+    let mut candidates: HashMap<String, Vec<PathBuf>> = HashMap::new();
+    for path in collect_media_file_paths(profile_root).unwrap_or_default() {
+        let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        let lower_name = file_name.to_ascii_lowercase();
+        if media_thumbnail_is_skipped(&path) || lower_name.contains("_audio.") {
+            continue;
+        }
+        let marked = media_thumbnail_needs_reconciliation(&path);
+        let detected_during_sync = !media_thumbnail_is_current(&path)
+            && tiktok_media_type_from_file_name(file_name).as_deref() == Some("video")
+            && media_lacks_video_stream(&path);
+        if !marked && !detected_during_sync {
+            continue;
+        }
+        let Some(post_id) = tiktok_post_id_from_media_file_name(file_name) else {
+            continue;
+        };
+        if detected_during_sync && !marked {
+            let _ = mark_media_thumbnail_reconcile_candidate(&path);
+        }
+        candidates.entry(post_id).or_default().push(path);
+    }
+    candidates
+}
+
+pub(super) fn tiktok_carousel_posts_missing_audio(profile_root: &Path) -> HashSet<String> {
+    let mut image_counts: HashMap<String, usize> = HashMap::new();
+    let mut posts_with_audio = HashSet::new();
+    for path in collect_media_file_paths(profile_root).unwrap_or_default() {
+        let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        let Some(post_id) = tiktok_post_id_from_media_file_name(file_name) else {
+            continue;
+        };
+        if is_slideshow_audio_file(file_name) {
+            posts_with_audio.insert(post_id);
+        } else if tiktok_media_type_from_file_name(file_name).as_deref() == Some("image") {
+            *image_counts.entry(post_id).or_default() += 1;
+        }
+    }
+    image_counts
+        .into_iter()
+        .filter_map(|(post_id, count)| {
+            (count > 1 && !posts_with_audio.contains(&post_id)).then_some(post_id)
+        })
+        .collect()
+}
+
+fn retire_reconciled_tiktok_media(
+    connection: &Connection,
+    source_id: &str,
+    profile_root: &Path,
+    candidates: &HashMap<String, Vec<PathBuf>>,
+    downloaded_media: &[tiktok_connector::DownloadedTikTokMedia],
+) -> Result<usize, String> {
+    let posts_with_new_visuals: HashSet<&str> = downloaded_media
+        .iter()
+        .filter(|media| media.media_type == "image" || media.media_type == "video")
+        .map(|media| media.provider_post_key.as_str())
+        .collect();
+    let mut retired = 0usize;
+    for (post_id, paths) in candidates {
+        if !posts_with_new_visuals.contains(post_id.as_str()) {
+            continue;
+        }
+        for path in paths {
+            if !path.is_file() {
+                continue;
+            }
+            let relative_path = path
+                .strip_prefix(profile_root)
+                .map(|relative| relative.to_string_lossy().replace('\\', "/"))
+                .unwrap_or_else(|_| {
+                    path.file_name()
+                        .map(|name| name.to_string_lossy().into_owned())
+                        .unwrap_or_default()
+                });
+            let extension = path
+                .extension()
+                .and_then(|value| value.to_str())
+                .unwrap_or("mp4")
+                .to_ascii_lowercase();
+            let soundtrack = profile_root.join(format!("{post_id}_audio.{extension}"));
+            let preserved_as_soundtrack = media_has_audio_stream(path)
+                && !crate::infrastructure::atomic_file::is_nonempty_file(&soundtrack)
+                && fs::rename(path, &soundtrack).is_ok();
+            if !preserved_as_soundtrack {
+                trash::delete(path).map_err(|error| {
+                    format!(
+                        "TikTok post {post_id} was reconciled, but legacy media '{}' could not be moved to the Recycle Bin: {error}",
+                        path.display()
+                    )
+                })?;
+            }
+            connection
+                .execute(
+                    "DELETE FROM provider_sync_media_ledger
+                     WHERE provider = 'tiktok' AND source_id = ?1
+                       AND LOWER(relative_path) = LOWER(?2)",
+                    params![source_id, relative_path],
+                )
+                .map_err(|error| error.to_string())?;
+            if let Some(thumbnail) = video_thumbnail_path(path) {
+                let _ = fs::remove_file(thumbnail);
+            }
+            let source_name = path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            if let Some(parent) = path.parent() {
+                let _ = fs::remove_file(
+                    parent
+                        .join(".thumbs")
+                        .join(format!("{source_name}.reconcile")),
+                );
+            }
+            retired += 1;
+        }
+    }
+    Ok(retired)
+}
+
 /// Monta o pacing de requests do Instagram a partir das settings da conta
 /// (timers espelhados do SCrawler; defaults idem).
 pub(super) fn instagram_request_pacing(
@@ -2416,9 +2544,7 @@ pub(super) fn execute_youtube_source_sync_with_connection(
     let videos_enabled = options.get_videos.unwrap_or(true);
     let shorts_enabled = options.get_shorts.unwrap_or(false);
     if !videos_enabled && !shorts_enabled {
-        return Err(
-            "No YouTube sync section is enabled. Select Videos or Shorts.".to_string(),
-        );
+        return Err("No YouTube sync section is enabled. Select Videos or Shorts.".to_string());
     }
     let collect_media_stats = options.collect_media_stats.unwrap_or(true);
 
@@ -3168,10 +3294,13 @@ pub(super) fn execute_vsco_source_sync_with_connection(
                 },
                 &downloaded_media,
             )?;
-
             if let Some(user_id) = result.resolved_user_id.as_deref() {
-                let _ =
-                    persist_vsco_user_id_hint(connection, &context.source.id, user_id, &finished_at);
+                let _ = persist_vsco_user_id_hint(
+                    connection,
+                    &context.source.id,
+                    user_id,
+                    &finished_at,
+                );
             }
 
             if !context.source.profile_image_custom {
@@ -3264,7 +3393,8 @@ pub(super) fn execute_vsco_source_sync_with_connection(
     )?;
     propagate_source_sync_account_health(connection, context, &outcome, &finished_at)?;
     if outcome.status == "succeeded" {
-        if let Err(error) = clear_source_sync_problem(connection, &context.source.id, &finished_at) {
+        if let Err(error) = clear_source_sync_problem(connection, &context.source.id, &finished_at)
+        {
             log_runtime_event(
                 layout,
                 "sync.profile",
@@ -3423,12 +3553,24 @@ pub(super) fn execute_tiktok_source_sync_with_connection(
         );
     }
 
+    let thumbnail_reconcile_candidates = tiktok_thumbnail_reconcile_candidates(&profile_root);
+    let carousels_missing_audio = tiktok_carousel_posts_missing_audio(&profile_root);
+    let deleted_post_keys =
+        load_provider_deleted_post_keys(connection, "tiktok", &context.source.id)
+            .unwrap_or_default();
     let mut ledger_post_keys =
         load_provider_sync_post_ledger_keys(connection, "tiktok", &context.source.id)?;
-    ledger_post_keys.extend(
-        load_provider_deleted_post_keys(connection, "tiktok", &context.source.id)
-            .unwrap_or_default(),
-    );
+    for post_id in thumbnail_reconcile_candidates.keys() {
+        if !deleted_post_keys.contains(post_id) {
+            ledger_post_keys.remove(post_id);
+        }
+    }
+    for post_id in &carousels_missing_audio {
+        if !deleted_post_keys.contains(post_id) {
+            ledger_post_keys.remove(post_id);
+        }
+    }
+    ledger_post_keys.extend(deleted_post_keys);
     let ledger_media_keys =
         load_provider_sync_media_ledger_keys(connection, "tiktok", &context.source.id)?;
     let existing_relative_paths = load_existing_relative_media_paths(&profile_root);
@@ -3902,6 +4044,44 @@ pub(super) fn execute_tiktok_source_sync_with_connection(
                 },
                 &downloaded_media,
             )?;
+            match retire_reconciled_tiktok_media(
+                connection,
+                &context.source.id,
+                &profile_root,
+                &thumbnail_reconcile_candidates,
+                &result.downloaded_media,
+            ) {
+                Ok(retired) if retired > 0 => log_runtime_event(
+                    layout,
+                    "sync.profile",
+                    "info",
+                    RuntimeLogAnchor {
+                        account_id: Some(&context.account.id),
+                        provider: Some(&context.source.provider),
+                        source_id: Some(&context.source.id),
+                        source_handle: Some(&context.source.handle),
+                    },
+                    format!(
+                        "Reconciled TikTok carousel media and retired {retired} legacy non-visual file(s), preserving usable audio as slideshow soundtracks."
+                    ),
+                    None,
+                ),
+                Err(error) => log_runtime_event(
+                    layout,
+                    "sync.profile",
+                    "warning",
+                    RuntimeLogAnchor {
+                        account_id: Some(&context.account.id),
+                        provider: Some(&context.source.provider),
+                        source_id: Some(&context.source.id),
+                        source_handle: Some(&context.source.handle),
+                    },
+                    "TikTok media was downloaded, but retiring a legacy non-visual file failed."
+                        .to_string(),
+                    Some(error),
+                ),
+                _ => {}
+            }
 
             if let Some(user_id) = result.resolved_user_id.as_deref() {
                 let _ = persist_tiktok_user_id_hint(
