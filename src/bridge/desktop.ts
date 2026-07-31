@@ -3168,6 +3168,20 @@ export async function resolveMediaThumbnailReview(
   )
 }
 
+/** Keep reviewed media and suppress thumbnail retries until the file changes. */
+export async function skipMediaThumbnailReview(
+  sourceId: string,
+  relativePaths: string[],
+): Promise<MediaThumbnailQueueStatus> {
+  return invoke<MediaThumbnailQueueStatus>(
+    'skip_media_thumbnail_review',
+    buildInvokeArgs(
+      { sourceId, relativePaths },
+      { source_id: sourceId, relative_paths: relativePaths },
+    ),
+  )
+}
+
 export async function openSingleVideosWindow(): Promise<void> {
   await invoke<void>('open_single_videos_window')
 }

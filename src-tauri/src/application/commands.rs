@@ -11,9 +11,8 @@ use crate::domain::models::{
     RuntimeLogWindowIntent, RuntimeLogWindowStatus, SchedulerGroupUpsert, SchedulerSetUpsert,
     SetSyncPlanPauseInput, SkipSyncPlanInput, SourceAvailabilityCheckResult,
     SourceDeleteQueueStatus, SourceEditorWindowIntent, SourceProfileDeleteInput,
-    SourceProfileUpsert, SourceSyncQueueStatus, SyncPlanTargetPreview,
-    SyncPlanTargetPreviewInput, SyncPlanUpsert, WorkspaceHealthSnapshot,
-    WorkspaceHealthWindowIntent, WorkspaceSnapshot,
+    SourceProfileUpsert, SourceSyncQueueStatus, SyncPlanTargetPreview, SyncPlanTargetPreviewInput,
+    SyncPlanUpsert, WorkspaceHealthSnapshot, WorkspaceHealthWindowIntent, WorkspaceSnapshot,
 };
 use crate::infrastructure::{
     app_update, companion_install, connector_debug, connector_runtime, database, desktop_runtime,
@@ -871,6 +870,20 @@ pub fn resolve_media_thumbnail_review(
     media_thumbnail_runtime::dismiss_review_items(&source_id, &relative_paths)
 }
 
+/// Keeps reviewed media on disk and persists a source-mtime-aware thumbnail
+/// skip marker. Replacing the media invalidates the marker and enables retry.
+#[tauri::command]
+pub fn skip_media_thumbnail_review(
+    source_id: String,
+    relative_paths: Vec<String>,
+) -> Result<crate::domain::models::MediaThumbnailQueueStatus, String> {
+    if relative_paths.is_empty() {
+        return media_thumbnail_runtime::queue_status();
+    }
+    workspace_repository::skip_media_thumbnail_review(&source_id, &relative_paths)?;
+    media_thumbnail_runtime::dismiss_review_items(&source_id, &relative_paths)
+}
+
 #[tauri::command]
 pub fn enqueue_single_video_download(
     app: tauri::AppHandle,
@@ -896,8 +909,8 @@ pub fn delete_single_video(id: String) -> Result<Vec<crate::domain::models::Sing
 }
 
 #[tauri::command]
-pub fn single_videos_root_status(
-) -> Result<crate::domain::models::SingleVideosRootStatus, String> {
+pub fn single_videos_root_status() -> Result<crate::domain::models::SingleVideosRootStatus, String>
+{
     workspace_repository::single_videos_root_status()
 }
 

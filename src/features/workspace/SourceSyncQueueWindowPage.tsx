@@ -17,6 +17,7 @@ import {
   pauseSourceSyncProvider,
   reorderSourceSyncProviderQueue,
   resolveMediaThumbnailReview,
+  skipMediaThumbnailReview,
   resumeSourceSyncProvider,
   runSourceSync,
   loadSingleVideoQueueStatus,
@@ -443,6 +444,30 @@ export function SourceSyncQueueWindowPage() {
         resolveError instanceof Error
           ? resolveError.message
           : 'Failed to move invalid media to the Recycle Bin.',
+      )
+    } finally {
+      setResolvingReviewKey(undefined)
+    }
+  }
+
+  const handleSkipThumbnailReview = async (
+    taskKey: string,
+    sourceId: string,
+    items: MediaThumbnailReviewItem[],
+  ) => {
+    const relativePaths = items
+      .map((item) => item.relativePath)
+      .filter((path) => path.trim().length > 0)
+    if (relativePaths.length === 0) return
+    setResolvingReviewKey(taskKey)
+    try {
+      setThumbnailStatus(await skipMediaThumbnailReview(sourceId, relativePaths))
+      setError(undefined)
+    } catch (skipError) {
+      setError(
+        skipError instanceof Error
+          ? skipError.message
+          : 'Failed to skip thumbnail generation for the reviewed media.',
       )
     } finally {
       setResolvingReviewKey(undefined)
@@ -1521,7 +1546,8 @@ export function SourceSyncQueueWindowPage() {
                           Manual check recommended
                           {task.invalidMedia ? ` · ${task.invalidMedia} invalid media` : ''}
                           {task.generationFailed ? ` · ${task.generationFailed} generation failure(s)` : ''}
-                          . Remove only after confirming the online post is also broken.
+                          . TikTok posts are retried as possible carousels on the next sync. If the
+                          post is gone, keep the local file and skip future thumbnail attempts.
                         </p>
                         <ul className="thumbnail-review-list">
                           {(task.reviewItems ?? []).map((item) => (
@@ -1544,6 +1570,23 @@ export function SourceSyncQueueWindowPage() {
                             </li>
                           ))}
                         </ul>
+                        <button
+                          className="ghost-button thumbnail-review-skip"
+                          disabled={resolvingReviewKey === task.key}
+                          onClick={() =>
+                            void handleSkipThumbnailReview(
+                              task.key,
+                              task.sourceId,
+                              task.reviewItems ?? [],
+                            )
+                          }
+                          type="button"
+                          title="Keep listed files and stop retrying thumbnails until a file is replaced"
+                        >
+                          {resolvingReviewKey === task.key
+                            ? 'Saving…'
+                            : 'Keep files and skip thumbnails'}
+                        </button>
                         <button
                           className="ghost-button profile-view-delete thumbnail-review-delete"
                           disabled={resolvingReviewKey === task.key}
