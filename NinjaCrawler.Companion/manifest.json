@@ -50,6 +50,7 @@
   "permissions": [
     "activeTab",
     "alarms",
+    "contextMenus",
     "cookies",
     "scripting",
     "storage",
