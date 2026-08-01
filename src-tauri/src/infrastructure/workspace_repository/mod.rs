@@ -55,7 +55,7 @@ use crate::infrastructure::storage::StorageLayout;
 use crate::infrastructure::{
     connector_debug, connector_runtime, database, instagram_connector, media_tool_runtime, runtime_log,
     session_secret_store, source_sync_runtime, storage, tiktok_connector, tiktok_likes_runtime,
-    twitter_connector, vsco_connector, youtube_connector,
+    tiktok_timeline_runtime, twitter_connector, vsco_connector, youtube_connector,
 };
 use crate::providers;
 

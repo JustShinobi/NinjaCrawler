@@ -46,11 +46,17 @@ vi.mock('@tauri-apps/api/window', () => ({
 // jsdom não faz layout, então a virtualização real (que depende de medir a
 // viewport/linhas) renderizaria zero linhas. Trocamos o virtualizer por um que
 // renderiza todas as linhas — os testes checam ordem/contagem, não o windowing.
+// `measured: false` reproduz o primeiro paint real: antes de medir o container,
+// o virtualizer não reporta linha alguma.
+const virtualizerState = vi.hoisted(() => ({ measured: true }))
+
 vi.mock('@tanstack/react-virtual', () => ({
   useVirtualizer: ({ count }: { count: number }) => ({
     getTotalSize: () => count * 200,
     getVirtualItems: () =>
-      Array.from({ length: count }, (_, index) => ({ index, key: index, start: index * 200 })),
+      virtualizerState.measured
+        ? Array.from({ length: count }, (_, index) => ({ index, key: index, start: index * 200 }))
+        : [],
     measureElement: () => undefined,
     measure: () => undefined,
     isScrolling: false,
@@ -202,6 +208,7 @@ describe('ProfileViewPage', () => {
     for (const mock of Object.values(bridgeMocks)) {
       mock.mockReset()
     }
+    virtualizerState.measured = true
     bridgeMocks.loadSourceMediaGallery.mockResolvedValue(galleryFixture())
     bridgeMocks.loadSourceHandleHistory.mockResolvedValue([])
     bridgeMocks.listCollections.mockResolvedValue([])
@@ -264,6 +271,57 @@ describe('ProfileViewPage', () => {
     })
     const { container } = render(<ProfileViewPage initialSourceId="src-1" />)
     await screen.findByRole('heading', { name: /gaaby\.tls/i })
+
+    await waitFor(() => {
+      const imgs = Array.from(
+        container.querySelectorAll('.profile-view-thumb img'),
+      ) as HTMLImageElement[]
+      const photo = imgs.find((img) => img.getAttribute('src')?.includes('b_0'))
+      expect(photo?.getAttribute('src')).toBe('asset://S:/x/.thumbs/b_0.jpeg.jpg')
+    })
+  })
+
+  it('requests thumbnails on the first paint, before the virtualizer measures', async () => {
+    // Acervo que cabe na tela: sem rolagem, o virtualizer nunca remede, e o
+    // grid ficava só com placeholders até o usuário rolar ou redimensionar.
+    virtualizerState.measured = false
+    render(<ProfileViewPage initialSourceId="src-1" />)
+    await screen.findByRole('heading', { name: /gaaby\.tls/i })
+
+    await waitFor(() => {
+      expect(bridgeMocks.loadMediaThumbnails).toHaveBeenCalled()
+    })
+    const requested = bridgeMocks.loadMediaThumbnails.mock.calls.flatMap(
+      (call: unknown[]) => call[0] as string[],
+    )
+    expect(requested.length).toBeGreaterThan(0)
+  })
+
+  it('applies an in-flight thumbnail batch even when the effect re-runs', async () => {
+    // O virtualizer mede o container logo depois do primeiro pedido, e a
+    // re-execução do efeito não pode descartar o lote em voo: ela não repede
+    // (os paths ainda constam como pendentes), então o grid ficaria sem thumb
+    // até o primeiro scroll.
+    let resolveBatch: (batch: { available: boolean; thumbs: Record<string, string> }) => void =
+      () => undefined
+    bridgeMocks.loadMediaThumbnails.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveBatch = resolve
+        }),
+    )
+    virtualizerState.measured = false
+    const { container } = render(<ProfileViewPage initialSourceId="src-1" />)
+    await screen.findByRole('heading', { name: /gaaby\.tls/i })
+    await waitFor(() => {
+      expect(bridgeMocks.loadMediaThumbnails).toHaveBeenCalled()
+    })
+
+    // Virtualizer mediu → o efeito re-executa e limpa o anterior.
+    virtualizerState.measured = true
+    fireEvent.click(screen.getByRole('button', { name: /flat grid/i }))
+
+    resolveBatch({ available: true, thumbs: { 'S:/x/b_0.jpeg': 'S:/x/.thumbs/b_0.jpeg.jpg' } })
 
     await waitFor(() => {
       const imgs = Array.from(

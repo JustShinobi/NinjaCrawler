@@ -175,6 +175,8 @@ export interface TikTokSourceSyncOptions {
   description?: string
   color?: string
   userIdHint?: string
+  /** secUid resolvido; permite listar via tiktokuser: sem reabrir um WebView. */
+  secUidHint?: string
 }
 
 export interface YouTubeSourceSyncOptions {

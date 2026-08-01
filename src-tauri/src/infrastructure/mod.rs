@@ -26,6 +26,7 @@ pub mod source_sync_runtime;
 pub mod storage;
 pub mod tiktok_connector;
 pub mod tiktok_likes_runtime;
+pub mod tiktok_timeline_runtime;
 pub mod twitter_connector;
 pub mod vsco_connector;
 pub mod workspace_backup;

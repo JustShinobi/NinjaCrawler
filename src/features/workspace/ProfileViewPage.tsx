@@ -422,6 +422,8 @@ const DAY_HEADER_ESTIMATE = 44
 const ROW_OVERSCAN = 3
 /** Quantos thumbnails de vídeo pedir ao backend por lote. */
 const THUMBNAIL_BATCH = 32
+/** Linhas cobertas no primeiro paint, antes de o virtualizer medir o container. */
+const INITIAL_THUMBNAIL_ROWS = 4
 
 function profileWindowTitle(handle?: string, provider?: ProviderKey): string {
   if (!handle) return 'Profile View'
@@ -1030,6 +1032,14 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
   // ffmpeg ausente → cai no thumb por <video> (gated pelo isScrolling).
   const [thumbsUnavailable, setThumbsUnavailable] = useState(false)
   const pendingThumbsRef = useRef<Set<string>>(new Set())
+  // Só o unmount invalida um lote de thumbs em voo (ver o efeito abaixo).
+  const mountedRef = useRef(true)
+  useEffect(() => {
+    mountedRef.current = true
+    return () => {
+      mountedRef.current = false
+    }
+  }, [])
   const isScrolling = rowVirtualizer.isScrolling
   const virtualItems = rowVirtualizer.getVirtualItems()
   const rangeKey = virtualItems.length
@@ -1038,9 +1048,16 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
   useEffect(() => {
     // Durante a rolagem não adianta pedir: a viewport ainda está mudando.
     if (isScrolling || !isVirtualized) return
+    const measured = rowVirtualizer.getVirtualItems()
+    // Primeiro paint: o virtualizer ainda não mediu o container e não reporta
+    // item algum. Sem este fallback, um acervo que cabe na tela (nada a rolar)
+    // fica sem thumb até o usuário rolar ou redimensionar a janela.
+    const targetRows =
+      measured.length > 0
+        ? measured.map((item) => virtualRows[item.index])
+        : virtualRows.slice(0, INITIAL_THUMBNAIL_ROWS)
     const wanted: string[] = []
-    for (const item of rowVirtualizer.getVirtualItems()) {
-      const row = virtualRows[item.index]
+    for (const row of targetRows) {
       if (!row || row.type !== 'grid') continue
       for (const post of row.posts) {
         const file = post.files[0]
@@ -1059,11 +1076,15 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
     }
     if (wanted.length === 0) return
     for (const key of wanted) pendingThumbsRef.current.add(key)
-    let cancelled = false
+    // O resultado NÃO pode ser descartado quando o efeito re-executa: ele
+    // re-executa assim que o virtualizer mede o container, logo depois do
+    // primeiro pedido. Descartar ali perdia o lote (e a re-execução não repedia,
+    // porque os paths ainda constavam como pendentes), deixando o grid sem thumb
+    // até o primeiro scroll. Só o unmount interrompe.
     void loadMediaThumbnails(wanted)
       .then((batch) => {
         for (const key of wanted) pendingThumbsRef.current.delete(key)
-        if (cancelled) return
+        if (!mountedRef.current) return
         // available=false sinaliza só ffmpeg ausente (afeta vídeo); as fotos do
         // lote ainda vêm no batch, então mesclamos de qualquer forma.
         if (!batch.available) setThumbsUnavailable(true)
@@ -1077,9 +1098,6 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
       .catch(() => {
         for (const key of wanted) pendingThumbsRef.current.delete(key)
       })
-    return () => {
-      cancelled = true
-    }
     // rangeKey cobre o deslocamento da janela; thumbs reagenda o próximo lote.
   }, [rangeKey, isScrolling, thumbs, thumbsUnavailable, isVirtualized, rowVirtualizer, virtualRows])
 

@@ -1252,6 +1252,12 @@ pub struct TikTokSourceSyncOptions {
     /// preservado entre upserts para detectar renames/duplicatas.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub user_id_hint: Option<String>,
+    /// `secUid` do perfil. O yt-dlp precisa dele para enumerar a timeline e não
+    /// consegue mais extraí-lo do HTML de todos os perfis; quando resolvido,
+    /// guardamos aqui para o sync seguinte usar `tiktokuser:<secUid>` direto,
+    /// sem reabrir um WebView.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sec_uid_hint: Option<String>,
 }
 
 pub fn default_tiktok_source_sync_options() -> TikTokSourceSyncOptions {
@@ -1283,6 +1289,7 @@ pub fn default_tiktok_source_sync_options() -> TikTokSourceSyncOptions {
         description: Some(String::new()),
         color: Some(String::new()),
         user_id_hint: None,
+        sec_uid_hint: None,
     }
 }
 
