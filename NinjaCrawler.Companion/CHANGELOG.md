@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.19.0](https://github.com/JustShinobi/NinjaCrawler/compare/companion-v0.18.0...companion-v0.19.0) (2026-08-01)
+
+
+### Features
+
+* **companion:** add provider context menu actions ([#118](https://github.com/JustShinobi/NinjaCrawler/issues/118)) ([8a927f9](https://github.com/JustShinobi/NinjaCrawler/commit/8a927f95d918a95b230fe7ced75af6941419fc7c))
+
 ## [0.18.0](https://github.com/JustShinobi/NinjaCrawler/compare/companion-v0.17.1...companion-v0.18.0) (2026-07-17)
 
 
