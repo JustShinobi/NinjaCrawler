@@ -17,6 +17,8 @@ export interface MediaCardProps {
   slideshowCount?: number
   /** Selo no canto superior (seção/provider). */
   badge?: string
+  /** Post confirmado como removido da origem — só existe neste acervo. */
+  archivedOnly?: boolean
   /** Texto do overlay inferior (hora/data/@autor). */
   overlayText?: string
   /** Modo feed YouTube: thumb 16:9 + rótulo (título/meta) abaixo do card. */
@@ -62,6 +64,7 @@ export function MediaCard({
   isVideo,
   slideshowCount,
   badge,
+  archivedOnly,
   overlayText,
   youtube,
   durationBadge,
@@ -122,6 +125,17 @@ export function MediaCard({
           <span className="profile-view-badge" aria-hidden="true">▣ {slideshowCount}</span>
         ) : null}
         {badge ? <span className="profile-view-section" aria-hidden="true">{badge}</span> : null}
+        {archivedOnly ? (
+          <span
+            // aria-hidden like the sibling badges: the thumbnail is a button and
+            // any readable text inside it becomes part of its accessible name.
+            aria-hidden="true"
+            className="profile-view-archived-badge"
+            title="Removed from the source — this copy only exists here"
+          >
+            Archived only
+          </span>
+        ) : null}
         {durationBadge ? (
           <span className="profile-view-duration" aria-hidden="true">{durationBadge}</span>
         ) : null}

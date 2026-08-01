@@ -32,6 +32,7 @@ export default defineConfig(({ command }) => ({
         profileView: resolve(projectRoot, 'profile-view.html'),
         singleVideos: resolve(projectRoot, 'single-videos.html'),
         workspaceHealth: resolve(projectRoot, 'workspace-health.html'),
+        library: resolve(projectRoot, 'library.html'),
       },
     },
   },

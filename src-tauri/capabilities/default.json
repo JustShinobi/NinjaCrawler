@@ -17,7 +17,8 @@
     "plans",
     "profile-view",
     "profile-view-*",
-    "single-videos"
+    "single-videos",
+    "library"
   ],
   "permissions": [
     "core:default",

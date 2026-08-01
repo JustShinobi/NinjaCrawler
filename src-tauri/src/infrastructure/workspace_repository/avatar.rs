@@ -160,6 +160,8 @@ pub fn pick_source_profile_image(source_id: String) -> Result<WorkspaceSnapshot,
             created_at: None,
             importer_id: None,
             imported_at: None,
+            provider_user_id: None,
+            identity_id: None,
         };
         let source_media_dir =
             resolved_source_media_output_root_with_connection(connection, layout, &source_profile)?;
@@ -248,6 +250,8 @@ pub fn reset_source_profile_image(source_id: String) -> Result<WorkspaceSnapshot
             created_at: None,
             importer_id: None,
             imported_at: None,
+            provider_user_id: None,
+            identity_id: None,
         };
         let output_root =
             resolved_source_media_output_root_with_connection(connection, layout, &source_profile)?;

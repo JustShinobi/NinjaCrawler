@@ -20,8 +20,9 @@ pub struct BatchEditorIntent {
     pub source_ids: Vec<String>,
 }
 use crate::infrastructure::{
-    companion_api, connector_debug, database, media_dedupe_runtime, media_path_migration_runtime,
-    runtime_log, scheduler_runtime, source_sync_runtime, storage, workspace_repository,
+    companion_api, connector_debug, database, media_dedupe_runtime, media_index_runtime,
+    media_path_migration_runtime, runtime_log, scheduler_runtime, source_sync_runtime, storage,
+    workspace_repository,
 };
 #[cfg(windows)]
 use winreg::enums::HKEY_CURRENT_USER;
@@ -51,6 +52,7 @@ const CONNECTOR_DEBUG_WINDOW_LABEL: &str = "connector-debug";
 const SCHEDULER_WINDOW_LABEL: &str = "scheduler-plans";
 const SOURCE_SYNC_QUEUE_WINDOW_LABEL: &str = "source-sync-queue";
 const WORKSPACE_HEALTH_WINDOW_LABEL: &str = "workspace-health";
+const LIBRARY_WINDOW_LABEL: &str = "library";
 const CONNECTOR_RUNTIMES_WINDOW_LABEL: &str = "connector-runtimes";
 const SINGLE_VIDEOS_WINDOW_LABEL: &str = "single-videos";
 const IMPORT_WINDOW_LABEL: &str = "import";
@@ -62,6 +64,7 @@ const MANAGED_STANDALONE_WINDOW_LABELS: &[&str] = &[
     SCHEDULER_WINDOW_LABEL,
     SOURCE_SYNC_QUEUE_WINDOW_LABEL,
     WORKSPACE_HEALTH_WINDOW_LABEL,
+    LIBRARY_WINDOW_LABEL,
     CONNECTOR_RUNTIMES_WINDOW_LABEL,
     ACCOUNTS_WINDOW_LABEL,
     PROFILE_EDITOR_WINDOW_LABEL,
@@ -151,6 +154,7 @@ pub fn start_runtime_services(app: tauri::AppHandle) -> Result<(), String> {
         std::thread::sleep(std::time::Duration::from_millis(2000));
         media_path_migration_runtime::restore_persisted_queue(&app_handle);
         media_dedupe_runtime::recover_interrupted_jobs(&app_handle);
+        media_index_runtime::recover_interrupted_runs();
         source_sync_runtime::restore_persisted_queue(&app_handle);
     });
     Ok(())
@@ -506,6 +510,23 @@ pub fn open_workspace_health_window(
     Ok(())
 }
 
+pub fn open_library_window(app: &tauri::AppHandle) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window(LIBRARY_WINDOW_LABEL) {
+        window.show().map_err(|error| error.to_string())?;
+        window.unminimize().map_err(|error| error.to_string())?;
+        window.set_focus().map_err(|error| error.to_string())?;
+        return Ok(());
+    }
+
+    let app_handle = app.clone();
+    std::thread::spawn(move || {
+        if let Err(error) = create_library_window(&app_handle) {
+            eprintln!("[library] failed to create window: {error}");
+        }
+    });
+    Ok(())
+}
+
 pub fn open_profile_view_window(app: &tauri::AppHandle, source_id: String) -> Result<(), String> {
     let label = profile_view_window_label(&source_id);
     // Uma janela por perfil: reabrir o mesmo sourceId foca a janela existente,
@@ -852,6 +873,32 @@ fn create_workspace_health_window(
         WindowSizeSpec {
             width: 1240,
             height: 820,
+        },
+        |_| Ok(()),
+    )
+}
+
+fn create_library_window(app: &tauri::AppHandle) -> Result<(), String> {
+    let window = tauri::WebviewWindowBuilder::new(
+        app,
+        LIBRARY_WINDOW_LABEL,
+        tauri::WebviewUrl::App("library.html".into()),
+    )
+    .title("Library")
+    .inner_size(1320.0, 880.0)
+    .min_inner_size(960.0, 620.0)
+    .decorations(false)
+    .closable(true)
+    .visible(false)
+    .build()
+    .map_err(|error| error.to_string())?;
+
+    show_new_standalone_window(
+        app,
+        &window,
+        WindowSizeSpec {
+            width: 1320,
+            height: 880,
         },
         |_| Ok(()),
     )

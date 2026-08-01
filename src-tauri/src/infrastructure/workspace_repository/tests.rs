@@ -754,6 +754,8 @@ fn extract_post_tombstone_keys_per_provider() {
         comment_count: None,
         share_count: None,
         stats_updated_at: None,
+        upstream_missing: false,
+        has_variants: false,
         files: Vec::new(),
         audio_relative_path: None,
         audio_absolute_path: None,
@@ -1207,7 +1209,7 @@ fn reconcile_tiktok_provider_ledgers_seeds_existing_files() {
     assert_eq!(liked_likes_count, 1);
 }
 
-fn create_test_layout() -> (TempDir, StorageLayout) {
+pub(super) fn create_test_layout() -> (TempDir, StorageLayout) {
     // Layout montado na mão para o suite ser HERMÉTICO: evita depender de
     // ensure_workspace_layout()/preferred_media_root, que resolvem paths reais
     // do usuário (LOCALAPPDATA/USERPROFILE) em vez do diretório temporário.
@@ -1244,7 +1246,7 @@ fn create_test_layout() -> (TempDir, StorageLayout) {
     (temp_dir, layout)
 }
 
-fn sample_account(id: &str, provider: &str) -> ProviderAccountUpsert {
+pub(super) fn sample_account(id: &str, provider: &str) -> ProviderAccountUpsert {
     ProviderAccountUpsert {
         id: Some(id.to_string()),
         provider: provider.to_string(),
@@ -1256,7 +1258,11 @@ fn sample_account(id: &str, provider: &str) -> ProviderAccountUpsert {
     }
 }
 
-fn sample_source(id: &str, provider: &str, account_id: Option<&str>) -> SourceProfileUpsert {
+pub(super) fn sample_source(
+    id: &str,
+    provider: &str,
+    account_id: Option<&str>,
+) -> SourceProfileUpsert {
     SourceProfileUpsert {
         id: Some(id.to_string()),
         provider: provider.to_string(),
@@ -1296,6 +1302,8 @@ fn sample_source_profile_model() -> SourceProfile {
         created_at: Some("2026-03-10T00:00:00Z".to_string()),
         importer_id: None,
         imported_at: None,
+        provider_user_id: None,
+        identity_id: None,
     }
 }
 
@@ -1424,7 +1432,7 @@ fn load_source_profile_by_id(
 ) -> Result<SourceProfile, String> {
     connection
         .query_row(
-        "SELECT provider, source_kind, handle, display_name, account_id, labels_json, ready_for_download, sync_options_json, profile_image_path, profile_image_custom, remote_state, is_subscription, last_synced_at, sync_problem_code, sync_problem_message, sync_problem_at, created_at, group_id, importer_id, imported_at
+        "SELECT provider, source_kind, handle, display_name, account_id, labels_json, ready_for_download, sync_options_json, profile_image_path, profile_image_custom, remote_state, is_subscription, last_synced_at, sync_problem_code, sync_problem_message, sync_problem_at, created_at, group_id, importer_id, imported_at, provider_user_id, identity_id
              FROM source_profiles
              WHERE id = ?1
                AND deleted_at IS NULL
@@ -1456,6 +1464,8 @@ fn load_source_profile_by_id(
                 created_at: row.get(16).ok(),
                 importer_id: row.get(18).ok(),
                 imported_at: row.get(19).ok(),
+                provider_user_id: row.get(20).ok().flatten(),
+                identity_id: row.get(21).ok().flatten(),
             })
         },
     )

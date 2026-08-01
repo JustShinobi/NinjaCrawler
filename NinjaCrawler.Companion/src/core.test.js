@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import {
   collectDetectedProfiles,
+  detectProfileFromContextMenu,
   detectProfileFromUrl,
   detectTargetFromUrl,
   detectVideoFromUrl,
@@ -92,6 +93,32 @@ describe('detectProfileFromUrl', () => {
       'https://www.instagram.com/stories/highlights/1789554678901234567/',
     )).toBeNull()
     expect(detectProfileFromUrl('https://www.instagram.com/highlights/1789554678901234567/')).toBeNull()
+  })
+})
+
+describe('detectProfileFromContextMenu', () => {
+  it.each([
+    ['Instagram', 'https://www.instagram.com/someone/', 'instagram', '@someone'],
+    ['TikTok', 'https://www.tiktok.com/@someone', 'tiktok', '@someone'],
+    ['X', 'https://x.com/someone', 'twitter', '@someone'],
+    ['Twitter', 'https://twitter.com/someone', 'twitter', '@someone'],
+  ])('detects a %s handle link clicked from a provider feed', (_, linkUrl, provider, handle) => {
+    expect(detectProfileFromContextMenu({
+      pageUrl: 'https://x.com/home',
+      linkUrl,
+    })).toEqual({
+      provider,
+      handle,
+      displayName: 'someone',
+      url: linkUrl,
+    })
+  })
+
+  it('does not fall back to the feed URL when the clicked link is not a profile', () => {
+    expect(detectProfileFromContextMenu({
+      pageUrl: 'https://www.instagram.com/someone/',
+      linkUrl: 'https://www.instagram.com/explore/',
+    })).toBeNull()
   })
 })
 

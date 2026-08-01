@@ -278,6 +278,7 @@ export function createTikTokSourceSyncOptions(
     description: overrides?.description ?? DEFAULT_TIKTOK_SOURCE_SYNC_OPTIONS.description,
     color: overrides?.color ?? DEFAULT_TIKTOK_SOURCE_SYNC_OPTIONS.color,
     userIdHint: overrides?.userIdHint,
+    secUidHint: overrides?.secUidHint,
   }
 }
 

@@ -417,7 +417,7 @@ fn prepare_with_media_delete(
 ) -> Result<PreparedWithMediaDelete, String> {
     let source = connection
         .query_row(
-            "SELECT id, provider, source_kind, handle, display_name, account_id, labels_json, ready_for_download, sync_options_json, profile_image_path, profile_image_custom, remote_state, is_subscription, last_synced_at, sync_problem_code, sync_problem_message, sync_problem_at, created_at, group_id, importer_id, imported_at
+            "SELECT id, provider, source_kind, handle, display_name, account_id, labels_json, ready_for_download, sync_options_json, profile_image_path, profile_image_custom, remote_state, is_subscription, last_synced_at, sync_problem_code, sync_problem_message, sync_problem_at, created_at, group_id, importer_id, imported_at, provider_user_id, identity_id
              FROM source_profiles
              WHERE id = ?1
                AND deleted_at IS NULL
@@ -452,6 +452,8 @@ fn prepare_with_media_delete(
                     created_at: row.get(17).ok(),
                     importer_id: row.get(19).ok(),
                     imported_at: row.get(20).ok(),
+                    provider_user_id: row.get(21).ok().flatten(),
+                    identity_id: row.get(22).ok().flatten(),
                 })
             },
         )
@@ -608,7 +610,7 @@ where
 
             let source = connection
                 .query_row(
-                    "SELECT id, provider, source_kind, handle, display_name, account_id, labels_json, ready_for_download, sync_options_json, profile_image_path, profile_image_custom, remote_state, is_subscription, last_synced_at, sync_problem_code, sync_problem_message, sync_problem_at, created_at, group_id, importer_id, imported_at
+                    "SELECT id, provider, source_kind, handle, display_name, account_id, labels_json, ready_for_download, sync_options_json, profile_image_path, profile_image_custom, remote_state, is_subscription, last_synced_at, sync_problem_code, sync_problem_message, sync_problem_at, created_at, group_id, importer_id, imported_at, provider_user_id, identity_id
                      FROM source_profiles
                      WHERE id = ?1
                        AND deleted_at IS NULL
@@ -641,6 +643,8 @@ where
                             created_at: row.get(17).ok(),
                             importer_id: row.get(19).ok(),
                             imported_at: row.get(20).ok(),
+                            provider_user_id: row.get(21).ok().flatten(),
+                            identity_id: row.get(22).ok().flatten(),
                         })
                     },
                 )
@@ -1067,6 +1071,8 @@ pub(super) fn open_source_folder_with_connection(
         created_at: None,
         importer_id: None,
         imported_at: None,
+        provider_user_id: None,
+        identity_id: None,
     };
     let root =
         resolved_source_media_output_root(layout, &source_profile, account_settings.as_ref());
@@ -1789,7 +1795,7 @@ fn canonicalized_media_root_display(root: &Path) -> String {
 pub(super) fn load_sources(connection: &Connection) -> Result<Vec<SourceProfile>, String> {
     let mut statement = connection
         .prepare(
-            "SELECT id, provider, source_kind, handle, display_name, account_id, labels_json, ready_for_download, sync_options_json, profile_image_path, profile_image_custom, remote_state, is_subscription, last_synced_at, sync_problem_code, sync_problem_message, sync_problem_at, created_at, group_id, importer_id, imported_at
+            "SELECT id, provider, source_kind, handle, display_name, account_id, labels_json, ready_for_download, sync_options_json, profile_image_path, profile_image_custom, remote_state, is_subscription, last_synced_at, sync_problem_code, sync_problem_message, sync_problem_at, created_at, group_id, importer_id, imported_at, provider_user_id, identity_id
              FROM source_profiles
              WHERE deleted_at IS NULL
              ORDER BY provider, display_name",
@@ -1822,6 +1828,8 @@ pub(super) fn load_sources(connection: &Connection) -> Result<Vec<SourceProfile>
                 created_at: row.get(17).ok(),
                 importer_id: row.get(19).ok(),
                 imported_at: row.get(20).ok(),
+                provider_user_id: row.get(21).ok().flatten(),
+                identity_id: row.get(22).ok().flatten(),
             })
         })
         .map_err(|error| error.to_string())?;

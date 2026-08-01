@@ -13,6 +13,11 @@ Instagram, TikTok, and X/Twitter, and **Download active story** when the active
 Instagram or TikTok URL identifies a supported story. Command results are shown
 on the extension badge, so the popup does not need to remain open.
 
+On Instagram, TikTok, and X/Twitter pages, right-click a profile handle link to
+open it in NinjaCrawler for adding or queue a sync when it is already tracked.
+On Instagram, right-click the open story media and choose **Download current
+Instagram story** to queue the story currently rendered in the viewer.
+
 NinjaCrawler reports the Companion version bundled with its current release and
 the minimum compatible version. Download or update it from **Connector
 Runtimes** in NinjaCrawler. The desktop app owns the download and keeps the

@@ -15022,6 +15022,520 @@ textarea.accounts-field-mono {
 .profile-view-badge { top: 0.35rem; right: 0.35rem; }
 .profile-view-section { bottom: 0.35rem; left: 0.35rem; z-index: 1; }
 
+/* ---- Library window (aggregated timeline) ---- */
+.library-window-body {
+  display: flex;
+  min-height: 0;
+  height: 100%;
+}
+
+/* Destinations, not tabs: collections are first-class navigation and live in
+   the same list as the built-in views. */
+.library-sidebar {
+  width: 196px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 0.6rem 0.45rem;
+  border-right: 1px solid var(--border-subtle, rgba(127, 127, 127, 0.22));
+  overflow-y: auto;
+}
+
+.library-nav-item {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  width: 100%;
+  padding: 0.34rem 0.5rem;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: inherit;
+  font-size: 0.82rem;
+  text-align: left;
+  cursor: pointer;
+}
+
+.library-nav-item:hover {
+  background: rgba(127, 127, 127, 0.12);
+}
+
+.library-nav-item.is-active {
+  background: rgba(127, 127, 127, 0.18);
+  font-weight: 600;
+}
+
+.library-nav-icon {
+  width: 1rem;
+  text-align: center;
+  opacity: 0.75;
+}
+
+.library-nav-label {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.library-nav-badge {
+  font-family: var(--font-data);
+  font-size: 0.7rem;
+  opacity: 0.7;
+}
+
+.library-sidebar-section {
+  margin-top: 0.7rem;
+  padding-top: 0.55rem;
+  border-top: 1px solid var(--border-subtle, rgba(127, 127, 127, 0.22));
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.library-sidebar-heading {
+  padding: 0 0.5rem 0.3rem;
+  font-size: 0.68rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  opacity: 0.55;
+}
+
+.library-sidebar-hint {
+  margin: 0;
+  padding: 0 0.5rem;
+  font-size: 0.72rem;
+  opacity: 0.6;
+  line-height: 1.35;
+}
+
+.library-content {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding: 0.6rem 0.75rem 0;
+}
+
+/* First run: the reason the grid is empty, and the way out of it. */
+.library-firstrun {
+  margin: auto;
+  max-width: 24rem;
+  padding: 2rem 1rem;
+  text-align: center;
+}
+
+.library-firstrun-title {
+  margin: 0 0 0.4rem;
+  font-size: 1rem;
+}
+
+.library-firstrun-body {
+  margin: 0 0 1rem;
+  font-size: 0.82rem;
+  line-height: 1.5;
+  opacity: 0.75;
+}
+
+/* Background indexing while the grid is usable — informative, not blocking. */
+.library-indexing-strip {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.3rem 0.55rem;
+  border-radius: 8px;
+  background: rgba(127, 127, 127, 0.1);
+  font-size: 0.75rem;
+  opacity: 0.85;
+}
+
+.library-indexing-detail {
+  flex: 1;
+  min-width: 0;
+}
+
+.library-speed-picker {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.2rem;
+  margin-top: 0.5rem;
+}
+
+.library-speed-label {
+  margin-right: 0.25rem;
+  font-size: 0.72rem;
+  opacity: 0.7;
+}
+
+.library-speed-option {
+  padding: 0.16rem 0.5rem;
+  border: 1px solid var(--border-subtle, rgba(127, 127, 127, 0.25));
+  border-radius: 999px;
+  background: transparent;
+  color: inherit;
+  font-size: 0.72rem;
+  cursor: pointer;
+}
+
+.library-speed-option.is-active {
+  background: rgba(127, 127, 127, 0.22);
+  font-weight: 600;
+}
+
+.library-speed-hint {
+  margin: 0.4rem 0 0;
+  font-size: 0.72rem;
+  opacity: 0.65;
+}
+
+.library-health-link {
+  align-self: flex-start;
+  margin-top: 0.6rem;
+  padding: 0.4rem 0.6rem;
+  border: 1px solid var(--border-subtle, rgba(127, 127, 127, 0.25));
+  border-radius: 8px;
+  background: transparent;
+  color: inherit;
+  font-size: 0.76rem;
+  cursor: pointer;
+}
+
+.library-toolbar {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.library-filters {
+  display: flex;
+  align-items: flex-end;
+  gap: 0.7rem;
+  flex-wrap: wrap;
+}
+
+.library-filter {
+  display: inline-flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  font-size: 0.72rem;
+  opacity: 0.85;
+}
+
+.library-filter-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-size: 0.76rem;
+}
+
+.library-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding-bottom: 1rem;
+}
+
+.library-day {
+  margin-bottom: 1.1rem;
+}
+
+.library-day-heading {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin: 0 0 0.45rem;
+  padding: 0.25rem 0;
+  font-size: 0.82rem;
+  font-weight: 600;
+  background: var(--bg-window-shell);
+}
+
+.library-day-count {
+  font-family: var(--font-data);
+  font-size: 0.68rem;
+  opacity: 0.6;
+}
+
+.library-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, 168px);
+  justify-content: start;
+  gap: 0.55rem;
+}
+
+.library-toolbar-actions {
+  display: inline-flex;
+  gap: 0.4rem;
+}
+
+.library-collection-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.library-collection {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+  padding: 0.45rem 0.55rem;
+  border-radius: 10px;
+  background: rgba(127, 127, 127, 0.08);
+}
+
+.library-collection-open {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  align-items: flex-start;
+  flex: 1;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+
+.library-collection-meta {
+  font-size: 0.72rem;
+  opacity: 0.68;
+}
+
+.library-collection-actions {
+  display: inline-flex;
+  gap: 0.3rem;
+}
+
+.library-selection-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  padding: 0.35rem 0.5rem;
+  border-radius: 8px;
+  background: rgba(127, 127, 127, 0.1);
+  font-size: 0.78rem;
+}
+
+.library-stat-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 0.5rem;
+}
+
+.library-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  padding: 0.6rem 0.7rem;
+  border-radius: 10px;
+  background: rgba(127, 127, 127, 0.09);
+}
+
+.library-stat span {
+  font-size: 0.72rem;
+  opacity: 0.7;
+}
+
+.library-stat strong {
+  font-family: var(--font-data);
+  font-size: 1.35rem;
+}
+
+.library-stat small {
+  font-size: 0.7rem;
+  opacity: 0.66;
+}
+
+.library-overview-block h2 {
+  margin: 0 0 0.4rem;
+  font-size: 0.85rem;
+}
+
+.library-bar-list,
+.library-stalled-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+
+.library-bar-list li {
+  display: grid;
+  grid-template-columns: 150px 1fr 90px;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.76rem;
+}
+
+.library-bar {
+  height: 8px;
+  border-radius: 999px;
+  background: currentColor;
+  opacity: 0.35;
+}
+
+.library-bar-value {
+  font-family: var(--font-data);
+  font-size: 0.72rem;
+  opacity: 0.8;
+  text-align: right;
+}
+
+.library-stalled-open {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  align-items: flex-start;
+  width: 100%;
+  padding: 0.35rem 0.45rem;
+  border: 0;
+  border-radius: 8px;
+  background: rgba(127, 127, 127, 0.08);
+  color: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+
+.library-loading,
+.library-empty,
+.library-sentinel {
+  padding: 1.2rem 0.2rem;
+  font-size: 0.82rem;
+  opacity: 0.72;
+}
+
+.library-empty-hint {
+  font-size: 0.76rem;
+  opacity: 0.8;
+}
+
+/* ---- Profile view: sections and collections as a sidebar ----
+   The toolbar answers "how am I looking at this"; the sidebar answers "what am
+   I looking at". Keeping both in one row is what made it unusable. */
+.profile-view-main {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+
+.profile-view-sidebar {
+  width: 178px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 0.5rem 0.4rem;
+  border-right: 1px solid var(--border-subtle, rgba(127, 127, 127, 0.22));
+  overflow-y: auto;
+}
+
+.profile-view-pane {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.profile-view-nav-item {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  width: 100%;
+  padding: 0.3rem 0.45rem;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: inherit;
+  font-size: 0.8rem;
+  text-align: left;
+  cursor: pointer;
+}
+
+.profile-view-nav-item:hover {
+  background: rgba(127, 127, 127, 0.12);
+}
+
+.profile-view-nav-item.is-active {
+  background: rgba(127, 127, 127, 0.18);
+  font-weight: 600;
+}
+
+.profile-view-nav-label {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.profile-view-nav-count {
+  font-family: var(--font-data);
+  font-size: 0.68rem;
+  opacity: 0.65;
+}
+
+.profile-view-nav-section {
+  margin-top: 0.6rem;
+  padding-top: 0.45rem;
+  border-top: 1px solid var(--border-subtle, rgba(127, 127, 127, 0.22));
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.profile-view-nav-heading {
+  padding: 0 0.45rem 0.25rem;
+  font-size: 0.66rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  opacity: 0.55;
+}
+
+.profile-view-nav-new {
+  opacity: 0.75;
+  font-size: 0.76rem;
+}
+
+/* Earlier handles of the same profile (matched by provider user id). */
+.profile-view-previous-handles {
+  margin: 0.1rem 0 0;
+  font-size: 0.72rem;
+  opacity: 0.62;
+}
+
+/* Confirmed gone from the provider: the copy here is the only one left. Amber
+   rather than red — this is the archive doing its job, not an error. */
+.profile-view-archived-badge {
+  position: absolute;
+  top: 0.35rem;
+  left: 0.35rem;
+  z-index: 1;
+  padding: 0.06rem 0.4rem;
+  border-radius: 999px;
+  background: rgba(180, 83, 9, 0.92);
+  color: #fff;
+  font-family: var(--font-mono);
+  font-size: 0.58rem;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  pointer-events: none;
+}
+
 /* YouTube feed: wide 16:9 thumbnail with a title/meta caption underneath. */
 .profile-view-card--youtube .profile-view-thumb {
   aspect-ratio: 16 / 9;

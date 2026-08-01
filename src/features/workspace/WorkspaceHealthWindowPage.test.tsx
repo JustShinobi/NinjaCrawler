@@ -16,12 +16,15 @@ import { WorkspaceHealthWindowPage } from "./WorkspaceHealthWindowPage";
 const bridgeMocks = vi.hoisted(() => ({
   applyMediaDedupe: vi.fn(),
   cancelMediaDedupe: vi.fn(),
+  cancelMediaIndexScan: vi.fn(),
   enqueueMediaDedupeScan: vi.fn(),
   installMediaDedupeSimilarityEngine: vi.fn(),
   installMediaToolRuntime: vi.fn(),
   loadMediaDedupeResultPage: vi.fn(),
   loadMediaDedupeStatus: vi.fn(),
+  loadMediaIndexStatus: vi.fn(),
   loadWorkspaceHealth: vi.fn(),
+  startMediaIndexScan: vi.fn(),
   openAccountsWindow: vi.fn(),
   openProfileViewWindow: vi.fn(),
   openRuntimeLogWindow: vi.fn(),
@@ -140,6 +143,16 @@ describe("WorkspaceHealthWindowPage", () => {
       updatedAt: "",
     });
     bridgeMocks.loadMediaDedupeResultPage.mockResolvedValue(null);
+    bridgeMocks.loadMediaIndexStatus.mockResolvedValue({
+      counts: {
+        totalFiles: 0,
+        totalBytes: 0,
+        pendingFingerprints: 0,
+        failedFingerprints: 0,
+        missingOnDisk: 0,
+        indexedSources: 0,
+      },
+    });
     bridgeMocks.subscribeToDesktopRuntimeEvents.mockResolvedValue(
       () => undefined,
     );
@@ -287,6 +300,88 @@ describe("WorkspaceHealthWindowPage", () => {
       expect(
         bridgeMocks.installMediaDedupeSimilarityEngine,
       ).toHaveBeenCalledTimes(1),
+    );
+  });
+
+  it("surfaces media index counters and starts a library-wide indexing run", async () => {
+    // Counters are rendered with the operator's locale, so the assertions below
+    // stay under the thousands separator instead of pinning a number format.
+    bridgeMocks.loadMediaIndexStatus.mockResolvedValue({
+      counts: {
+        totalFiles: 480,
+        totalBytes: 45_000_000,
+        pendingFingerprints: 320,
+        failedFingerprints: 0,
+        missingOnDisk: 4,
+        indexedSources: 37,
+      },
+      run: {
+        id: "run-1",
+        status: "completed",
+        stage: "done",
+        sourcesTotal: 37,
+        sourcesProcessed: 37,
+        filesIndexed: 480,
+        filesUpdated: 0,
+        filesMissing: 4,
+        hashesInherited: 900,
+        startedAt: "2026-07-30T10:00:00Z",
+        finishedAt: "2026-07-30T10:12:00Z",
+      },
+    });
+    bridgeMocks.startMediaIndexScan.mockResolvedValue({ counts: {} });
+    render(<WorkspaceHealthWindowPage />);
+    fireEvent.click(
+      await screen.findByRole("tab", { name: /storage & cleanup/i }),
+    );
+
+    expect(await screen.findByText("480")).toBeTruthy();
+    expect(screen.getByText("37")).toBeTruthy();
+    expect(screen.getByText("320")).toBeTruthy();
+    expect(screen.getByText(/900 reused from cleanup/i)).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: /index library/i }));
+    await waitFor(() =>
+      expect(bridgeMocks.startMediaIndexScan).toHaveBeenCalledTimes(1),
+    );
+  });
+
+  it("offers to stop an indexing run while it is walking profiles", async () => {
+    bridgeMocks.loadMediaIndexStatus.mockResolvedValue({
+      counts: {
+        totalFiles: 500,
+        totalBytes: 1_000_000,
+        pendingFingerprints: 500,
+        failedFingerprints: 0,
+        missingOnDisk: 0,
+        indexedSources: 3,
+      },
+      run: {
+        id: "run-2",
+        status: "running",
+        stage: "reconcile",
+        sourcesTotal: 37,
+        sourcesProcessed: 12,
+        filesIndexed: 500,
+        filesUpdated: 0,
+        filesMissing: 0,
+        hashesInherited: 0,
+        currentSourceHandle: "@creator",
+        startedAt: "2026-07-31T10:00:00Z",
+      },
+    });
+    bridgeMocks.cancelMediaIndexScan.mockResolvedValue({ counts: {} });
+    render(<WorkspaceHealthWindowPage />);
+    fireEvent.click(
+      await screen.findByRole("tab", { name: /storage & cleanup/i }),
+    );
+
+    expect(await screen.findByText(/indexing @creator/i)).toBeTruthy();
+    expect(screen.getByText(/12\/37 profiles \(32%\)/i)).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: /^stop$/i }));
+    await waitFor(() =>
+      expect(bridgeMocks.cancelMediaIndexScan).toHaveBeenCalledTimes(1),
     );
   });
 

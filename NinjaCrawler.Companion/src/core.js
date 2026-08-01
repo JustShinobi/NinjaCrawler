@@ -744,6 +744,12 @@ export function detectProfileFromUrl(rawUrl) {
   }
 }
 
+export function detectProfileFromContextMenu(info) {
+  const linkUrl = info?.linkUrl
+  const detected = detectProfileFromUrl(linkUrl)
+  return detected ? { ...detected, url: linkUrl } : null
+}
+
 export function normalizeHandle(value) {
   const clean = String(value ?? '').trim().replace(/^\/+|\/+$/g, '')
   if (!clean) return ''

@@ -6,7 +6,14 @@ import type { SourceMediaGallery } from '../../domain/models'
 import { ProfileViewPage } from './ProfileViewPage'
 
 const bridgeMocks = vi.hoisted(() => ({
+  addProfileMediaToCollection: vi.fn(),
+  deleteCollection: vi.fn(),
+  listCollections: vi.fn(),
+  loadCollectionRelativePaths: vi.fn(),
+  promoteCollectionToGlobal: vi.fn(),
+  upsertCollection: vi.fn(),
   loadSourceMediaGallery: vi.fn(),
+  loadSourceHandleHistory: vi.fn(),
   loadMediaThumbnails: vi.fn(),
   deleteSourceMedia: vi.fn(),
   enqueueMediaDedupeScan: vi.fn(),
@@ -39,11 +46,17 @@ vi.mock('@tauri-apps/api/window', () => ({
 // jsdom não faz layout, então a virtualização real (que depende de medir a
 // viewport/linhas) renderizaria zero linhas. Trocamos o virtualizer por um que
 // renderiza todas as linhas — os testes checam ordem/contagem, não o windowing.
+// `measured: false` reproduz o primeiro paint real: antes de medir o container,
+// o virtualizer não reporta linha alguma.
+const virtualizerState = vi.hoisted(() => ({ measured: true }))
+
 vi.mock('@tanstack/react-virtual', () => ({
   useVirtualizer: ({ count }: { count: number }) => ({
     getTotalSize: () => count * 200,
     getVirtualItems: () =>
-      Array.from({ length: count }, (_, index) => ({ index, key: index, start: index * 200 })),
+      virtualizerState.measured
+        ? Array.from({ length: count }, (_, index) => ({ index, key: index, start: index * 200 }))
+        : [],
     measureElement: () => undefined,
     measure: () => undefined,
     isScrolling: false,
@@ -195,7 +208,12 @@ describe('ProfileViewPage', () => {
     for (const mock of Object.values(bridgeMocks)) {
       mock.mockReset()
     }
+    virtualizerState.measured = true
     bridgeMocks.loadSourceMediaGallery.mockResolvedValue(galleryFixture())
+    bridgeMocks.loadSourceHandleHistory.mockResolvedValue([])
+    bridgeMocks.listCollections.mockResolvedValue([])
+    bridgeMocks.loadCollectionRelativePaths.mockResolvedValue([])
+    bridgeMocks.addProfileMediaToCollection.mockResolvedValue(1)
     // ffmpeg "disponível" mas sem thumbs prontos → cards de vídeo viram
     // placeholder (sem <video> no grid), o comportamento padrão do app.
     bridgeMocks.loadMediaThumbnails.mockResolvedValue({ available: true, thumbs: {} })
@@ -253,6 +271,57 @@ describe('ProfileViewPage', () => {
     })
     const { container } = render(<ProfileViewPage initialSourceId="src-1" />)
     await screen.findByRole('heading', { name: /gaaby\.tls/i })
+
+    await waitFor(() => {
+      const imgs = Array.from(
+        container.querySelectorAll('.profile-view-thumb img'),
+      ) as HTMLImageElement[]
+      const photo = imgs.find((img) => img.getAttribute('src')?.includes('b_0'))
+      expect(photo?.getAttribute('src')).toBe('asset://S:/x/.thumbs/b_0.jpeg.jpg')
+    })
+  })
+
+  it('requests thumbnails on the first paint, before the virtualizer measures', async () => {
+    // Acervo que cabe na tela: sem rolagem, o virtualizer nunca remede, e o
+    // grid ficava só com placeholders até o usuário rolar ou redimensionar.
+    virtualizerState.measured = false
+    render(<ProfileViewPage initialSourceId="src-1" />)
+    await screen.findByRole('heading', { name: /gaaby\.tls/i })
+
+    await waitFor(() => {
+      expect(bridgeMocks.loadMediaThumbnails).toHaveBeenCalled()
+    })
+    const requested = bridgeMocks.loadMediaThumbnails.mock.calls.flatMap(
+      (call: unknown[]) => call[0] as string[],
+    )
+    expect(requested.length).toBeGreaterThan(0)
+  })
+
+  it('applies an in-flight thumbnail batch even when the effect re-runs', async () => {
+    // O virtualizer mede o container logo depois do primeiro pedido, e a
+    // re-execução do efeito não pode descartar o lote em voo: ela não repede
+    // (os paths ainda constam como pendentes), então o grid ficaria sem thumb
+    // até o primeiro scroll.
+    let resolveBatch: (batch: { available: boolean; thumbs: Record<string, string> }) => void =
+      () => undefined
+    bridgeMocks.loadMediaThumbnails.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveBatch = resolve
+        }),
+    )
+    virtualizerState.measured = false
+    const { container } = render(<ProfileViewPage initialSourceId="src-1" />)
+    await screen.findByRole('heading', { name: /gaaby\.tls/i })
+    await waitFor(() => {
+      expect(bridgeMocks.loadMediaThumbnails).toHaveBeenCalled()
+    })
+
+    // Virtualizer mediu → o efeito re-executa e limpa o anterior.
+    virtualizerState.measured = true
+    fireEvent.click(screen.getByRole('button', { name: /flat grid/i }))
+
+    resolveBatch({ available: true, thumbs: { 'S:/x/b_0.jpeg': 'S:/x/.thumbs/b_0.jpeg.jpg' } })
 
     await waitFor(() => {
       const imgs = Array.from(
@@ -357,7 +426,98 @@ describe('ProfileViewPage', () => {
     // Filtering to Reels keeps only the reel post.
     fireEvent.click(reelsChip)
     expect(screen.getAllByRole('button', { name: /open preview/i }).length).toBe(1)
-    expect(reelsChip).toHaveProperty('ariaPressed', 'true')
+    // Sidebar destinations use aria-current (navigation), not aria-pressed.
+    expect(reelsChip.getAttribute('aria-current')).toBe('true')
+  })
+
+  it('shows the handles this profile was previously known by', async () => {
+    bridgeMocks.loadSourceHandleHistory.mockResolvedValue([
+      {
+        handle: 'gaaby.tls',
+        providerUserId: 'user-1',
+        firstSeenAt: '2026-01-01T00:00:00Z',
+        lastSeenAt: '2026-05-19T00:00:00Z',
+      },
+      {
+        handle: 'old_handle',
+        providerUserId: 'user-1',
+        firstSeenAt: '2025-01-01T00:00:00Z',
+        lastSeenAt: '2026-01-01T00:00:00Z',
+      },
+    ])
+    render(<ProfileViewPage initialSourceId="src-1" />)
+
+    await screen.findByRole('heading', { name: /gaaby\.tls/i })
+    // Only the earlier handle is listed; the current one is already the title.
+    expect(await screen.findByText(/formerly @old_handle/i)).toBeTruthy()
+  })
+
+  it('badges posts removed from the source and filters down to them', async () => {
+    const gallery = galleryFixture()
+    gallery.posts[0].upstreamMissing = true
+    bridgeMocks.loadSourceMediaGallery.mockResolvedValue(gallery)
+    render(<ProfileViewPage initialSourceId="src-1" />)
+
+    await screen.findByRole('heading', { name: /gaaby\.tls/i })
+    await waitFor(() =>
+      expect(screen.getAllByRole('button', { name: /open preview/i }).length).toBe(2),
+    )
+    expect(screen.getByText(/archived only/i)).toBeTruthy()
+
+    // "Only here" is a sidebar destination now, not a checkbox buried in the
+    // advanced filters popover.
+    fireEvent.click(screen.getByRole('button', { name: /^only here/i }))
+
+    expect(screen.getAllByRole('button', { name: /open preview/i }).length).toBe(1)
+  })
+
+  it('lists posts that also exist elsewhere under duplicates', async () => {
+    const gallery = galleryFixture()
+    gallery.posts[0].hasVariants = true
+    bridgeMocks.loadSourceMediaGallery.mockResolvedValue(gallery)
+    render(<ProfileViewPage initialSourceId="src-1" />)
+
+    await screen.findByRole('heading', { name: /gaaby\.tls/i })
+    await waitFor(() =>
+      expect(screen.getAllByRole('button', { name: /open preview/i }).length).toBe(2),
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: /^duplicates/i }))
+    expect(screen.getAllByRole('button', { name: /open preview/i }).length).toBe(1)
+  })
+
+  it('creates a profile collection from the current selection', async () => {
+    bridgeMocks.upsertCollection.mockResolvedValue({
+      id: 'col-1',
+      kind: 'manual',
+      scope: 'source',
+      scopeRefId: 'src-1',
+      name: 'Best of',
+      pinned: false,
+      itemCount: 0,
+      createdAt: '2026-07-01T00:00:00Z',
+      updatedAt: '2026-07-01T00:00:00Z',
+    })
+    vi.spyOn(window, 'prompt').mockReturnValue('Best of')
+    render(<ProfileViewPage initialSourceId="src-1" />)
+
+    await screen.findByRole('heading', { name: /gaaby\.tls/i })
+    fireEvent.click((await screen.findAllByRole('button', { name: /^select media$/i }))[0])
+    fireEvent.click(screen.getByRole('button', { name: /new collection…/i }))
+
+    await waitFor(() =>
+      expect(bridgeMocks.upsertCollection).toHaveBeenCalledWith(
+        expect.objectContaining({ name: 'Best of', scope: 'source', scopeRefId: 'src-1' }),
+      ),
+    )
+    // The media is handed over as relative paths; index ids stay in the backend.
+    await waitFor(() =>
+      expect(bridgeMocks.addProfileMediaToCollection).toHaveBeenCalledWith(
+        'col-1',
+        'src-1',
+        expect.arrayContaining(['a.mp4']),
+      ),
+    )
   })
 
   it('rebuilds the Instagram post link from the shortcode', async () => {

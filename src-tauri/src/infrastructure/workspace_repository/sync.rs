@@ -671,6 +671,54 @@ pub(super) fn persist_tiktok_user_id_hint(
         .map_err(|error| error.to_string())?;
     Ok(())
 }
+
+/// Guarda o `secUid` resolvido pelo WebView. Ao contrário do `user_id_hint`,
+/// sobrescreve o valor anterior: um `secUid` salvo que parou de listar é
+/// justamente o motivo de termos reaberto o WebView.
+pub(super) fn persist_tiktok_sec_uid_hint(
+    connection: &Connection,
+    source_id: &str,
+    sec_uid: &str,
+    timestamp: &str,
+) -> Result<(), String> {
+    let sec_uid = sec_uid.trim();
+    if sec_uid.is_empty() {
+        return Ok(());
+    }
+    let Some(json) = connection
+        .query_row(
+            "SELECT sync_options_json FROM source_profiles WHERE id = ?1 AND deleted_at IS NULL",
+            params![source_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?
+    else {
+        return Ok(());
+    };
+    let mut options =
+        serde_json::from_str::<SourceSyncOptions>(&json).unwrap_or_else(|_| SourceSyncOptions {
+            tiktok: Some(normalize_tiktok_source_sync_options(None)),
+            ..Default::default()
+        });
+    let tiktok = options
+        .tiktok
+        .get_or_insert_with(|| normalize_tiktok_source_sync_options(None));
+    if tiktok.sec_uid_hint.as_deref().map(str::trim) == Some(sec_uid) {
+        return Ok(());
+    }
+    tiktok.sec_uid_hint = Some(sec_uid.to_string());
+    let serialized = serialize_source_sync_options("tiktok", &options)?;
+    connection
+        .execute(
+            "UPDATE source_profiles SET sync_options_json = ?2, updated_at = ?3
+             WHERE id = ?1 AND deleted_at IS NULL",
+            params![source_id, serialized, timestamp],
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
 pub(super) fn source_sync_cancel_registry() -> &'static Mutex<HashMap<String, Arc<AtomicBool>>> {
     static REGISTRY: OnceLock<Mutex<HashMap<String, Arc<AtomicBool>>>> = OnceLock::new();
     REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
@@ -1825,6 +1873,13 @@ pub(super) fn execute_twitter_source_sync_with_connection(
                 &result.observed_posts,
                 &finished_at,
             )?;
+            evaluate_twitter_upstream_presence(
+                connection,
+                context,
+                &request,
+                &result,
+                &finished_at,
+            );
             upsert_provider_sync_media_ledger_entries(
                 connection,
                 &ProviderSyncMediaScope {
@@ -1865,6 +1920,14 @@ pub(super) fn execute_twitter_source_sync_with_connection(
                     connection,
                     &context.source.id,
                     user_id,
+                    &finished_at,
+                );
+                apply_source_identity_verdict(
+                    connection,
+                    layout,
+                    context,
+                    user_id,
+                    &handle,
                     &finished_at,
                 );
             }
@@ -2794,6 +2857,13 @@ pub(super) fn execute_youtube_source_sync_with_connection(
                 &observed_posts,
                 &finished_at,
             )?;
+            evaluate_youtube_upstream_presence(
+                connection,
+                context,
+                &request,
+                &result,
+                &finished_at,
+            );
             if collect_media_stats {
                 upsert_youtube_post_stats(
                     connection,
@@ -2826,6 +2896,14 @@ pub(super) fn execute_youtube_source_sync_with_connection(
                     connection,
                     &context.source.id,
                     user_id,
+                    &finished_at,
+                );
+                apply_source_identity_verdict(
+                    connection,
+                    layout,
+                    context,
+                    user_id,
+                    &handle,
                     &finished_at,
                 );
             }
@@ -3282,6 +3360,13 @@ pub(super) fn execute_vsco_source_sync_with_connection(
                 &observed_posts,
                 &finished_at,
             )?;
+            evaluate_vsco_upstream_presence(
+                connection,
+                context,
+                &request,
+                &result,
+                &finished_at,
+            );
             upsert_provider_sync_media_ledger_entries(
                 connection,
                 &ProviderSyncMediaScope {
@@ -3299,6 +3384,14 @@ pub(super) fn execute_vsco_source_sync_with_connection(
                     connection,
                     &context.source.id,
                     user_id,
+                    &finished_at,
+                );
+                apply_source_identity_verdict(
+                    connection,
+                    layout,
+                    context,
+                    user_id,
+                    &handle,
                     &finished_at,
                 );
             }
@@ -3427,6 +3520,32 @@ pub(super) fn execute_vsco_source_sync_with_connection(
         None,
     );
     Ok(outcome)
+}
+
+/// Fallback do connector do TikTok: quando o yt-dlp não resolve o `secUid` do
+/// perfil, resolve-o pelo WebView autenticado da conta.
+fn resolve_tiktok_sec_uid_with_session<C>(
+    account_id: &str,
+    handle: &str,
+    is_cancelled: C,
+) -> tiktok_connector::TikTokSecUidOutcome
+where
+    C: Fn() -> bool,
+{
+    let app = match source_sync_runtime::registered_app_handle() {
+        Ok(app) => app,
+        // Sem WebView (headless/CLI) não há como contornar o desafio do WAF.
+        Err(_) => return tiktok_connector::TikTokSecUidOutcome::Unsupported,
+    };
+    match tiktok_timeline_runtime::resolve_sec_uid(&app, account_id, handle, is_cancelled) {
+        Ok(sec_uid) => tiktok_connector::TikTokSecUidOutcome::Resolved(sec_uid),
+        Err(tiktok_timeline_runtime::TikTokSecUidError::ProfileUnavailable(message)) => {
+            tiktok_connector::TikTokSecUidOutcome::ProfileUnavailable(message)
+        }
+        Err(tiktok_timeline_runtime::TikTokSecUidError::Failed(message)) => {
+            tiktok_connector::TikTokSecUidOutcome::Failed(message)
+        }
+    }
 }
 
 pub(super) fn execute_tiktok_source_sync_with_connection(
@@ -3606,6 +3725,10 @@ pub(super) fn execute_tiktok_source_sync_with_connection(
             .user_id_hint
             .clone()
             .filter(|value| !value.trim().is_empty()),
+        sec_uid_hint: options
+            .sec_uid_hint
+            .clone()
+            .filter(|value| !value.trim().is_empty()),
     };
 
     let cancel_token = register_source_sync_cancel_token(&context.source.id);
@@ -3703,6 +3826,13 @@ pub(super) fn execute_tiktok_source_sync_with_connection(
                             .flatten()
                             .is_some()
                     },
+                    |fallback_handle| {
+                        resolve_tiktok_sec_uid_with_session(
+                            &context.account.id,
+                            fallback_handle,
+                            || cancel_token.load(Ordering::SeqCst),
+                        )
+                    },
                 )
             } else {
                 Ok(tiktok_connector::TikTokConnectorResult {
@@ -3717,6 +3847,8 @@ pub(super) fn execute_tiktok_source_sync_with_connection(
                     resolved_handle: None,
                     profile_unavailable: false,
                     profile_private: false,
+                    listing_blocked: None,
+                    resolved_sec_uid: None,
                     manifest_summary: tiktok_connector::TikTokManifestSummary::default(),
                 })
             };
@@ -3851,6 +3983,55 @@ pub(super) fn execute_tiktok_source_sync_with_connection(
                     );
                     return Ok(outcome);
                 }
+            }
+
+            // Listing bloqueado: nem o yt-dlp nem o fallback autenticado
+            // conseguiram enumerar a timeline, e o motivo não permite concluir
+            // nada sobre o perfil. Falha o sync sem marcar a fonte — marcá-la
+            // como indisponível aqui produziria um falso positivo de "conta
+            // banida" para perfis que estão apenas com o embed desligado.
+            if let Some(reason) = result.listing_blocked.as_deref() {
+                log_runtime_event(
+                    layout,
+                    "sync.profile",
+                    "warning",
+                    RuntimeLogAnchor {
+                        account_id: Some(&context.account.id),
+                        provider: Some(&context.source.provider),
+                        source_id: Some(&context.source.id),
+                        source_handle: Some(&context.source.handle),
+                    },
+                    format!("TikTok listing blocked for '@{handle}': {reason}"),
+                    None,
+                );
+                let summary = format!("TikTok listing blocked: {reason}");
+                let outcome = SourceSyncOutcome {
+                    tool: "internal.tiktok".to_string(),
+                    status: "failed".to_string(),
+                    summary: summary.clone(),
+                    command_preview: command_preview.clone(),
+                    manifest_summary_json: None,
+                    degraded_capabilities: Vec::new(),
+                    validation_error: Some(summary),
+                };
+                persist_source_sync_run(
+                    connection,
+                    context,
+                    &outcome,
+                    trigger,
+                    &started_at,
+                    &finished_at,
+                )?;
+                propagate_source_sync_account_health(connection, context, &outcome, &finished_at)?;
+                source_sync_runtime::report_source_sync_progress(
+                    &context.source.id,
+                    Some(100),
+                    Some("Listing blocked".to_string()),
+                    Some(outcome.summary.clone()),
+                    false,
+                    None,
+                );
+                return Ok(outcome);
             }
 
             // Perfil indisponível: o yt-dlp não resolveu o dono do perfil e não
@@ -4024,6 +4205,13 @@ pub(super) fn execute_tiktok_source_sync_with_connection(
                 &observed_posts,
                 &finished_at,
             )?;
+            evaluate_tiktok_upstream_presence(
+                connection,
+                context,
+                &request,
+                &result,
+                &finished_at,
+            );
             if collect_media_stats {
                 upsert_tiktok_post_stats(
                     connection,
@@ -4083,11 +4271,30 @@ pub(super) fn execute_tiktok_source_sync_with_connection(
                 _ => {}
             }
 
+            // Guardado assim que resolvido: o próximo sync lista direto por
+            // `tiktokuser:<secUid>`, sem reabrir o WebView.
+            if let Some(sec_uid) = result.resolved_sec_uid.as_deref() {
+                let _ = persist_tiktok_sec_uid_hint(
+                    connection,
+                    &context.source.id,
+                    sec_uid,
+                    &finished_at,
+                );
+            }
+
             if let Some(user_id) = result.resolved_user_id.as_deref() {
                 let _ = persist_tiktok_user_id_hint(
                     connection,
                     &context.source.id,
                     user_id,
+                    &finished_at,
+                );
+                apply_source_identity_verdict(
+                    connection,
+                    layout,
+                    context,
+                    user_id,
+                    &handle,
                     &finished_at,
                 );
             }
@@ -4165,7 +4372,19 @@ pub(super) fn execute_tiktok_source_sync_with_connection(
                     likes.stopped_incrementally,
                 ),
             );
-            let mut summary = format_download_success_summary("TikTok sync succeeded.", downloaded);
+            // "warning" = sync parcial útil (paridade com o Twitter): a mídia
+            // que veio foi persistida, mas algo ficou para trás. Reportar
+            // "succeeded" aqui esconderia posts que o extractor não entregou.
+            let completed_with_warnings =
+                result.limit_aborted || !result.section_errors.is_empty();
+            let mut summary = format_download_success_summary(
+                if completed_with_warnings {
+                    "TikTok sync completed with warnings."
+                } else {
+                    "TikTok sync succeeded."
+                },
+                downloaded,
+            );
             summary.push_str(&format_already_up_to_date_suffix(
                 result.manifest_summary.skipped_existing_post_count,
             ));
@@ -4188,7 +4407,11 @@ pub(super) fn execute_tiktok_source_sync_with_connection(
 
             SourceSyncOutcome {
                 tool: "internal.tiktok".to_string(),
-                status: "succeeded".to_string(),
+                status: if completed_with_warnings {
+                    "warning".to_string()
+                } else {
+                    "succeeded".to_string()
+                },
                 summary,
                 command_preview,
                 manifest_summary_json: None,
@@ -4230,9 +4453,10 @@ pub(super) fn execute_tiktok_source_sync_with_connection(
         &finished_at,
     )?;
     propagate_source_sync_account_health(connection, context, &outcome, &finished_at)?;
-    // Sync bem-sucedido limpa qualquer marcador anterior (ex.: perfil que voltou
-    // a ficar disponível deixa de exibir o badge "Profile unavailable").
-    if outcome.status == "succeeded" {
+    // Sync produtivo limpa qualquer marcador anterior (ex.: perfil que voltou a
+    // ficar disponível deixa de exibir o badge "Profile unavailable"). Um sync
+    // com avisos também baixou mídia, então também limpa.
+    if source_sync_status_is_productive(&outcome.status) {
         if let Err(error) = clear_source_sync_problem(connection, &context.source.id, &finished_at)
         {
             log_runtime_event(
@@ -4255,7 +4479,7 @@ pub(super) fn execute_tiktok_source_sync_with_connection(
     source_sync_runtime::report_source_sync_progress(
         &context.source.id,
         Some(100),
-        Some(if outcome.status == "succeeded" {
+        Some(if source_sync_status_is_productive(&outcome.status) {
             "Download complete".to_string()
         } else if outcome.status == "skipped" {
             "Download skipped".to_string()
@@ -4656,6 +4880,14 @@ pub(super) fn resolve_instagram_source_identity_preflight(
                 Some(summary),
             ));
         }
+        apply_source_identity_verdict(
+            connection,
+            layout,
+            context,
+            resolved_user_id,
+            &resolved_handle,
+            timestamp,
+        );
         if let Some(outcome) = detect_duplicate_user_id_on_first_sync(
             connection,
             layout,
@@ -5601,6 +5833,13 @@ pub(super) fn execute_instagram_source_sync_with_connection(
                 &result.observed_posts,
                 &finished_at,
             )?;
+            evaluate_instagram_upstream_presence(
+                connection,
+                context,
+                &request,
+                &result,
+                &finished_at,
+            );
             let mut script_suffix = String::new();
             if let Some(script_pattern) = instagram_profile_script_pattern(&source_options) {
                 if ingested_media_count > 0 {
@@ -6190,7 +6429,7 @@ pub(super) fn load_source_sync_context(
 ) -> Result<SourceSyncContext, String> {
     let source = connection
         .query_row(
-            "SELECT id, provider, source_kind, handle, display_name, account_id, labels_json, ready_for_download, sync_options_json, profile_image_path, profile_image_custom, remote_state, is_subscription, last_synced_at, sync_problem_code, sync_problem_message, sync_problem_at, created_at, group_id, importer_id, imported_at
+            "SELECT id, provider, source_kind, handle, display_name, account_id, labels_json, ready_for_download, sync_options_json, profile_image_path, profile_image_custom, remote_state, is_subscription, last_synced_at, sync_problem_code, sync_problem_message, sync_problem_at, created_at, group_id, importer_id, imported_at, provider_user_id, identity_id
              FROM source_profiles
              WHERE id = ?1
                AND deleted_at IS NULL
@@ -6223,6 +6462,8 @@ pub(super) fn load_source_sync_context(
                     created_at: row.get(17).ok(),
                     importer_id: row.get(19).ok(),
                     imported_at: row.get(20).ok(),
+                    provider_user_id: row.get(21).ok().flatten(),
+                    identity_id: row.get(22).ok().flatten(),
                 })
             },
         )
@@ -6534,6 +6775,10 @@ pub(super) fn ensure_instagram_sync_post_ledger_table(
                 media_section TEXT NOT NULL,
                 first_seen_at TEXT NOT NULL,
                 last_seen_at TEXT NOT NULL,
+                upstream_state TEXT NOT NULL DEFAULT 'present',
+                missing_confirmations INTEGER NOT NULL DEFAULT 0,
+                missing_since TEXT,
+                last_full_scan_at TEXT,
                 PRIMARY KEY (source_id, provider_post_key),
                 FOREIGN KEY (source_id) REFERENCES source_profiles(id) ON DELETE CASCADE,
                 FOREIGN KEY (account_id) REFERENCES provider_accounts(id) ON DELETE CASCADE
