@@ -425,6 +425,8 @@ pub fn load_source_media_gallery(source_id: String) -> Result<SourceMediaGallery
             created_at: None,
             importer_id: None,
             imported_at: None,
+            provider_user_id: None,
+            identity_id: None,
         };
         let profile_root =
             resolved_source_media_output_root_with_connection(connection, layout, &source_profile)?;
@@ -437,6 +439,25 @@ pub fn load_source_media_gallery(source_id: String) -> Result<SourceMediaGallery
         // Autor real dos likes do TikTok (basename → @autor). Vazio nos demais.
         let like_authors = load_tiktok_like_authors(connection, &provider);
         let post_stats = load_gallery_post_stats(connection, &provider, &source_id);
+        let upstream_missing_keys =
+            load_upstream_missing_post_keys(connection, &provider, &source_id)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|key| key.trim().to_ascii_lowercase())
+                .collect::<HashSet<_>>();
+        // Relative paths of media that belongs to a variant group, so the
+        // gallery can mark a post as having a duplicate elsewhere.
+        let variant_paths = connection
+            .prepare(
+                "SELECT relative_path FROM media_index
+                 WHERE source_id = ?1 AND variant_group_id IS NOT NULL",
+            )
+            .and_then(|mut statement| {
+                statement
+                    .query_map(params![source_id], |row| row.get::<_, String>(0))
+                    .and_then(|rows| rows.collect::<rusqlite::Result<HashSet<String>>>())
+            })
+            .unwrap_or_default();
         // Twitter has no status id in the file name and older media ledger rows
         // predate the post-key column, so pair files with their tweet id via the
         // legacy SCrawler XML (keyed by media key). Empty for other providers.
@@ -698,6 +719,19 @@ pub fn load_source_media_gallery(source_id: String) -> Result<SourceMediaGallery
                     .and_then(|post_id| post_stats.get(post_id))
                     .cloned()
                     .unwrap_or_default();
+                // The Instagram ledger stores normalized (lowercased) keys and
+                // the gallery may hold either the key or the shortcode, so both
+                // are matched case-insensitively.
+                let upstream_missing = [
+                    acc.ledger_post_key.as_deref(),
+                    acc.ledger_post_code.as_deref(),
+                ]
+                .into_iter()
+                .flatten()
+                .any(|key| upstream_missing_keys.contains(&key.trim().to_ascii_lowercase()));
+                let has_variants = files
+                    .iter()
+                    .any(|file| variant_paths.contains(&file.relative_path));
                 // Seção e data preferem o ledger; caem para o derivado do nome.
                 let section = acc
                     .ledger_section
@@ -746,6 +780,8 @@ pub fn load_source_media_gallery(source_id: String) -> Result<SourceMediaGallery
                     comment_count: stats.comment_count,
                     share_count: stats.share_count,
                     stats_updated_at: stats.updated_at,
+                    upstream_missing,
+                    has_variants,
                     files,
                     audio_relative_path,
                     audio_absolute_path,
@@ -893,6 +929,8 @@ pub fn delete_source_media(
             created_at: None,
             importer_id: None,
             imported_at: None,
+            provider_user_id: None,
+            identity_id: None,
         };
         let profile_root =
             resolved_source_media_output_root_with_connection(connection, layout, &source_profile)?;

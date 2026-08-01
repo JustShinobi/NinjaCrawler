@@ -1340,7 +1340,10 @@ fn file_sha256(path: &Path) -> Result<String, String> {
     Ok(format!("{:x}", hasher.finalize()))
 }
 
-fn image_hashes(image: &image::DynamicImage) -> (String, String) {
+/// Shared with the media index fingerprint backlog on purpose: hashes computed
+/// by two different implementations would never match, and the index inherits
+/// hashes from this very catalog.
+pub(crate) fn image_hashes(image: &image::DynamicImage) -> (String, String) {
     let average_image = image
         .resize_exact(8, 8, FilterType::Triangle)
         .grayscale()

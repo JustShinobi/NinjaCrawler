@@ -1825,6 +1825,13 @@ pub(super) fn execute_twitter_source_sync_with_connection(
                 &result.observed_posts,
                 &finished_at,
             )?;
+            evaluate_twitter_upstream_presence(
+                connection,
+                context,
+                &request,
+                &result,
+                &finished_at,
+            );
             upsert_provider_sync_media_ledger_entries(
                 connection,
                 &ProviderSyncMediaScope {
@@ -1865,6 +1872,14 @@ pub(super) fn execute_twitter_source_sync_with_connection(
                     connection,
                     &context.source.id,
                     user_id,
+                    &finished_at,
+                );
+                apply_source_identity_verdict(
+                    connection,
+                    layout,
+                    context,
+                    user_id,
+                    &handle,
                     &finished_at,
                 );
             }
@@ -2794,6 +2809,13 @@ pub(super) fn execute_youtube_source_sync_with_connection(
                 &observed_posts,
                 &finished_at,
             )?;
+            evaluate_youtube_upstream_presence(
+                connection,
+                context,
+                &request,
+                &result,
+                &finished_at,
+            );
             if collect_media_stats {
                 upsert_youtube_post_stats(
                     connection,
@@ -2826,6 +2848,14 @@ pub(super) fn execute_youtube_source_sync_with_connection(
                     connection,
                     &context.source.id,
                     user_id,
+                    &finished_at,
+                );
+                apply_source_identity_verdict(
+                    connection,
+                    layout,
+                    context,
+                    user_id,
+                    &handle,
                     &finished_at,
                 );
             }
@@ -3282,6 +3312,13 @@ pub(super) fn execute_vsco_source_sync_with_connection(
                 &observed_posts,
                 &finished_at,
             )?;
+            evaluate_vsco_upstream_presence(
+                connection,
+                context,
+                &request,
+                &result,
+                &finished_at,
+            );
             upsert_provider_sync_media_ledger_entries(
                 connection,
                 &ProviderSyncMediaScope {
@@ -3299,6 +3336,14 @@ pub(super) fn execute_vsco_source_sync_with_connection(
                     connection,
                     &context.source.id,
                     user_id,
+                    &finished_at,
+                );
+                apply_source_identity_verdict(
+                    connection,
+                    layout,
+                    context,
+                    user_id,
+                    &handle,
                     &finished_at,
                 );
             }
@@ -4024,6 +4069,13 @@ pub(super) fn execute_tiktok_source_sync_with_connection(
                 &observed_posts,
                 &finished_at,
             )?;
+            evaluate_tiktok_upstream_presence(
+                connection,
+                context,
+                &request,
+                &result,
+                &finished_at,
+            );
             if collect_media_stats {
                 upsert_tiktok_post_stats(
                     connection,
@@ -4088,6 +4140,14 @@ pub(super) fn execute_tiktok_source_sync_with_connection(
                     connection,
                     &context.source.id,
                     user_id,
+                    &finished_at,
+                );
+                apply_source_identity_verdict(
+                    connection,
+                    layout,
+                    context,
+                    user_id,
+                    &handle,
                     &finished_at,
                 );
             }
@@ -4656,6 +4716,14 @@ pub(super) fn resolve_instagram_source_identity_preflight(
                 Some(summary),
             ));
         }
+        apply_source_identity_verdict(
+            connection,
+            layout,
+            context,
+            resolved_user_id,
+            &resolved_handle,
+            timestamp,
+        );
         if let Some(outcome) = detect_duplicate_user_id_on_first_sync(
             connection,
             layout,
@@ -5601,6 +5669,13 @@ pub(super) fn execute_instagram_source_sync_with_connection(
                 &result.observed_posts,
                 &finished_at,
             )?;
+            evaluate_instagram_upstream_presence(
+                connection,
+                context,
+                &request,
+                &result,
+                &finished_at,
+            );
             let mut script_suffix = String::new();
             if let Some(script_pattern) = instagram_profile_script_pattern(&source_options) {
                 if ingested_media_count > 0 {
@@ -6190,7 +6265,7 @@ pub(super) fn load_source_sync_context(
 ) -> Result<SourceSyncContext, String> {
     let source = connection
         .query_row(
-            "SELECT id, provider, source_kind, handle, display_name, account_id, labels_json, ready_for_download, sync_options_json, profile_image_path, profile_image_custom, remote_state, is_subscription, last_synced_at, sync_problem_code, sync_problem_message, sync_problem_at, created_at, group_id, importer_id, imported_at
+            "SELECT id, provider, source_kind, handle, display_name, account_id, labels_json, ready_for_download, sync_options_json, profile_image_path, profile_image_custom, remote_state, is_subscription, last_synced_at, sync_problem_code, sync_problem_message, sync_problem_at, created_at, group_id, importer_id, imported_at, provider_user_id, identity_id
              FROM source_profiles
              WHERE id = ?1
                AND deleted_at IS NULL
@@ -6223,6 +6298,8 @@ pub(super) fn load_source_sync_context(
                     created_at: row.get(17).ok(),
                     importer_id: row.get(19).ok(),
                     imported_at: row.get(20).ok(),
+                    provider_user_id: row.get(21).ok().flatten(),
+                    identity_id: row.get(22).ok().flatten(),
                 })
             },
         )
@@ -6534,6 +6611,10 @@ pub(super) fn ensure_instagram_sync_post_ledger_table(
                 media_section TEXT NOT NULL,
                 first_seen_at TEXT NOT NULL,
                 last_seen_at TEXT NOT NULL,
+                upstream_state TEXT NOT NULL DEFAULT 'present',
+                missing_confirmations INTEGER NOT NULL DEFAULT 0,
+                missing_since TEXT,
+                last_full_scan_at TEXT,
                 PRIMARY KEY (source_id, provider_post_key),
                 FOREIGN KEY (source_id) REFERENCES source_profiles(id) ON DELETE CASCADE,
                 FOREIGN KEY (account_id) REFERENCES provider_accounts(id) ON DELETE CASCADE

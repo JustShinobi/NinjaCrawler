@@ -23,12 +23,19 @@ use crate::domain::models::{
     AccountSyncRun, AppSetting, AppSettingUpsert, AvatarThumbnail, AvatarThumbnailBatch,
     BatchSourceProfilePatch, CloneSyncPlanInput, CompanionAccountCandidate,
     CompanionAccountCapture, CompanionAccountImportInput, CompanionAccountImportResult,
-    CompanionAccountPreview, DesktopRuntimeState, ImportMethodDescriptor, ImportPreview,
+    Collection, CollectionUpsert, CompanionAccountPreview, DesktopRuntimeState,
+    ImportMethodDescriptor, ImportPreview,
     ImportPreviewOptions, ImportPreviewProfile, ImportPreviewSummary, ImportProblem,
-    ImportProviderDescriptor, ImportRootDescriptor, ImportRunProfileResult, ImportRunRequest,
+    Identity, IdentityLinkSuggestion, ImportProviderDescriptor, ImportRootDescriptor,
+    ImportRunProfileResult, ImportRunRequest,
     ImportRunResult, InstagramNamingLedgerBackfillResult, InstagramSourceSyncOptions,
-    MediaGalleryFile, MediaGalleryPost, MediaThumbnailBatch, MoveSyncPlanInput, ProviderAccount,
-    ProviderAccountCookie, ProviderAccountCookieImport, ProviderAccountEditor,
+    LibraryDashboard, LibraryGrowthPoint, LibraryProfileUsage, LibraryProviderBreakdown,
+    LibraryStalledProfile,
+    MediaGalleryFile, MediaGalleryPost, MediaIndexCounts, MediaIndexRun, MediaIndexStatus,
+    MediaThumbnailBatch, MediaTimelineCursor, MediaTimelineFilter, MediaTimelineItem,
+    MediaTimelinePage, MediaTimelineRequest, MediaVariantGroup, MediaVariantMember,
+    MoveSyncPlanInput,
+    ProviderAccount, ProviderAccountCookie, ProviderAccountCookieImport, ProviderAccountEditor,
     ProviderAccountImportState, ProviderAccountSession, ProviderAccountSettingValue,
     ProviderAccountSettingValueKind, ProviderAccountUpsert, RunSyncPlanNowInput, RuntimeLogContext,
     QueueGroupReference, QueueReferenceData, QueueSourceReference, RuntimeLogEntry, RuntimeLogQuery,
@@ -36,7 +43,8 @@ use crate::domain::models::{
     SchedulerPlanNotifications, SchedulerSet, SchedulerSetUpsert, SetSyncPlanPauseInput,
     SingleVideo, SingleVideoFile, SingleVideosRootStatus, SkipSyncPlanInput,
     SourceAvailabilityCheckItem,
-    SourceAvailabilityCheckResult, SourceMediaGallery, SourceProfile, SourceProfileDeleteMode,
+    SourceAvailabilityCheckResult, SourceHandleHistoryEntry, SourceMediaGallery, SourceProfile,
+    SourceProfileDeleteMode,
     SourceProfileUpsert, SourceSyncOptions, SourceSyncRun, SyncPlan, SyncPlanRun,
     SyncPlanTargetPreview, SyncPlanTargetPreviewInput, SyncPlanTargetPreviewSource, SyncPlanUpsert,
     TikTokSourceSyncOptions, TwitterSourceSyncOptions, VscoSourceSyncOptions, WorkspaceSnapshot,
@@ -56,32 +64,46 @@ use crate::providers;
 // o glob re-export abaixo, então as chamadas internas não mudam.
 mod accounts;
 mod avatar;
+mod collections;
 mod gallery;
 mod health;
 mod import;
+mod library_dashboard;
 mod media;
 mod media_dedupe;
+mod media_index;
+mod media_timeline;
+mod media_variants;
 mod options;
 mod paths;
 mod scheduler;
 mod settings;
 mod single_videos;
+mod source_identity;
 mod sources;
 mod sync;
+mod upstream_presence;
 pub use accounts::*;
 pub use avatar::*;
+pub(crate) use collections::*;
 pub use gallery::*;
 pub use health::*;
 pub use import::*;
+pub(crate) use library_dashboard::*;
 pub use media::*;
 pub(crate) use media_dedupe::*;
+pub(crate) use media_index::*;
+pub(crate) use media_timeline::*;
+pub(crate) use media_variants::*;
 pub(crate) use options::*;
 use paths::*;
 pub use scheduler::*;
 pub use settings::*;
 pub use single_videos::*;
+pub(crate) use source_identity::*;
 pub use sources::*;
 pub use sync::*;
+pub(crate) use upstream_presence::*;
 
 pub const DESKTOP_CLOSE_TO_TRAY_SETTING_KEY: &str = "policy.desktop.close_to_tray";
 pub const DESKTOP_SILENT_MODE_SETTING_KEY: &str = "policy.desktop.silent_mode";
@@ -1173,38 +1195,15 @@ fn instagram_error_is_inconclusive_identity_probe(error: &str) -> bool {
 /// `user_id`, ignorando `self_id`. Usado para detectar que um perfil recém-
 /// adicionado, ao resolver sua identidade no primeiro sync, é na verdade um
 /// usuário já cadastrado (handle antigo vs novo). Retorna (id, handle).
+/// Kept as the workspace-wide entry point; the lookup itself now goes through
+/// the indexed `provider_user_id` column, with the legacy JSON hint as fallback.
 fn find_source_with_same_user_id(
     connection: &Connection,
     provider: &str,
     user_id: &str,
     self_id: &str,
 ) -> Result<Option<(String, String)>, String> {
-    let user_id = user_id.trim();
-    if user_id.is_empty() {
-        return Ok(None);
-    }
-    let mut statement = connection
-        .prepare(
-            "SELECT id, handle, sync_options_json FROM source_profiles
-             WHERE provider = ?1 AND deleted_at IS NULL AND id != ?2",
-        )
-        .map_err(|error| error.to_string())?;
-    let rows = statement
-        .query_map(params![provider, self_id], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-            ))
-        })
-        .map_err(|error| error.to_string())?;
-    for row in rows {
-        let (id, handle, json) = row.map_err(|error| error.to_string())?;
-        if source_user_id_hint_from_json(provider, &json).as_deref() == Some(user_id) {
-            return Ok(Some((id, handle)));
-        }
-    }
-    Ok(None)
+    find_source_by_provider_user_id(connection, provider, user_id, self_id)
 }
 
 fn build_instagram_identity_probe_request(
@@ -1852,6 +1851,27 @@ fn parse_date_input(value: &str) -> Option<NaiveDate> {
 
 #[cfg(test)]
 mod companion_account_import_tests;
+
+#[cfg(test)]
+mod media_index_tests;
+
+#[cfg(test)]
+mod collections_tests;
+
+#[cfg(test)]
+mod media_timeline_tests;
+
+#[cfg(test)]
+mod library_dashboard_tests;
+
+#[cfg(test)]
+mod media_variants_tests;
+
+#[cfg(test)]
+mod source_identity_tests;
+
+#[cfg(test)]
+mod upstream_presence_tests;
 
 fn load_desktop_runtime_state(connection: &Connection) -> Result<DesktopRuntimeState, String> {
     let settings = load_app_settings_map(connection)?;

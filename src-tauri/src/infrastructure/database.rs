@@ -195,10 +195,29 @@ const MIGRATIONS: &[(i64, &str)] = &[
         50,
         include_str!("../../migrations/0050_instagram_media_title_captured_at.sql"),
     ),
+    (51, include_str!("../../migrations/0051_media_index.sql")),
+    (
+        52,
+        include_str!("../../migrations/0052_upstream_presence.sql"),
+    ),
+    (
+        53,
+        include_str!("../../migrations/0053_source_identity.sql"),
+    ),
+    (54, include_str!("../../migrations/0054_collections.sql")),
+    (
+        55,
+        include_str!("../../migrations/0055_media_variants.sql"),
+    ),
 ];
+
+const COLLECTIONS_SCHEMA: &str = include_str!("../../migrations/0054_collections.sql");
+const MEDIA_VARIANTS_SCHEMA: &str = include_str!("../../migrations/0055_media_variants.sql");
 
 const PROVIDER_SYNC_RESUME_SCHEMA: &str =
     include_str!("../../migrations/0039_provider_sync_resume_schema_repair.sql");
+
+const MEDIA_INDEX_SCHEMA: &str = include_str!("../../migrations/0051_media_index.sql");
 
 fn table_columns(connection: &Connection, table: &str) -> rusqlite::Result<HashSet<String>> {
     let mut statement = connection.prepare(&format!("PRAGMA table_info({table})"))?;
@@ -358,11 +377,129 @@ fn ensure_instagram_media_metadata_schema(connection: &Connection) -> rusqlite::
     Ok(())
 }
 
+/// Every statement in the media index migration is `IF NOT EXISTS`, so replaying
+/// the whole batch is the repair: a database whose ledger claims migration 51 ran
+/// (because a parallel branch used the same version number) still ends up with
+/// the tables and indexes it needs.
+fn ensure_media_index_schema(connection: &Connection) -> rusqlite::Result<()> {
+    connection.execute_batch(MEDIA_INDEX_SCHEMA)?;
+    // Columns added after the first databases were created.
+    for (column, declaration) in [
+        ("fingerprints_total", "INTEGER NOT NULL DEFAULT 0"),
+        ("fingerprints_done", "INTEGER NOT NULL DEFAULT 0"),
+        ("fingerprint_started_at", "TEXT"),
+        ("resource_profile", "TEXT NOT NULL DEFAULT 'balanced'"),
+    ] {
+        add_column_if_missing(connection, "media_index_runs", column, declaration)?;
+    }
+    Ok(())
+}
+
+/// `instagram_sync_post_ledger` is created lazily by the sync runtime, so its
+/// copy of the upstream columns can only be added once the table exists.
+/// `add_column_if_missing` no-ops on a missing table and the runtime
+/// `CREATE TABLE` declares the columns for fresh databases.
+fn ensure_upstream_presence_schema(connection: &Connection) -> rusqlite::Result<()> {
+    for table in ["provider_sync_post_ledger", "instagram_sync_post_ledger"] {
+        add_column_if_missing(
+            connection,
+            table,
+            "upstream_state",
+            "TEXT NOT NULL DEFAULT 'present'",
+        )?;
+        add_column_if_missing(
+            connection,
+            table,
+            "missing_confirmations",
+            "INTEGER NOT NULL DEFAULT 0",
+        )?;
+        add_column_if_missing(connection, table, "missing_since", "TEXT")?;
+        add_column_if_missing(connection, table, "last_full_scan_at", "TEXT")?;
+    }
+    if table_columns(connection, "provider_sync_post_ledger")?.contains("upstream_state") {
+        connection.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_provider_sync_post_ledger_upstream
+             ON provider_sync_post_ledger(provider, source_id, upstream_state);",
+        )?;
+    }
+    connection.execute_batch(
+        "CREATE TABLE IF NOT EXISTS source_full_scan_runs (
+            id TEXT PRIMARY KEY,
+            source_id TEXT NOT NULL REFERENCES source_profiles(id) ON DELETE CASCADE,
+            provider TEXT NOT NULL,
+            sections TEXT NOT NULL DEFAULT '',
+            posts_seen INTEGER NOT NULL DEFAULT 0,
+            posts_flagged INTEGER NOT NULL DEFAULT 0,
+            posts_recovered INTEGER NOT NULL DEFAULT 0,
+            evaluated_at TEXT NOT NULL
+         );
+         CREATE INDEX IF NOT EXISTS idx_source_full_scan_runs_source
+            ON source_full_scan_runs(source_id, evaluated_at DESC);",
+    )
+}
+
+fn ensure_source_identity_schema(connection: &Connection) -> rusqlite::Result<()> {
+    connection.execute_batch(
+        "CREATE TABLE IF NOT EXISTS identities (
+            id TEXT PRIMARY KEY,
+            display_name TEXT NOT NULL,
+            notes TEXT,
+            avatar_source_id TEXT REFERENCES source_profiles(id) ON DELETE SET NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+         );
+         CREATE TABLE IF NOT EXISTS source_handle_history (
+            source_id TEXT NOT NULL REFERENCES source_profiles(id) ON DELETE CASCADE,
+            handle TEXT NOT NULL,
+            provider_user_id TEXT,
+            first_seen_at TEXT NOT NULL,
+            last_seen_at TEXT NOT NULL,
+            PRIMARY KEY (source_id, handle)
+         );
+         CREATE INDEX IF NOT EXISTS idx_source_handle_history_source
+            ON source_handle_history(source_id, last_seen_at DESC);",
+    )?;
+    add_column_if_missing(connection, "source_profiles", "provider_user_id", "TEXT")?;
+    add_column_if_missing(
+        connection,
+        "source_profiles",
+        "identity_id",
+        "TEXT REFERENCES identities(id) ON DELETE SET NULL",
+    )?;
+    let columns = table_columns(connection, "source_profiles")?;
+    // Development databases (and the migration tests) can hold a stub
+    // `source_profiles` with only an id, so every indexed column is checked
+    // before the index is declared.
+    if columns.contains("provider_user_id") && columns.contains("provider") {
+        connection.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_source_profiles_provider_user
+             ON source_profiles(provider, provider_user_id);",
+        )?;
+    }
+    if columns.contains("identity_id") {
+        connection.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_source_profiles_identity
+             ON source_profiles(identity_id);",
+        )?;
+    }
+    Ok(())
+}
+
+/// Every statement is `IF NOT EXISTS`, so replaying the batch is the repair.
+fn ensure_collections_schema(connection: &Connection) -> rusqlite::Result<()> {
+    connection.execute_batch(COLLECTIONS_SCHEMA)
+}
+
 fn reconcile_colliding_development_migrations(connection: &Connection) -> rusqlite::Result<()> {
     ensure_source_profile_stats_schema(connection)?;
     ensure_media_dedupe_performance_schema(connection)?;
     ensure_media_dedupe_source_scope_schema(connection)?;
-    ensure_instagram_media_metadata_schema(connection)
+    ensure_instagram_media_metadata_schema(connection)?;
+    ensure_media_index_schema(connection)?;
+    ensure_upstream_presence_schema(connection)?;
+    ensure_source_identity_schema(connection)?;
+    ensure_collections_schema(connection)?;
+    connection.execute_batch(MEDIA_VARIANTS_SCHEMA)
 }
 
 fn apply_migration(
@@ -381,6 +518,12 @@ fn apply_migration(
     }
     if version == 50 {
         return ensure_instagram_media_metadata_schema(transaction);
+    }
+    if version == 52 {
+        return ensure_upstream_presence_schema(transaction);
+    }
+    if version == 53 {
+        return ensure_source_identity_schema(transaction);
     }
     transaction.execute_batch(sql)
 }

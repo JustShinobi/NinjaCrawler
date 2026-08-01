@@ -1,23 +1,29 @@
 use crate::domain::models::MigrationStatus;
 use crate::domain::models::{
     AccountsWindowIntent, AppBuildInfo, AppSettingUpsert, AppUpdateStatus, BatchSourceProfilePatch,
-    CheckSourceAvailabilityInput, CloneSyncPlanInput, ConnectorDebugEntry, ConnectorDebugQuery,
-    DesktopRuntimeState, ImportMethodDescriptor, ImportPreview, ImportPreviewOptions,
+    CheckSourceAvailabilityInput, CloneSyncPlanInput, Collection, CollectionUpsert,
+    ConnectorDebugEntry, ConnectorDebugQuery,
+    DesktopRuntimeState, Identity, IdentityLinkSuggestion, ImportMethodDescriptor, ImportPreview,
+    ImportPreviewOptions,
     ImportProviderDescriptor, ImportQueueStatus, ImportRootDescriptor, ImportRunRequest,
-    ImportRunResult, MediaDedupeApplyInput, MediaDedupeJobStatus, MediaDedupeResultPage,
-    MediaDedupeScanInput, MediaDedupeSummaryStatus, MoveSyncPlanInput,
+    ImportRunResult, LibraryDashboard, MediaDedupeApplyInput, MediaDedupeJobStatus,
+    MediaDedupeResultPage,
+    MediaDedupeScanInput, MediaDedupeSummaryStatus, MediaIndexStatus, MediaTimelineCursor,
+    MediaTimelinePage, MediaTimelineRequest, MediaVariantGroup, MoveSyncPlanInput,
     PlanEditorWindowIntent, ProviderAccountCookie, ProviderAccountCookieImport, QueueReferenceData,
     ProviderAccountEditor, ProviderAccountSettingValue, ProviderAccountUpsert, RunSourceSyncInput,
     RunSyncPlanNowInput, RuntimeLogContext, RuntimeLogEntry, RuntimeLogQuery,
     RuntimeLogWindowIntent, RuntimeLogWindowStatus, SchedulerGroupUpsert, SchedulerSetUpsert,
     SetSyncPlanPauseInput, SkipSyncPlanInput, SourceAvailabilityCheckResult,
-    SourceDeleteQueueStatus, SourceEditorWindowIntent, SourceProfileDeleteInput,
+    SourceDeleteQueueStatus, SourceEditorWindowIntent, SourceHandleHistoryEntry,
+    SourceProfileDeleteInput,
     SourceProfileUpsert, SourceSyncQueueStatus, SyncPlanTargetPreview, SyncPlanTargetPreviewInput,
     SyncPlanUpsert, WorkspaceHealthSnapshot, WorkspaceHealthWindowIntent, WorkspaceSnapshot,
 };
 use crate::infrastructure::{
     app_update, companion_install, connector_debug, connector_runtime, database, desktop_runtime,
-    import_runtime, media_dedupe_runtime, media_path_migration_runtime, media_thumbnail_runtime,
+    import_runtime, media_dedupe_runtime, media_index_runtime, media_path_migration_runtime,
+    media_thumbnail_runtime,
     single_video_runtime, source_delete_runtime, source_sync_runtime, storage, workspace_backup,
     workspace_repository,
 };
@@ -241,6 +247,233 @@ pub fn enqueue_media_dedupe_scan(
 #[tauri::command]
 pub fn cancel_media_dedupe(app: tauri::AppHandle) -> Result<MediaDedupeSummaryStatus, String> {
     media_dedupe_runtime::cancel(&app)
+}
+
+#[tauri::command]
+pub async fn load_library_dashboard() -> Result<LibraryDashboard, String> {
+    tauri::async_runtime::spawn_blocking(workspace_repository::load_library_dashboard)
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+pub async fn load_variant_groups(limit: Option<u32>) -> Result<Vec<MediaVariantGroup>, String> {
+    tauri::async_runtime::spawn_blocking(move || workspace_repository::load_variant_groups(limit))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+pub async fn dismiss_variant_group(group_id: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        workspace_repository::dismiss_variant_group(group_id)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+pub async fn list_collections(
+    scope: Option<String>,
+    scope_ref_id: Option<String>,
+) -> Result<Vec<Collection>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        workspace_repository::list_collections(scope, scope_ref_id)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+pub async fn upsert_collection(input: CollectionUpsert) -> Result<Collection, String> {
+    tauri::async_runtime::spawn_blocking(move || workspace_repository::upsert_collection(input))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+pub async fn delete_collection(collection_id: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        workspace_repository::delete_collection(collection_id)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+pub async fn promote_collection_to_global(collection_id: String) -> Result<Collection, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        workspace_repository::promote_collection_to_global(collection_id)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+pub async fn add_profile_media_to_collection(
+    collection_id: String,
+    source_id: String,
+    relative_paths: Vec<String>,
+) -> Result<i64, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        workspace_repository::add_profile_media_to_collection(
+            collection_id,
+            source_id,
+            relative_paths,
+        )
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+pub async fn add_timeline_items_to_collection(
+    collection_id: String,
+    item_ids: Vec<String>,
+) -> Result<i64, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        workspace_repository::add_timeline_items_to_collection(collection_id, item_ids)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+pub async fn remove_timeline_items_from_collection(
+    collection_id: String,
+    item_ids: Vec<String>,
+) -> Result<i64, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        workspace_repository::remove_timeline_items_from_collection(collection_id, item_ids)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+pub async fn load_collection_relative_paths(
+    collection_id: String,
+    source_id: String,
+) -> Result<Vec<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        workspace_repository::load_collection_relative_paths(collection_id, source_id)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+pub async fn load_collection_timeline(
+    collection_id: String,
+    cursor: Option<MediaTimelineCursor>,
+    limit: Option<u32>,
+) -> Result<MediaTimelinePage, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        workspace_repository::load_collection_timeline(collection_id, cursor, limit)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+pub async fn load_media_timeline(
+    request: MediaTimelineRequest,
+) -> Result<MediaTimelinePage, String> {
+    tauri::async_runtime::spawn_blocking(move || workspace_repository::load_media_timeline(request))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+pub async fn mark_timeline_seen() -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(workspace_repository::mark_timeline_seen)
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+pub async fn list_identities() -> Result<Vec<Identity>, String> {
+    tauri::async_runtime::spawn_blocking(workspace_repository::list_identities)
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+pub async fn create_identity(
+    display_name: String,
+    notes: Option<String>,
+) -> Result<Identity, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        workspace_repository::create_identity(display_name, notes)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+pub async fn delete_identity(identity_id: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || workspace_repository::delete_identity(identity_id))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+pub async fn link_source_to_identity(
+    source_id: String,
+    identity_id: Option<String>,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        workspace_repository::link_source_to_identity(source_id, identity_id)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+pub async fn suggest_identity_links() -> Result<Vec<IdentityLinkSuggestion>, String> {
+    tauri::async_runtime::spawn_blocking(workspace_repository::suggest_identity_links)
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+pub async fn load_source_handle_history(
+    source_id: String,
+) -> Result<Vec<SourceHandleHistoryEntry>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        workspace_repository::load_source_handle_history_for(source_id)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+pub async fn media_index_status() -> Result<MediaIndexStatus, String> {
+    tauri::async_runtime::spawn_blocking(media_index_runtime::status)
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+pub fn start_media_index_scan(
+    app: tauri::AppHandle,
+    source_id: Option<String>,
+    resource_profile: Option<String>,
+) -> Result<MediaIndexStatus, String> {
+    media_index_runtime::start_scan(&app, source_id, resource_profile)
+}
+
+#[tauri::command]
+pub fn resume_media_fingerprints(
+    app: tauri::AppHandle,
+    resource_profile: Option<String>,
+) -> Result<MediaIndexStatus, String> {
+    media_index_runtime::resume_fingerprints(&app, resource_profile)
+}
+
+#[tauri::command]
+pub fn cancel_media_index_scan(app: tauri::AppHandle) -> Result<MediaIndexStatus, String> {
+    media_index_runtime::cancel_scan(&app)
 }
 
 #[tauri::command]
@@ -1081,6 +1314,11 @@ pub fn open_workspace_health_window(
     intent: Option<WorkspaceHealthWindowIntent>,
 ) -> Result<(), String> {
     desktop_runtime::open_workspace_health_window(&app, intent)
+}
+
+#[tauri::command]
+pub fn open_library_window(app: tauri::AppHandle) -> Result<(), String> {
+    desktop_runtime::open_library_window(&app)
 }
 
 #[tauri::command]

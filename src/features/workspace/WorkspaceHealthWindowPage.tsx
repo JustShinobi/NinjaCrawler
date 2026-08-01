@@ -14,12 +14,15 @@ import {
 import {
   applyMediaDedupe,
   cancelMediaDedupe,
+  cancelMediaIndexScan,
   enqueueMediaDedupeScan,
   installMediaDedupeSimilarityEngine,
   installMediaToolRuntime,
   loadMediaDedupeResultPage,
   loadMediaDedupeStatus,
+  loadMediaIndexStatus,
   loadWorkspaceHealth,
+  startMediaIndexScan,
   openAccountsWindow,
   openProfileViewWindow,
   openRuntimeLogWindow,
@@ -38,6 +41,7 @@ import type {
   MediaDedupeScanProfile,
   MediaDedupeSimilarSelection,
   MediaDedupeSummaryStatus,
+  MediaIndexStatus,
   SourceHealthItem,
   WorkspaceHealthIncident,
   WorkspaceHealthSeverity,
@@ -376,6 +380,8 @@ export function WorkspaceHealthWindowPage({
   const [dedupeResultPage, setDedupeResultPage] =
     useState<MediaDedupeResultPage>();
   const [loadingMoreDedupeResults, setLoadingMoreDedupeResults] = useState(false);
+  const [mediaIndex, setMediaIndex] = useState<MediaIndexStatus>();
+  const [mediaIndexError, setMediaIndexError] = useState<string>();
   const [tab, setTab] = useState<HealthTab>(initialIntent?.initialTab ?? "overview");
   const [selectedIncident, setSelectedIncident] =
     useState<WorkspaceHealthIncident>();
@@ -410,9 +416,10 @@ export function WorkspaceHealthWindowPage({
 
   const refresh = useCallback(async (silent = false) => {
     if (!silent) setLoading(true);
-    const [healthResult, dedupeResult] = await Promise.allSettled([
+    const [healthResult, dedupeResult, mediaIndexResult] = await Promise.allSettled([
       loadWorkspaceHealth(),
       loadDedupeDetails(),
+      loadMediaIndexStatus(),
     ]);
     if (healthResult.status === "fulfilled") {
       setHealth(healthResult.value);
@@ -429,6 +436,14 @@ export function WorkspaceHealthWindowPage({
     } else {
       setCleanupError(
         errorMessage(dedupeResult.reason, "Failed to load media cleanup."),
+      );
+    }
+    if (mediaIndexResult.status === "fulfilled") {
+      setMediaIndex(mediaIndexResult.value);
+      setMediaIndexError(undefined);
+    } else {
+      setMediaIndexError(
+        errorMessage(mediaIndexResult.reason, "Failed to load the media index."),
       );
     }
     if (!silent) setLoading(false);
@@ -466,6 +481,7 @@ export function WorkspaceHealthWindowPage({
       onWorkspaceSnapshotChanged: () => void refresh(true),
       onMediaDedupeStatusChanged: (status) =>
         setDedupe((current) => mergeDedupeSummary(current, status)),
+      onMediaIndexStatusChanged: (status) => setMediaIndex(status),
       onMediaDedupeResultsChanged: () => {
         void loadDedupeDetails()
           .then(({ status, page }) => {
@@ -530,6 +546,23 @@ export function WorkspaceHealthWindowPage({
       }
     },
     [refresh],
+  );
+
+  const runMediaIndexAction = useCallback(
+    async (key: string, action: () => Promise<MediaIndexStatus>) => {
+      setBusyAction(key);
+      setMediaIndexError(undefined);
+      try {
+        setMediaIndex(await action());
+      } catch (actionError) {
+        setMediaIndexError(
+          errorMessage(actionError, "Media index action failed."),
+        );
+      } finally {
+        setBusyAction(undefined);
+      }
+    },
+    [],
   );
 
   const loadMoreDedupeResults = useCallback(async () => {
@@ -763,6 +796,9 @@ export function WorkspaceHealthWindowPage({
             <Storage
               health={health}
               dedupe={dedupe}
+              mediaIndex={mediaIndex}
+              mediaIndexError={mediaIndexError}
+              runMediaIndexAction={runMediaIndexAction}
               cleanupError={cleanupError}
               busyAction={busyAction}
               runCleanupAction={runCleanupAction}
@@ -1197,9 +1233,147 @@ function Accounts({
   );
 }
 
+/**
+ * The canonical media index is what lets anything reason about the library as a
+ * whole. Syncs register what they download, so this panel is only about the
+ * rest: imported libraries, files touched outside the app, and media that
+ * predates the index.
+ */
+function MediaIndexPanel({
+  status,
+  error,
+  busyAction,
+  runAction,
+}: {
+  status?: MediaIndexStatus;
+  error?: string;
+  busyAction?: string;
+  runAction: (
+    key: string,
+    action: () => Promise<MediaIndexStatus>,
+  ) => Promise<void>;
+}) {
+  const run = status?.run;
+  const running = run?.status === "running" || run?.status === "queued";
+  const counts = status?.counts;
+  const progress =
+    run && run.sourcesTotal > 0
+      ? Math.round((run.sourcesProcessed / run.sourcesTotal) * 100)
+      : 0;
+
+  return (
+    <section aria-busy={running} className="panel health-cleanup-panel">
+      <div className="panel-header compact-header">
+        <div>
+          <span className="eyebrow">Media index</span>
+          <h2>Index the library</h2>
+          <p>
+            Downloads are indexed automatically. Run this to pick up imported
+            libraries and files changed outside the app.
+          </p>
+        </div>
+        <div className="health-cleanup-actions">
+          {running ? (
+            <button
+              className="ghost-button"
+              disabled={busyAction === "media-index-cancel"}
+              onClick={() =>
+                void runAction("media-index-cancel", cancelMediaIndexScan)
+              }
+              type="button"
+            >
+              {busyAction === "media-index-cancel" ? "Stopping…" : "Stop"}
+            </button>
+          ) : (
+            <button
+              className="primary-button"
+              disabled={busyAction === "media-index-scan"}
+              onClick={() =>
+                void runAction("media-index-scan", () => startMediaIndexScan())
+              }
+              type="button"
+            >
+              {busyAction === "media-index-scan"
+                ? "Starting…"
+                : "Index library"}
+            </button>
+          )}
+        </div>
+      </div>
+
+      {error ? (
+        <div className="maintenance-error" role="alert">
+          <strong>The media index is unavailable.</strong> {error}
+        </div>
+      ) : null}
+
+      {running ? (
+        <div className="health-progress-heading">
+          <div className="health-progress-title">
+            <span aria-hidden="true" className="health-activity-indicator" />
+            <strong>
+              {run?.currentSourceHandle
+                ? `Indexing ${displayHandle(run.currentSourceHandle)}`
+                : "Indexing…"}
+            </strong>
+          </div>
+          <span className="health-progress-count">
+            {run?.sourcesProcessed ?? 0}/{run?.sourcesTotal ?? 0} profiles (
+            {progress}%)
+          </span>
+        </div>
+      ) : null}
+
+      <div className="health-progress-metrics">
+        <SummaryCard
+          label="Indexed media"
+          value={(counts?.totalFiles ?? 0).toLocaleString()}
+          detail={formatBytes(counts?.totalBytes ?? 0)}
+          severity="healthy"
+        />
+        <SummaryCard
+          label="Profiles indexed"
+          value={(counts?.indexedSources ?? 0).toLocaleString()}
+          detail={
+            run?.finishedAt ? `Last run ${formatDate(run.finishedAt)}` : "Never indexed"
+          }
+          severity="healthy"
+        />
+        <SummaryCard
+          label="Awaiting fingerprint"
+          value={(counts?.pendingFingerprints ?? 0).toLocaleString()}
+          detail={
+            run && run.hashesInherited > 0
+              ? `${run.hashesInherited.toLocaleString()} reused from cleanup`
+              : "Reused from media cleanup when available"
+          }
+          severity={
+            (counts?.pendingFingerprints ?? 0) > 0 ? "attention" : "healthy"
+          }
+        />
+        <SummaryCard
+          label="Missing on disk"
+          value={(counts?.missingOnDisk ?? 0).toLocaleString()}
+          detail="Indexed but no longer in the profile folder"
+          severity={(counts?.missingOnDisk ?? 0) > 0 ? "attention" : "healthy"}
+        />
+      </div>
+
+      {run?.error && !running ? (
+        <div className="maintenance-error" role="alert">
+          <strong>The last indexing run reported problems.</strong> {run.error}
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
 function Storage({
   health,
   dedupe,
+  mediaIndex,
+  mediaIndexError,
+  runMediaIndexAction,
   cleanupError,
   busyAction,
   runCleanupAction,
@@ -1218,6 +1392,12 @@ function Storage({
 }: {
   health: WorkspaceHealthSnapshot;
   dedupe?: MediaDedupeJobStatus;
+  mediaIndex?: MediaIndexStatus;
+  mediaIndexError?: string;
+  runMediaIndexAction: (
+    key: string,
+    action: () => Promise<MediaIndexStatus>,
+  ) => Promise<void>;
   cleanupError?: string;
   busyAction?: string;
   runCleanupAction: (
@@ -1312,6 +1492,13 @@ function Storage({
       id="health-panel-storage"
       role="tabpanel"
     >
+      <MediaIndexPanel
+        status={mediaIndex}
+        error={mediaIndexError}
+        busyAction={busyAction}
+        runAction={runMediaIndexAction}
+      />
+
       <section aria-busy={active} className="panel health-cleanup-panel">
         <div className="panel-header compact-header">
           <div>
