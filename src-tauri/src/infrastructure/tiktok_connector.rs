@@ -33,6 +33,10 @@ const YT_DLP_DOWNLOAD_TIMEOUT_SECS: u64 = 3600;
 const PHOTO_PAGE_TIMEOUT_SECS: u64 = 120;
 const STORIES_TIMEOUT_SECS: u64 = 300;
 const DOWNLOAD_BATCH_SIZE: usize = 40;
+/// Rodadas extras sobre os posts que não produziram mídia. O extractor do
+/// TikTok falha de forma intermitente (yt-dlp #17332) e costuma passar numa
+/// tentativa seguinte, então repescamos antes de dar o sync por completo.
+const DOWNLOAD_RETRY_ROUNDS: usize = 2;
 /// Alvo de impersonation do yt-dlp (curl_cffi). Sem isto o extractor do TikTok
 /// falha com "Unable to extract webpage video data" (anti-bot por TLS).
 const YT_DLP_IMPERSONATE: &str = "chrome";
@@ -780,6 +784,104 @@ where
                         Duration::from_secs(request.sleep_timer_secs as u64),
                         &is_cancelled,
                     );
+                }
+            }
+
+            // O extractor do TikTok falha de forma intermitente (yt-dlp #17332:
+            // "Unable to extract universal data for rehydration"), e o mesmo
+            // post costuma passar numa tentativa seguinte. Sem esta repescagem,
+            // posts somem silenciosamente de um sync reportado como bem-sucedido.
+            if !limit_aborted {
+                for attempt in 1..=DOWNLOAD_RETRY_ROUNDS {
+                    let missing: Vec<EnumeratedPost> = selected
+                        .iter()
+                        .filter(|post| !downloaded_post_ids.contains(&post.post_id))
+                        .cloned()
+                        .collect();
+                    if missing.is_empty() {
+                        break;
+                    }
+                    if is_cancelled() {
+                        return Err("source sync cancelled by user".to_string());
+                    }
+                    report_progress(TikTokProgress {
+                        label: "Downloading posts".to_string(),
+                        detail: format!(
+                            "Retrying {} post(s) that returned no media (attempt {attempt} of {DOWNLOAD_RETRY_ROUNDS}).",
+                            missing.len()
+                        ),
+                        downloaded_items: Some(summary.downloaded_asset_count),
+                        progress_percent: None,
+                        indeterminate: true,
+                    });
+                    connector_debug::append_current(
+                        "internal.tiktok",
+                        "call",
+                        "batch.retry",
+                        format!(
+                            "attempt={attempt}\nmissing_posts={}\npost_ids={}",
+                            missing.len(),
+                            missing
+                                .iter()
+                                .map(|post| post.post_id.as_str())
+                                .collect::<Vec<_>>()
+                                .join(",")
+                        ),
+                    );
+                    for batch in missing.chunks(DOWNLOAD_BATCH_SIZE) {
+                        match download_batch(request, batch, &is_cancelled, &mut |_| {}) {
+                            Ok(outcome) => {
+                                if outcome.rate_limited {
+                                    rate_limited = true;
+                                }
+                                for media in outcome.media {
+                                    if request
+                                        .ledger_media_keys
+                                        .contains(&media.provider_media_key)
+                                        || request
+                                            .existing_relative_paths
+                                            .contains(&media.final_file_name)
+                                    {
+                                        summary.skipped_existing_asset_count += 1;
+                                        continue;
+                                    }
+                                    downloaded_post_ids.insert(media.provider_post_key.clone());
+                                    summary.downloaded_asset_count += 1;
+                                    downloaded_media.push(media);
+                                }
+                            }
+                            Err(error) => {
+                                if error.to_ascii_lowercase().contains("cancelled by user") {
+                                    return Err(error);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // O que sobrou depois das repescagens é uma falha real: o
+                // chamador precisa saber para não tratar o sync como completo.
+                let still_missing: Vec<&str> = selected
+                    .iter()
+                    .filter(|post| !downloaded_post_ids.contains(&post.post_id))
+                    .map(|post| post.post_id.as_str())
+                    .collect();
+                if !still_missing.is_empty() {
+                    connector_debug::append_current(
+                        "internal.tiktok",
+                        "error",
+                        "download.incomplete",
+                        format!(
+                            "missing_posts={}\npost_ids={}",
+                            still_missing.len(),
+                            still_missing.join(",")
+                        ),
+                    );
+                    section_errors.push(format!(
+                        "{} post(s) returned no media after {DOWNLOAD_RETRY_ROUNDS} extra attempt(s) and will be retried on the next sync: {}.",
+                        still_missing.len(),
+                        still_missing.join(", ")
+                    ));
                 }
             }
 

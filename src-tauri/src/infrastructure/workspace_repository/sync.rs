@@ -4372,7 +4372,19 @@ pub(super) fn execute_tiktok_source_sync_with_connection(
                     likes.stopped_incrementally,
                 ),
             );
-            let mut summary = format_download_success_summary("TikTok sync succeeded.", downloaded);
+            // "warning" = sync parcial útil (paridade com o Twitter): a mídia
+            // que veio foi persistida, mas algo ficou para trás. Reportar
+            // "succeeded" aqui esconderia posts que o extractor não entregou.
+            let completed_with_warnings =
+                result.limit_aborted || !result.section_errors.is_empty();
+            let mut summary = format_download_success_summary(
+                if completed_with_warnings {
+                    "TikTok sync completed with warnings."
+                } else {
+                    "TikTok sync succeeded."
+                },
+                downloaded,
+            );
             summary.push_str(&format_already_up_to_date_suffix(
                 result.manifest_summary.skipped_existing_post_count,
             ));
@@ -4395,7 +4407,11 @@ pub(super) fn execute_tiktok_source_sync_with_connection(
 
             SourceSyncOutcome {
                 tool: "internal.tiktok".to_string(),
-                status: "succeeded".to_string(),
+                status: if completed_with_warnings {
+                    "warning".to_string()
+                } else {
+                    "succeeded".to_string()
+                },
                 summary,
                 command_preview,
                 manifest_summary_json: None,
@@ -4437,9 +4453,10 @@ pub(super) fn execute_tiktok_source_sync_with_connection(
         &finished_at,
     )?;
     propagate_source_sync_account_health(connection, context, &outcome, &finished_at)?;
-    // Sync bem-sucedido limpa qualquer marcador anterior (ex.: perfil que voltou
-    // a ficar disponível deixa de exibir o badge "Profile unavailable").
-    if outcome.status == "succeeded" {
+    // Sync produtivo limpa qualquer marcador anterior (ex.: perfil que voltou a
+    // ficar disponível deixa de exibir o badge "Profile unavailable"). Um sync
+    // com avisos também baixou mídia, então também limpa.
+    if source_sync_status_is_productive(&outcome.status) {
         if let Err(error) = clear_source_sync_problem(connection, &context.source.id, &finished_at)
         {
             log_runtime_event(
@@ -4462,7 +4479,7 @@ pub(super) fn execute_tiktok_source_sync_with_connection(
     source_sync_runtime::report_source_sync_progress(
         &context.source.id,
         Some(100),
-        Some(if outcome.status == "succeeded" {
+        Some(if source_sync_status_is_productive(&outcome.status) {
             "Download complete".to_string()
         } else if outcome.status == "skipped" {
             "Download skipped".to_string()
