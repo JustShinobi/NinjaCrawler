@@ -13,6 +13,10 @@ export function syncProblemBadgeLabel(syncProblemCode?: string): string {
       return 'Profile unavailable'
     case 'auth_required':
       return 'Auth required'
+    // The handle now belongs to a different provider account. Downloads are
+    // paused so the new owner's media is not mixed into this archive.
+    case 'handle_recycled':
+      return 'Handle taken over'
     default:
       return 'Sync issue'
   }

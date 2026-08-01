@@ -471,6 +471,13 @@ pub struct MediaGalleryPost {
     pub comment_count: Option<i64>,
     pub share_count: Option<i64>,
     pub stats_updated_at: Option<String>,
+    /// The post is gone from the provider and now only exists in this archive.
+    /// Only set by a scan that enumerated the whole section and confirmed the
+    /// absence more than once — see the upstream presence evaluation.
+    pub upstream_missing: bool,
+    /// The post has a duplicate elsewhere (a story reposted to the feed, or the
+    /// same upload on another provider of the same person).
+    pub has_variants: bool,
     pub files: Vec<MediaGalleryFile>,
     /// Slideshow/carousel soundtrack (TikTok photo-mode), when present on disk
     /// as `<post_id>_audio.<ext>`.
@@ -1423,6 +1430,12 @@ pub struct SourceProfile {
     pub created_at: Option<String>,
     pub importer_id: Option<String>,
     pub imported_at: Option<String>,
+    /// Stable id of the profile owner on the provider, resolved during sync.
+    /// Survives a handle change and is what tells a rename apart from a handle
+    /// somebody else took over.
+    pub provider_user_id: Option<String>,
+    /// Cross-provider person this profile belongs to, when linked.
+    pub identity_id: Option<String>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -1734,6 +1747,321 @@ pub struct MediaDedupeScanResult {
     pub finished_at: Option<String>,
     pub exact_groups: Vec<MediaDedupeGroup>,
     pub similar_groups: Vec<MediaDedupeGroup>,
+}
+
+/// One handle a tracked profile has answered to. A renamed profile keeps its
+/// media and its id; only the handle moves, and old links still need to resolve.
+#[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceHandleHistoryEntry {
+    pub handle: String,
+    pub provider_user_id: Option<String>,
+    pub first_seen_at: String,
+    pub last_seen_at: String,
+}
+
+#[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryProviderBreakdown {
+    pub provider: String,
+    pub files: i64,
+    pub bytes: i64,
+    pub sources: i64,
+}
+
+#[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryProfileUsage {
+    pub source_id: String,
+    pub provider: String,
+    pub handle: String,
+    pub files: i64,
+    pub bytes: i64,
+    pub last_captured_at: Option<i64>,
+}
+
+#[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryGrowthPoint {
+    /// `YYYY-MM`
+    pub month: String,
+    pub files: i64,
+    pub bytes: i64,
+}
+
+/// A profile that stopped producing new media, and why.
+///
+/// The distinction is the point: a profile whose sync keeps failing needs
+/// attention, one that simply has not posted in months needs nothing. The
+/// existing health view treats both as silence.
+#[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryStalledProfile {
+    pub source_id: String,
+    pub provider: String,
+    pub handle: String,
+    /// sync_failing | not_posting
+    pub reason: String,
+    pub days_since_last_media: Option<i64>,
+    pub last_sync_status: Option<String>,
+    pub sync_problem_code: Option<String>,
+}
+
+#[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryDashboard {
+    pub total_files: i64,
+    pub total_bytes: i64,
+    pub total_sources: i64,
+    pub upstream_missing: i64,
+    pub pending_fingerprints: i64,
+    pub variant_groups: i64,
+    /// Bytes held by non-canonical variants — what `keep_best` could reclaim.
+    pub variant_reclaimable_bytes: i64,
+    pub providers: Vec<LibraryProviderBreakdown>,
+    pub top_profiles: Vec<LibraryProfileUsage>,
+    pub growth: Vec<LibraryGrowthPoint>,
+    pub stalled_profiles: Vec<LibraryStalledProfile>,
+}
+
+/// One member of a variant group, with enough context for the operator to tell
+/// the copies apart at a glance.
+#[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaVariantMember {
+    pub media_id: String,
+    /// canonical | variant
+    pub role: String,
+    pub source_id: String,
+    pub provider: String,
+    pub handle: String,
+    pub media_section: String,
+    pub relative_path: String,
+    pub size_bytes: i64,
+}
+
+/// The same content found in more than one place: a story reposted to the feed,
+/// or the same upload on two providers of the same person.
+#[derive(Clone, Serialize, Deserialize, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaVariantGroup {
+    pub id: String,
+    /// intra_source | cross_source
+    pub scope: String,
+    pub identity_id: Option<String>,
+    pub canonical_media_id: Option<String>,
+    /// exact_sha256 | perceptual_image | perceptual_video
+    pub match_kind: String,
+    pub confidence: f64,
+    /// link_only | kept_best | kept_first | keep_all
+    pub policy_applied: String,
+    pub reviewed: bool,
+    pub created_at: String,
+    pub members: Vec<MediaVariantMember>,
+}
+
+/// A curated grouping of media. `scope` decides where it appears, `kind`
+/// decides how membership is computed — the two are orthogonal on purpose.
+#[derive(Clone, Serialize, Deserialize, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Collection {
+    pub id: String,
+    /// manual | smart
+    pub kind: String,
+    /// global | source | identity
+    pub scope: String,
+    pub scope_ref_id: Option<String>,
+    pub name: String,
+    pub description: Option<String>,
+    pub color: Option<String>,
+    /// Serialized `MediaTimelineFilter` for smart collections.
+    pub rule_json: Option<String>,
+    pub cover_media_id: Option<String>,
+    pub pinned: bool,
+    /// Explicit members; always 0 for smart collections, whose membership is a
+    /// query rather than a list.
+    pub item_count: i64,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Clone, Serialize, Deserialize, Debug, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct CollectionUpsert {
+    pub id: Option<String>,
+    pub kind: Option<String>,
+    pub scope: Option<String>,
+    pub scope_ref_id: Option<String>,
+    pub name: String,
+    pub description: Option<String>,
+    pub color: Option<String>,
+    pub rule_json: Option<String>,
+    pub pinned: Option<bool>,
+}
+
+/// One entry of the aggregated timeline: a post, with the files that belong to
+/// it collapsed into a single card the way the profile grid already does.
+#[derive(Clone, Serialize, Deserialize, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaTimelineItem {
+    /// Opaque cursor-stable id (the lowest media index id inside the post).
+    pub id: String,
+    pub source_id: String,
+    pub provider: String,
+    pub handle: String,
+    pub identity_id: Option<String>,
+    pub post_key: Option<String>,
+    pub media_type: String,
+    pub media_section: String,
+    pub captured_at: Option<i64>,
+    pub downloaded_at: Option<i64>,
+    /// Representative file of the post, as an absolute path for the webview.
+    pub absolute_path: String,
+    pub relative_path: String,
+    pub file_count: i64,
+    pub size_bytes: i64,
+    pub upstream_missing: bool,
+}
+
+/// Filters for the aggregated timeline. Everything is optional; an empty filter
+/// means the whole library.
+#[derive(Clone, Serialize, Deserialize, Debug, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct MediaTimelineFilter {
+    pub providers: Vec<String>,
+    pub source_ids: Vec<String>,
+    pub identity_ids: Vec<String>,
+    pub sections: Vec<String>,
+    /// "image" | "video" | "all"
+    pub media_type: Option<String>,
+    pub captured_from: Option<i64>,
+    pub captured_to: Option<i64>,
+    /// Only posts confirmed gone from the provider.
+    pub upstream_missing_only: bool,
+    /// Only media downloaded after the last time the timeline was marked seen.
+    pub unseen_only: bool,
+    /// Restricts to the members of a manual collection. Smart collections are
+    /// applied by expanding their stored rule instead.
+    pub collection_id: Option<String>,
+}
+
+/// Keyset cursor: the timeline is ordered by `(captured_at DESC, id DESC)` and
+/// resumes strictly after this pair. Offset pagination would drift as new media
+/// lands at the top while the operator scrolls.
+#[derive(Clone, Serialize, Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaTimelineCursor {
+    pub captured_at: Option<i64>,
+    pub id: String,
+}
+
+#[derive(Clone, Serialize, Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaTimelineRequest {
+    #[serde(default)]
+    pub filter: MediaTimelineFilter,
+    pub cursor: Option<MediaTimelineCursor>,
+    pub limit: Option<u32>,
+}
+
+#[derive(Clone, Serialize, Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaTimelinePage {
+    pub items: Vec<MediaTimelineItem>,
+    pub next_cursor: Option<MediaTimelineCursor>,
+    /// Media first seen after the last "mark as seen" — what turns the archive
+    /// into something worth opening daily.
+    pub new_since_last_visit: i64,
+    pub last_seen_at: Option<String>,
+}
+
+/// A person, above the profile level. The same human usually has a profile on
+/// several providers; grouping them is what lets duplicate detection compare
+/// across providers without comparing everything against everything.
+#[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct Identity {
+    pub id: String,
+    pub display_name: String,
+    pub notes: Option<String>,
+    pub avatar_source_id: Option<String>,
+    /// Profiles currently linked to this identity.
+    pub source_ids: Vec<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// A profile that looks like it belongs to an identity, with the reason why.
+/// Never applied automatically: a wrong link would feed cross-provider duplicate
+/// detection with two different people.
+#[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct IdentityLinkSuggestion {
+    pub source_id: String,
+    pub provider: String,
+    pub handle: String,
+    /// `same_handle` — the handle matches another provider's profile exactly.
+    pub reason: String,
+    pub matched_source_id: String,
+    pub matched_provider: String,
+}
+
+/// Aggregate state of the canonical media index. Backs the index status card
+/// and is the first consumer of the table that later feeds the aggregated
+/// timeline, collections and the library dashboard.
+#[derive(Clone, Serialize, Deserialize, Debug, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaIndexCounts {
+    pub total_files: i64,
+    pub total_bytes: i64,
+    /// Rows still waiting for a fingerprint (sha256 + perceptual hashes).
+    pub pending_fingerprints: i64,
+    pub failed_fingerprints: i64,
+    /// Indexed rows whose file is no longer on disk.
+    pub missing_on_disk: i64,
+    /// Indexed rows whose post is gone from the provider — the part of the
+    /// library that only exists here.
+    pub upstream_missing: i64,
+    pub indexed_sources: i64,
+}
+
+/// A background indexing pass over the library. Progress is tracked per profile
+/// rather than per file: walking one profile folder is the unit of work, and a
+/// per-file counter would cost more to publish than it is worth.
+#[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaIndexRun {
+    pub id: String,
+    /// queued | running | completed | failed | cancelled
+    pub status: String,
+    /// inventory | reconcile | fingerprint | done
+    pub stage: String,
+    pub scope_source_id: Option<String>,
+    pub sources_total: i64,
+    pub sources_processed: i64,
+    pub files_indexed: i64,
+    pub files_updated: i64,
+    pub files_missing: i64,
+    pub hashes_inherited: i64,
+    /// Size of the fingerprint backlog when the stage started.
+    pub fingerprints_total: i64,
+    pub fingerprints_done: i64,
+    /// When hashing began, so the UI can derive a rate and a finish estimate.
+    pub fingerprint_started_at: Option<String>,
+    /// quiet | balanced | fast
+    pub resource_profile: String,
+    pub current_source_handle: Option<String>,
+    pub error: Option<String>,
+    pub started_at: String,
+    pub finished_at: Option<String>,
+}
+
+#[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaIndexStatus {
+    pub counts: MediaIndexCounts,
+    /// The active run, or the most recent finished one when idle.
+    pub run: Option<MediaIndexRun>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]

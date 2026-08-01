@@ -7,8 +7,15 @@ import {
   deleteSourceMedia,
   enqueueMediaDedupeScan,
   loadMediaDedupeSummaryStatus,
+  addProfileMediaToCollection,
+  deleteCollection,
+  listCollections,
+  loadCollectionRelativePaths,
   loadMediaThumbnails,
+  loadSourceHandleHistory,
   loadSourceMediaGallery,
+  promoteCollectionToGlobal,
+  upsertCollection,
   loadWorkspaceSnapshot,
   openExternalTarget,
   openMediaFile,
@@ -20,8 +27,10 @@ import {
 } from '../../bridge/desktop'
 import { DEFAULT_PROVIDER_CATALOG } from '../../domain/defaults'
 import type {
+  Collection,
   MediaGalleryPost,
   ProviderKey,
+  SourceHandleHistoryEntry,
   SourceMediaGallery,
   SourceProfile,
   MediaDedupeSummaryStatus,
@@ -103,6 +112,7 @@ interface FilterPreset {
   dateRange: DateRangeFilter
   minEngagement: number
   carouselOnly: boolean
+  archivedOnly?: boolean
 }
 
 /** Seção dos Highlights do Instagram (ver isEphemeralStorySection). */
@@ -434,6 +444,14 @@ type VirtualRow =
 export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
   const [sourceId] = useState<string | undefined>(initialSourceId)
   const [gallery, setGallery] = useState<SourceMediaGallery>()
+  const [handleHistory, setHandleHistory] = useState<SourceHandleHistoryEntry[]>([])
+  // Collections scoped to this profile, plus the two library-wide concepts
+  // ("only here", "duplicates") narrowed to it. All of them are destinations in
+  // the sidebar rather than yet another control in the toolbar.
+  const [profileCollections, setProfileCollections] = useState<Collection[]>([])
+  const [activeCollectionId, setActiveCollectionId] = useState<string>()
+  const [collectionPaths, setCollectionPaths] = useState<Set<string>>(() => new Set())
+  const [specialView, setSpecialView] = useState<'none' | 'archived' | 'duplicates'>('none')
   const [sourceProfile, setSourceProfile] = useState<SourceProfile>()
   const avatarPath = sourceProfile?.profileImagePath
   // Fase 3 — bio longa recolhida por padrão (expande sob demanda).
@@ -480,6 +498,9 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
   const [dateRange, setDateRange] = useState<DateRangeFilter>('all')
   const [minEngagement, setMinEngagement] = useState(0)
   const [carouselOnly, setCarouselOnly] = useState(false)
+  // "Archived here only": posts a whole-section scan confirmed are gone from
+  // the provider. The reason to keep a local copy at all.
+  const [archivedOnly, setArchivedOnly] = useState(false)
   const [presets, setPresets] = useState<FilterPreset[]>(readStoredPresets)
   const filtersMenuRef = useRef<HTMLDivElement>(null)
   // Largura útil do container de rolagem (medida), base do cálculo de colunas.
@@ -593,11 +614,13 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
     setLoading(true)
     setError(undefined)
     try {
-      const [nextGallery, snapshot] = await Promise.all([
+      const [nextGallery, snapshot, history] = await Promise.all([
         loadSourceMediaGallery(id),
         loadWorkspaceSnapshot().catch(() => undefined),
+        loadSourceHandleHistory(id).catch(() => []),
       ])
       setGallery(nextGallery)
+      setHandleHistory(history)
       setSourceProfile(snapshot?.sources.find((entry) => entry.id === id))
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : 'Failed to load profile media.')
@@ -761,7 +784,10 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
 
   // Quantos filtros avançados (popover) estão ativos — dirige o badge do botão.
   const activeAdvancedFilters =
-    (dateRange !== 'all' ? 1 : 0) + (minEngagement > 0 ? 1 : 0) + (carouselOnly ? 1 : 0)
+    (dateRange !== 'all' ? 1 : 0) +
+    (minEngagement > 0 ? 1 : 0) +
+    (carouselOnly ? 1 : 0) +
+    (archivedOnly ? 1 : 0)
 
   // Conjunto exibido: seção → tipo de mídia → filtros avançados → busca por autor
   // (só nos Likes) → ordenação pelo eixo escolhido. Posts sem valor no eixo (ex.:
@@ -775,6 +801,17 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
     }
     if (carouselOnly) {
       base = base.filter((post) => post.mediaType === 'slideshow' || post.files.length > 1)
+    }
+    if (archivedOnly || specialView === 'archived') {
+      base = base.filter((post) => post.upstreamMissing === true)
+    }
+    if (specialView === 'duplicates') {
+      base = base.filter((post) => post.hasVariants === true)
+    }
+    if (activeCollectionId) {
+      base = base.filter((post) =>
+        post.files.some((file) => collectionPaths.has(file.relativePath.toLowerCase())),
+      )
     }
     if (minEngagement > 0) {
       base = base.filter((post) => postEngagement(post) >= minEngagement)
@@ -819,6 +856,10 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
     likesQuery,
     mediaTypeFilter,
     carouselOnly,
+    archivedOnly,
+    specialView,
+    activeCollectionId,
+    collectionPaths,
     minEngagement,
     dateRange,
   ])
@@ -1262,10 +1303,61 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
     setBioExpanded(false)
   }, [sourceId])
 
+  const refreshProfileCollections = useCallback(async () => {
+    if (!sourceId) return
+    try {
+      setProfileCollections(await listCollections('source', sourceId))
+    } catch {
+      /* the grid stays usable without the collections list */
+    }
+  }, [sourceId])
+
+  useEffect(() => {
+    void refreshProfileCollections()
+  }, [refreshProfileCollections])
+
+  // Membership is resolved to relative paths because the gallery is built from
+  // disk and never carries media index ids.
+  useEffect(() => {
+    if (!activeCollectionId || !sourceId) {
+      setCollectionPaths(new Set())
+      return
+    }
+    let active = true
+    void loadCollectionRelativePaths(activeCollectionId, sourceId)
+      .then((paths) => {
+        if (active) setCollectionPaths(new Set(paths.map((path) => path.toLowerCase())))
+      })
+      .catch(() => undefined)
+    return () => {
+      active = false
+    }
+  }, [activeCollectionId, sourceId])
+
+  /** Selecting any destination clears the other two, so only one is ever active. */
+  const openSection = useCallback((section: string) => {
+    setSectionFilter(section)
+    setActiveCollectionId(undefined)
+    setSpecialView('none')
+  }, [])
+
+  const openCollection = useCallback((collectionId: string) => {
+    setActiveCollectionId(collectionId)
+    setSectionFilter(SECTION_FILTER_ALL)
+    setSpecialView('none')
+  }, [])
+
+  const openSpecialView = useCallback((view: 'archived' | 'duplicates') => {
+    setSpecialView(view)
+    setActiveCollectionId(undefined)
+    setSectionFilter(SECTION_FILTER_ALL)
+  }, [])
+
   const clearAdvancedFilters = useCallback(() => {
     setDateRange('all')
     setMinEngagement(0)
     setCarouselOnly(false)
+    setArchivedOnly(false)
   }, [])
 
   const clearAllFilters = useCallback(() => {
@@ -1279,6 +1371,7 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
       setDateRange(preset.dateRange)
       setMinEngagement(preset.minEngagement)
       setCarouselOnly(preset.carouselOnly)
+      setArchivedOnly(preset.archivedOnly === true)
       // Só aplica a seção do preset se ela existir neste perfil.
       if (preset.section === SECTION_FILTER_ALL || sections.includes(preset.section)) {
         setSectionFilter(preset.section)
@@ -1299,9 +1392,10 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
       dateRange,
       minEngagement,
       carouselOnly,
+      archivedOnly,
     }
     setPresets((current) => [...current, preset])
-  }, [mediaTypeFilter, sectionFilter, dateRange, minEngagement, carouselOnly])
+  }, [mediaTypeFilter, sectionFilter, dateRange, minEngagement, carouselOnly, archivedOnly])
 
   const deletePreset = useCallback((id: string) => {
     setPresets((current) => current.filter((preset) => preset.id !== id))
@@ -1418,6 +1512,55 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
     [sortedPosts, selectedKeys],
   )
 
+  const addSelectionToProfileCollection = useCallback(
+    async (collectionId: string) => {
+      if (!sourceId || selectedPosts.length === 0) return
+      // The gallery works in relative paths; the backend resolves them to index
+      // ids so the UI never has to know they exist.
+      const relativePaths = selectedPosts.flatMap((post) =>
+        post.files.map((file) => file.relativePath),
+      )
+      try {
+        await addProfileMediaToCollection(collectionId, sourceId, relativePaths)
+        setSelectedKeys(new Set())
+        await refreshProfileCollections()
+        if (activeCollectionId === collectionId) {
+          const paths = await loadCollectionRelativePaths(collectionId, sourceId)
+          setCollectionPaths(new Set(paths.map((path) => path.toLowerCase())))
+        }
+      } catch {
+        /* the selection stays so the operator can retry */
+      }
+    },
+    [activeCollectionId, refreshProfileCollections, selectedPosts, sourceId],
+  )
+
+  const createProfileCollection = useCallback(async () => {
+    if (!sourceId) return
+    const name = window.prompt('Name this collection:')?.trim()
+    if (!name) return
+    try {
+      const created = await upsertCollection({
+        name,
+        kind: 'manual',
+        scope: 'source',
+        scopeRefId: sourceId,
+      })
+      await refreshProfileCollections()
+      // Creating with a selection active is the common path: name it, fill it.
+      if (created && selectedPosts.length > 0) {
+        await addSelectionToProfileCollection(created.id)
+      }
+    } catch {
+      /* ignore */
+    }
+  }, [addSelectionToProfileCollection, refreshProfileCollections, selectedPosts, sourceId])
+
+  const activeProfileCollection = useMemo(
+    () => profileCollections.find((collection) => collection.id === activeCollectionId),
+    [activeCollectionId, profileCollections],
+  )
+
   const performDelete = useCallback(async () => {
     if (!sourceId || !confirmPosts || confirmPosts.length === 0) return
     const relativePaths = confirmPosts.flatMap((post) => post.files.map((file) => file.relativePath))
@@ -1491,6 +1634,15 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
     rawDisplayName && rawDisplayName.replace(/^@/, '').toLowerCase() !== handleDisplay.toLowerCase()
       ? rawDisplayName
       : ''
+  // Handles anteriores do MESMO perfil (casados pelo user id do provider) — o
+  // que faz um perfil renomeado continuar reconhecível.
+  const previousHandles = useMemo(
+    () =>
+      handleHistory
+        .map((entry) => entry.handle.trim().replace(/^@/, ''))
+        .filter((handle) => handle.length > 0 && handle.toLowerCase() !== handleDisplay.toLowerCase()),
+    [handleHistory, handleDisplay],
+  )
   // Fase 3 — metadados de perfil da última sync (vêm da galeria).
   const bioText = gallery?.biography?.trim() ?? ''
   const bioIsLong = bioText.length > 170 || bioText.includes('\n')
@@ -1584,6 +1736,7 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
             : undefined
         }
         isVideo={video}
+        archivedOnly={post.upstreamMissing === true}
         slideshowCount={post.mediaType === 'slideshow' ? post.files.length : undefined}
         badge={
           // Com filtro de seção ativo o badge só repete o chip — mostre só em All.
@@ -1671,6 +1824,14 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
             ) : null}
           </h1>
           {displayName ? <p className="profile-view-display-name">{displayName}</p> : null}
+          {previousHandles.length > 0 ? (
+            <p
+              className="profile-view-previous-handles"
+              title="Earlier handles of this same profile, matched by the provider user id"
+            >
+              formerly {previousHandles.map((handle) => `@${handle}`).join(', ')}
+            </p>
+          ) : null}
           {profileStats.length > 0 ? (
             <p className="profile-view-stats" aria-label="Profile counts">
               {profileStats.map((stat) => (
@@ -1881,6 +2042,120 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
         </div>
       ) : null}
 
+      <div className="profile-view-main">
+        {hasMedia ? (
+          <nav aria-label="Profile sections" className="profile-view-sidebar">
+            <button
+              aria-current={
+                sectionFilter === SECTION_FILTER_ALL && !activeCollectionId && specialView === 'none'
+              }
+              className={
+                sectionFilter === SECTION_FILTER_ALL && !activeCollectionId && specialView === 'none'
+                  ? 'profile-view-nav-item is-active'
+                  : 'profile-view-nav-item'
+              }
+              // The count sits in its own span, so the name is spelled out here
+              // instead of coming out as "All1447".
+              aria-label={`All ${sectionCounts.get(SECTION_FILTER_ALL) ?? 0}`}
+              onClick={() => openSection(SECTION_FILTER_ALL)}
+              type="button"
+            >
+              <span className="profile-view-nav-label">All</span>
+              <span className="profile-view-nav-count">
+                {sectionCounts.get(SECTION_FILTER_ALL) ?? 0}
+              </span>
+            </button>
+            {sections.map((section) => {
+              const label = gallery ? sectionLabel(gallery.provider, section) : section
+              const isActive =
+                sectionFilter === section && !activeCollectionId && specialView === 'none'
+              return (
+                <button
+                  aria-current={isActive}
+                  aria-label={`${label} ${sectionCounts.get(section) ?? 0}`}
+                  className={
+                    isActive ? 'profile-view-nav-item is-active' : 'profile-view-nav-item'
+                  }
+                  key={section}
+                  onClick={() => openSection(section)}
+                  type="button"
+                >
+                  <span className="profile-view-nav-label">{label}</span>
+                  <span className="profile-view-nav-count">{sectionCounts.get(section) ?? 0}</span>
+                </button>
+              )
+            })}
+
+            <div className="profile-view-nav-section">
+              <span className="profile-view-nav-heading">Collections</span>
+              {profileCollections.map((collection) => (
+                <button
+                  aria-current={activeCollectionId === collection.id}
+                  className={
+                    activeCollectionId === collection.id
+                      ? 'profile-view-nav-item is-active'
+                      : 'profile-view-nav-item'
+                  }
+                  aria-label={`${collection.name} ${collection.itemCount}`}
+                  key={collection.id}
+                  onClick={() => openCollection(collection.id)}
+                  type="button"
+                >
+                  <span className="profile-view-nav-label">{collection.name}</span>
+                  <span className="profile-view-nav-count">{collection.itemCount}</span>
+                </button>
+              ))}
+              <button
+                className="profile-view-nav-item profile-view-nav-new"
+                onClick={() => void createProfileCollection()}
+                type="button"
+              >
+                <span className="profile-view-nav-label">
+                  {selectedPosts.length > 0
+                    ? `New collection with ${selectedPosts.length}…`
+                    : 'New collection…'}
+                </span>
+              </button>
+            </div>
+
+            <div className="profile-view-nav-section">
+              <button
+                aria-current={specialView === 'archived'}
+                className={
+                  specialView === 'archived'
+                    ? 'profile-view-nav-item is-active'
+                    : 'profile-view-nav-item'
+                }
+                onClick={() => openSpecialView('archived')}
+                title="Posts confirmed gone from the provider"
+                type="button"
+              >
+                <span className="profile-view-nav-label">Only here</span>
+                <span className="profile-view-nav-count">
+                  {visiblePosts.filter((post) => post.upstreamMissing).length}
+                </span>
+              </button>
+              <button
+                aria-current={specialView === 'duplicates'}
+                className={
+                  specialView === 'duplicates'
+                    ? 'profile-view-nav-item is-active'
+                    : 'profile-view-nav-item'
+                }
+                onClick={() => openSpecialView('duplicates')}
+                title="Posts that also exist elsewhere"
+                type="button"
+              >
+                <span className="profile-view-nav-label">Duplicates</span>
+                <span className="profile-view-nav-count">
+                  {visiblePosts.filter((post) => post.hasVariants).length}
+                </span>
+              </button>
+            </div>
+          </nav>
+        ) : null}
+
+        <div className="profile-view-pane">
       {hasMedia ? (
         <div className={`profile-view-toolbar${selectMode ? ' is-selecting' : ''}`}>
           {selectMode ? (
@@ -1893,6 +2168,27 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
                   : 'Click items to select · Shift+click for a range'}
               </span>
               <span className="profile-view-selectbar-spacer" />
+              {selectedPosts.length > 0 ? (
+                <>
+                  {profileCollections.map((collection) => (
+                    <button
+                      className="ghost-button queue-icon-button"
+                      key={collection.id}
+                      onClick={() => void addSelectionToProfileCollection(collection.id)}
+                      type="button"
+                    >
+                      Add to {collection.name}
+                    </button>
+                  ))}
+                  <button
+                    className="ghost-button queue-icon-button"
+                    onClick={() => void createProfileCollection()}
+                    type="button"
+                  >
+                    New collection…
+                  </button>
+                </>
+              ) : null}
               <button
                 className="ghost-button queue-icon-button"
                 onClick={() => setSelectedKeys(new Set(sortedPosts.map(postKey)))}
@@ -2010,41 +2306,6 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
                     </>
                   )}
                 </div>
-                {sections.length > 1 ? (
-                  <div className="profile-view-sections" role="group" aria-label="Section filter">
-                    <button
-                      className={sectionFilter === SECTION_FILTER_ALL ? 'is-active' : ''}
-                      onClick={() => setSectionFilter(SECTION_FILTER_ALL)}
-                      type="button"
-                      aria-pressed={sectionFilter === SECTION_FILTER_ALL}
-                      aria-label={`All ${sectionCounts.get(SECTION_FILTER_ALL) ?? 0}`}
-                    >
-                      <span className="profile-view-section-label">All</span>
-                      <span className="profile-view-section-count" aria-hidden="true">
-                        {sectionCounts.get(SECTION_FILTER_ALL) ?? 0}
-                      </span>
-                    </button>
-                    {sections.map((section) => {
-                      const label = gallery ? sectionLabel(gallery.provider, section) : section
-                      const count = sectionCounts.get(section) ?? 0
-                      return (
-                        <button
-                          key={section}
-                          className={sectionFilter === section ? 'is-active' : ''}
-                          onClick={() => setSectionFilter(section)}
-                          type="button"
-                          aria-pressed={sectionFilter === section}
-                          aria-label={`${label} ${count}`}
-                        >
-                          <span className="profile-view-section-label">{label}</span>
-                          <span className="profile-view-section-count" aria-hidden="true">
-                            {count}
-                          </span>
-                        </button>
-                      )
-                    })}
-                  </div>
-                ) : null}
                 {mediaTypeCounts.all > 0 ? (
                   <div
                     className="profile-view-mediatype"
@@ -2095,6 +2356,42 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
                 ) : null}
               </div>
               <div className="profile-view-toolbar-actions">
+              {activeProfileCollection ? (
+                <>
+                  <button
+                    className="ghost-button queue-icon-button"
+                    onClick={() => {
+                      void promoteCollectionToGlobal(activeProfileCollection.id).then(() => {
+                        setActiveCollectionId(undefined)
+                        void refreshProfileCollections()
+                      })
+                    }}
+                    title="Move this collection to the library, where it can hold media from any profile"
+                    type="button"
+                  >
+                    Promote
+                  </button>
+                  <button
+                    className="ghost-button queue-icon-button"
+                    onClick={() => {
+                      if (
+                        !window.confirm(
+                          `Delete "${activeProfileCollection.name}"? The media stays on disk.`,
+                        )
+                      ) {
+                        return
+                      }
+                      void deleteCollection(activeProfileCollection.id).then(() => {
+                        setActiveCollectionId(undefined)
+                        void refreshProfileCollections()
+                      })
+                    }}
+                    type="button"
+                  >
+                    Delete collection
+                  </button>
+                </>
+              ) : null}
               {isAuthorSection(sectionFilter) ? (
                 <div className={`profile-view-search${likesSearchOpen ? ' is-open' : ''}`}>
                   {likesSearchOpen ? (
@@ -2511,6 +2808,8 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
           )}
         </div>
       )}
+        </div>
+      </div>
 
       {confirmPosts && confirmPosts.length > 0 ? (
         <div

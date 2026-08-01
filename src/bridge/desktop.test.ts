@@ -981,6 +981,100 @@ describe('app version bridge', () => {
   })
 })
 
+describe('media index bridge', () => {
+  beforeEach(() => {
+    invokeMock.mockReset()
+    vi.resetModules()
+  })
+
+  it('parses the index status in both serialization shapes', async () => {
+    invokeMock.mockResolvedValueOnce({
+      counts: {
+        totalFiles: 1200,
+        total_bytes: 45_000_000,
+        pendingFingerprints: 300,
+        failed_fingerprints: 2,
+        missingOnDisk: 7,
+        indexed_sources: 18,
+      },
+      run: {
+        id: 'run-1',
+        status: 'running',
+        stage: 'reconcile',
+        scope_source_id: 'source-9',
+        sourcesTotal: 18,
+        sources_processed: 4,
+        filesIndexed: 900,
+        files_updated: 300,
+        filesMissing: 7,
+        hashes_inherited: 850,
+        currentSourceHandle: '@creator',
+        started_at: '2026-07-31T00:00:00Z',
+      },
+    })
+
+    const desktop = await import('./desktop')
+    const status = await desktop.loadMediaIndexStatus()
+
+    expect(status.counts.totalFiles).toBe(1200)
+    expect(status.counts.totalBytes).toBe(45_000_000)
+    expect(status.counts.pendingFingerprints).toBe(300)
+    expect(status.counts.failedFingerprints).toBe(2)
+    expect(status.counts.missingOnDisk).toBe(7)
+    expect(status.counts.indexedSources).toBe(18)
+    expect(status.run?.status).toBe('running')
+    expect(status.run?.scopeSourceId).toBe('source-9')
+    expect(status.run?.sourcesProcessed).toBe(4)
+    expect(status.run?.hashesInherited).toBe(850)
+    expect(status.run?.currentSourceHandle).toBe('@creator')
+    expect(status.run?.finishedAt).toBeUndefined()
+  })
+
+  it('reports an idle index when no run has ever happened', async () => {
+    invokeMock.mockResolvedValueOnce({ counts: {}, run: null })
+
+    const desktop = await import('./desktop')
+    const status = await desktop.loadMediaIndexStatus()
+
+    expect(status.counts.totalFiles).toBe(0)
+    expect(status.run).toBeUndefined()
+  })
+
+  it('parses the archived-here-only flag on gallery posts', async () => {
+    invokeMock.mockResolvedValueOnce({
+      sourceId: 'ig-1',
+      provider: 'instagram',
+      handle: '@creator',
+      profileUrl: 'https://www.instagram.com/creator/',
+      posts: [
+        { postId: 'a', mediaType: 'image', section: 'timeline', upstreamMissing: true, files: [] },
+        { postId: 'b', mediaType: 'image', section: 'timeline', upstream_missing: true, files: [] },
+        { postId: 'c', mediaType: 'image', section: 'timeline', files: [] },
+      ],
+    })
+
+    const desktop = await import('./desktop')
+    const gallery = await desktop.loadSourceMediaGallery('ig-1')
+
+    expect(gallery.posts[0].upstreamMissing).toBe(true)
+    expect(gallery.posts[1].upstreamMissing).toBe(true)
+    expect(gallery.posts[2].upstreamMissing).toBe(false)
+  })
+
+  it('scopes a scan to one profile when a source id is given', async () => {
+    invokeMock.mockResolvedValueOnce({ counts: {} })
+
+    const desktop = await import('./desktop')
+    await desktop.startMediaIndexScan('source-9')
+
+    expect(invokeMock).toHaveBeenCalledWith('start_media_index_scan', {
+      sourceId: 'source-9',
+      // Null lets the backend keep its default resource profile.
+      resourceProfile: null,
+    })
+  })
+})
+
 describe('loadSourceMediaGallery', () => {
   beforeEach(() => {
     invokeMock.mockReset()

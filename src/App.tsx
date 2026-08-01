@@ -20,6 +20,7 @@ import {
   openImportWindow,
   openProfileViewWindow,
   openRuntimeLogWindow,
+  openLibraryWindow,
   openWorkspaceHealthWindow,
   openSchedulerWindow,
   openSourceSyncQueueWindow,
@@ -978,6 +979,19 @@ function App() {
     }
   }
 
+  async function handleOpenLibrary() {
+    setOpenMenu(null)
+    setProfileContextMenu(undefined)
+    try {
+      await openLibraryWindow()
+    } catch (openError) {
+      const message = openError instanceof Error ? openError.message : String(openError)
+      if (typeof window !== 'undefined' && typeof window.alert === 'function') {
+        window.alert(`Failed to open the Library.\n${message}`)
+      }
+    }
+  }
+
   async function handleOpenSchedulerConsole() {
     setOpenMenu(null)
     setProfileContextMenu(undefined)
@@ -1587,6 +1601,14 @@ function App() {
               >
                 <span className="health-toolbar-dot" aria-hidden="true" />
                 Health{healthIssueCount > 0 ? ` · ${healthIssueCount}` : ''}
+              </button>
+              <button
+                className="toolbar-button"
+                onClick={() => void handleOpenLibrary()}
+                title="Browse everything you have archived, newest first"
+                type="button"
+              >
+                Library
               </button>
               <button className="toolbar-button" onClick={() => void handleOpenSchedulerConsole()} type="button">
                 Scheduler

@@ -619,6 +619,13 @@ export interface MediaGalleryPost {
   commentCount?: number
   shareCount?: number
   statsUpdatedAt?: string
+  /**
+   * The post is gone from the provider and now only exists in this archive.
+   * Only set after a whole-section scan confirmed the absence more than once.
+   */
+  upstreamMissing?: boolean
+  /** The post has a duplicate elsewhere (story↔feed, or another provider). */
+  hasVariants?: boolean
   files: MediaGalleryFile[]
   /** Slideshow/carousel soundtrack (TikTok photo-mode), when present on disk. */
   audioRelativePath?: string
@@ -960,6 +967,13 @@ export interface SourceProfile {
   createdAt?: string
   importerId?: string
   importedAt?: string
+  /**
+   * Stable id of the profile owner on the provider. Survives a handle change
+   * and is what tells a rename apart from a handle somebody else took over.
+   */
+  providerUserId?: string
+  /** Cross-provider person this profile belongs to, when linked. */
+  identityId?: string
 }
 
 export interface QueueSourceReference {
@@ -1243,6 +1257,226 @@ export interface MediaDedupeScanResult {
   finishedAt?: string
   exactGroups: MediaDedupeGroup[]
   similarGroups: MediaDedupeGroup[]
+}
+
+export interface MediaVariantMember {
+  mediaId: string
+  role: 'canonical' | 'variant'
+  sourceId: string
+  provider: string
+  handle: string
+  mediaSection: string
+  relativePath: string
+  sizeBytes: number
+}
+
+/** The same content in more than one place: story↔feed, or two providers. */
+export interface MediaVariantGroup {
+  id: string
+  scope: 'intra_source' | 'cross_source'
+  identityId?: string
+  canonicalMediaId?: string
+  matchKind: string
+  confidence: number
+  policyApplied: string
+  reviewed: boolean
+  createdAt: string
+  members: MediaVariantMember[]
+}
+
+export interface LibraryProviderBreakdown {
+  provider: string
+  files: number
+  bytes: number
+  sources: number
+}
+
+export interface LibraryProfileUsage {
+  sourceId: string
+  provider: string
+  handle: string
+  files: number
+  bytes: number
+  lastCapturedAt?: number
+}
+
+export interface LibraryGrowthPoint {
+  month: string
+  files: number
+  bytes: number
+}
+
+/** A profile with nothing new — and whether that is a bug or just quiet. */
+export interface LibraryStalledProfile {
+  sourceId: string
+  provider: string
+  handle: string
+  reason: 'sync_failing' | 'not_posting'
+  daysSinceLastMedia?: number
+  lastSyncStatus?: string
+  syncProblemCode?: string
+}
+
+export interface LibraryDashboard {
+  totalFiles: number
+  totalBytes: number
+  totalSources: number
+  upstreamMissing: number
+  pendingFingerprints: number
+  variantGroups: number
+  variantReclaimableBytes: number
+  providers: LibraryProviderBreakdown[]
+  topProfiles: LibraryProfileUsage[]
+  growth: LibraryGrowthPoint[]
+  stalledProfiles: LibraryStalledProfile[]
+}
+
+/** A curated grouping of media. Scope decides where it shows, kind how it fills. */
+export interface Collection {
+  id: string
+  kind: 'manual' | 'smart'
+  scope: 'global' | 'source' | 'identity'
+  scopeRefId?: string
+  name: string
+  description?: string
+  color?: string
+  /** Serialized MediaTimelineFilter, for smart collections. */
+  ruleJson?: string
+  coverMediaId?: string
+  pinned: boolean
+  itemCount: number
+  createdAt: string
+  updatedAt: string
+}
+
+export interface CollectionUpsert {
+  id?: string
+  kind?: 'manual' | 'smart'
+  scope?: 'global' | 'source' | 'identity'
+  scopeRefId?: string
+  name: string
+  description?: string
+  color?: string
+  ruleJson?: string
+  pinned?: boolean
+}
+
+/** One entry of the aggregated timeline: a post, files collapsed into a card. */
+export interface MediaTimelineItem {
+  id: string
+  sourceId: string
+  provider: string
+  handle: string
+  identityId?: string
+  postKey?: string
+  mediaType: string
+  mediaSection: string
+  capturedAt?: number
+  downloadedAt?: number
+  absolutePath: string
+  relativePath: string
+  fileCount: number
+  sizeBytes: number
+  upstreamMissing: boolean
+}
+
+export interface MediaTimelineFilter {
+  providers?: string[]
+  sourceIds?: string[]
+  identityIds?: string[]
+  sections?: string[]
+  mediaType?: string
+  capturedFrom?: number
+  capturedTo?: number
+  upstreamMissingOnly?: boolean
+  unseenOnly?: boolean
+  /** Restricts to the members of a manual collection. */
+  collectionId?: string
+}
+
+/** Keyset cursor — offset pagination would drift as new media lands on top. */
+export interface MediaTimelineCursor {
+  capturedAt?: number
+  id: string
+}
+
+export interface MediaTimelinePage {
+  items: MediaTimelineItem[]
+  nextCursor?: MediaTimelineCursor
+  newSinceLastVisit: number
+  lastSeenAt?: string
+}
+
+/** A person, above the profile level — the same human across providers. */
+export interface Identity {
+  id: string
+  displayName: string
+  notes?: string
+  avatarSourceId?: string
+  sourceIds: string[]
+  createdAt: string
+  updatedAt: string
+}
+
+/** A profile that looks like it belongs to an identity, and why. */
+export interface IdentityLinkSuggestion {
+  sourceId: string
+  provider: string
+  handle: string
+  /** `same_handle` — the handle matches another provider's profile exactly. */
+  reason: string
+  matchedSourceId: string
+  matchedProvider: string
+}
+
+/** One handle a tracked profile has answered to. */
+export interface SourceHandleHistoryEntry {
+  handle: string
+  providerUserId?: string
+  firstSeenAt: string
+  lastSeenAt: string
+}
+
+/** Aggregate state of the canonical media index. */
+export interface MediaIndexCounts {
+  totalFiles: number
+  totalBytes: number
+  /** Rows still waiting for a fingerprint (sha256 + perceptual hashes). */
+  pendingFingerprints: number
+  failedFingerprints: number
+  /** Indexed rows whose file is no longer on disk. */
+  missingOnDisk: number
+  indexedSources: number
+}
+
+/** A background indexing pass. Progress is counted in profiles, not files. */
+export interface MediaIndexRun {
+  id: string
+  status: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled'
+  stage: 'inventory' | 'reconcile' | 'fingerprint' | 'done'
+  scopeSourceId?: string
+  sourcesTotal: number
+  sourcesProcessed: number
+  filesIndexed: number
+  filesUpdated: number
+  filesMissing: number
+  hashesInherited: number
+  /** Fingerprint backlog: the long stage, tracked apart from the profile walk. */
+  fingerprintsTotal: number
+  fingerprintsDone: number
+  fingerprintStartedAt?: string
+  /** quiet | balanced | fast — how much of the machine indexing may use. */
+  resourceProfile: string
+  currentSourceHandle?: string
+  error?: string
+  startedAt: string
+  finishedAt?: string
+}
+
+export interface MediaIndexStatus {
+  counts: MediaIndexCounts
+  /** The active run, or the most recent finished one when idle. */
+  run?: MediaIndexRun
 }
 
 export interface MediaDedupeEngineStatus {

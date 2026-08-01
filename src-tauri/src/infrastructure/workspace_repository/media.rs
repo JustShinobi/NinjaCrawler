@@ -327,6 +327,8 @@ pub fn media_thumbnail_source_root(source_id: &str) -> Result<PathBuf, String> {
             created_at: None,
             importer_id: None,
             imported_at: None,
+            provider_user_id: None,
+            identity_id: None,
         };
         resolved_source_media_output_root_with_connection(connection, layout, &source)
     })
@@ -1143,6 +1145,39 @@ pub(super) fn upsert_provider_sync_media_ledger_entries(
                 ],
             )
             .map_err(|error| error.to_string())?;
+
+        // Best-effort by design: the canonical index is derived state, and a
+        // failure to register a row must never fail a sync that already put the
+        // file on disk. The indexing run reconciles whatever is missed here.
+        if let Err(error) = upsert_media_index_entry(
+            connection,
+            provider,
+            source_id,
+            &MediaIndexEntry {
+                relative_path: &relative_path,
+                absolute_path: &media.file_path,
+                media_type: &media.media_type,
+                media_section: &media.media_section,
+                provider_media_key: Some(&media.provider_media_key),
+                provider_post_key: Some(media.provider_post_key.as_str())
+                    .filter(|value| !value.trim().is_empty()),
+                captured_at: media.captured_at_timestamp,
+            },
+            timestamp,
+        ) {
+            let _ = runtime_log::append_workspace(
+                "media_index",
+                "warn",
+                RuntimeLogAnchor {
+                    account_id: Some(account_id),
+                    provider: Some(provider),
+                    source_id: Some(source_id),
+                    source_handle: Some(source_handle),
+                },
+                "Failed to register downloaded media in the media index.",
+                Some(error),
+            );
+        }
     }
     Ok(())
 }

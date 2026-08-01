@@ -96,7 +96,20 @@ import type {
   MediaDedupeResultPage,
   MediaDedupeScanResult,
   MediaDedupeSummaryStatus,
+  Collection,
+  CollectionUpsert,
+  Identity,
+  LibraryDashboard,
+  MediaVariantGroup,
+  IdentityLinkSuggestion,
+  MediaIndexRun,
+  MediaIndexStatus,
+  MediaTimelineCursor,
+  MediaTimelineFilter,
+  MediaTimelineItem,
+  MediaTimelinePage,
   QueueReferenceData,
+  SourceHandleHistoryEntry,
   SchedulerSet,
   SchedulerGroup,
   SchedulerGroupUpsert,
@@ -162,6 +175,7 @@ const DESKTOP_SOURCE_DELETE_QUEUE_CHANGED_EVENT_NAME = 'runtime://source-delete-
 const DESKTOP_MEDIA_PATH_MIGRATION_QUEUE_CHANGED_EVENT_NAME = 'runtime://media-path-migration-queue-changed'
 const DESKTOP_MEDIA_DEDUPE_STATUS_CHANGED_EVENT_NAME = 'media-dedupe://status-changed'
 const DESKTOP_MEDIA_DEDUPE_RESULTS_CHANGED_EVENT_NAME = 'media-dedupe://results-changed'
+const DESKTOP_MEDIA_INDEX_STATUS_CHANGED_EVENT_NAME = 'media-index://status-changed'
 const DESKTOP_IMPORT_QUEUE_CHANGED_EVENT_NAME = 'runtime://import-queue-changed'
 const DESKTOP_CONNECTOR_RUNTIME_CHANGED_EVENT_NAME = 'runtime://connector-runtime-changed'
 const DESKTOP_ACCOUNTS_WINDOW_INTENT_EVENT_NAME = 'runtime://accounts-window-intent'
@@ -622,6 +636,8 @@ function normalizeSourceProfile(value: unknown): SourceProfile | null {
     syncProblemCode: stringValue(value, ['syncProblemCode', 'sync_problem_code']) || undefined,
     syncProblemMessage: stringValue(value, ['syncProblemMessage', 'sync_problem_message']) || undefined,
     syncProblemAt: optionalStringValue(value, ['syncProblemAt', 'sync_problem_at']),
+    providerUserId: optionalStringValue(value, ['providerUserId', 'provider_user_id']),
+    identityId: optionalStringValue(value, ['identityId', 'identity_id']),
   }
 }
 
@@ -2512,6 +2528,421 @@ export async function revealAppLogFile(path: string): Promise<void> {
   await invoke<void>('reveal_app_log_file', { path })
 }
 
+export async function loadLibraryDashboard(): Promise<LibraryDashboard> {
+  return normalizeLibraryDashboard(await invoke<unknown>('load_library_dashboard'))
+}
+
+function normalizeLibraryDashboard(raw: unknown): LibraryDashboard {
+  const value = isRecord(raw) ? raw : {}
+  return {
+    totalFiles: numberValue(value, ['totalFiles', 'total_files'], 0),
+    totalBytes: numberValue(value, ['totalBytes', 'total_bytes'], 0),
+    totalSources: numberValue(value, ['totalSources', 'total_sources'], 0),
+    upstreamMissing: numberValue(value, ['upstreamMissing', 'upstream_missing'], 0),
+    pendingFingerprints: numberValue(value, ['pendingFingerprints', 'pending_fingerprints'], 0),
+    variantGroups: numberValue(value, ['variantGroups', 'variant_groups'], 0),
+    variantReclaimableBytes: numberValue(
+      value,
+      ['variantReclaimableBytes', 'variant_reclaimable_bytes'],
+      0,
+    ),
+    providers: arrayValue(value, ['providers']).flatMap((entry) => {
+      if (!isRecord(entry)) return []
+      return [{
+        provider: stringValue(entry, ['provider'], ''),
+        files: numberValue(entry, ['files'], 0),
+        bytes: numberValue(entry, ['bytes'], 0),
+        sources: numberValue(entry, ['sources'], 0),
+      }]
+    }),
+    topProfiles: arrayValue(value, ['topProfiles', 'top_profiles']).flatMap((entry) => {
+      if (!isRecord(entry)) return []
+      return [{
+        sourceId: stringValue(entry, ['sourceId', 'source_id'], ''),
+        provider: stringValue(entry, ['provider'], ''),
+        handle: stringValue(entry, ['handle'], ''),
+        files: numberValue(entry, ['files'], 0),
+        bytes: numberValue(entry, ['bytes'], 0),
+        lastCapturedAt: optionalNumberValue(entry, ['lastCapturedAt', 'last_captured_at']),
+      }]
+    }),
+    growth: arrayValue(value, ['growth']).flatMap((entry) => {
+      if (!isRecord(entry)) return []
+      return [{
+        month: stringValue(entry, ['month'], ''),
+        files: numberValue(entry, ['files'], 0),
+        bytes: numberValue(entry, ['bytes'], 0),
+      }]
+    }),
+    stalledProfiles: arrayValue(value, ['stalledProfiles', 'stalled_profiles']).flatMap((entry) => {
+      if (!isRecord(entry)) return []
+      return [{
+        sourceId: stringValue(entry, ['sourceId', 'source_id'], ''),
+        provider: stringValue(entry, ['provider'], ''),
+        handle: stringValue(entry, ['handle'], ''),
+        reason: enumValue(
+          pick(entry, 'reason'),
+          ['sync_failing', 'not_posting'] as const,
+          'not_posting',
+        ),
+        daysSinceLastMedia: optionalNumberValue(entry, ['daysSinceLastMedia', 'days_since_last_media']),
+        lastSyncStatus: optionalStringValue(entry, ['lastSyncStatus', 'last_sync_status']),
+        syncProblemCode: optionalStringValue(entry, ['syncProblemCode', 'sync_problem_code']),
+      }]
+    }),
+  }
+}
+
+export async function loadVariantGroups(limit?: number): Promise<MediaVariantGroup[]> {
+  const raw = await invoke<unknown>('load_variant_groups', { limit: limit ?? null })
+  return (Array.isArray(raw) ? raw : []).flatMap((entry) => {
+    if (!isRecord(entry)) return []
+    return [{
+      id: stringValue(entry, ['id'], ''),
+      scope: enumValue(
+        pick(entry, 'scope'),
+        ['intra_source', 'cross_source'] as const,
+        'intra_source',
+      ),
+      identityId: optionalStringValue(entry, ['identityId', 'identity_id']),
+      canonicalMediaId: optionalStringValue(entry, ['canonicalMediaId', 'canonical_media_id']),
+      matchKind: stringValue(entry, ['matchKind', 'match_kind'], ''),
+      confidence: numberValue(entry, ['confidence'], 0),
+      policyApplied: stringValue(entry, ['policyApplied', 'policy_applied'], 'link_only'),
+      reviewed: booleanValue(entry, ['reviewed'], false),
+      createdAt: stringValue(entry, ['createdAt', 'created_at'], ''),
+      members: arrayValue(entry, ['members']).flatMap((member) => {
+        if (!isRecord(member)) return []
+        return [{
+          mediaId: stringValue(member, ['mediaId', 'media_id'], ''),
+          role: enumValue(pick(member, 'role'), ['canonical', 'variant'] as const, 'variant'),
+          sourceId: stringValue(member, ['sourceId', 'source_id'], ''),
+          provider: stringValue(member, ['provider'], ''),
+          handle: stringValue(member, ['handle'], ''),
+          mediaSection: stringValue(member, ['mediaSection', 'media_section'], ''),
+          relativePath: stringValue(member, ['relativePath', 'relative_path'], ''),
+          sizeBytes: numberValue(member, ['sizeBytes', 'size_bytes'], 0),
+        }]
+      }),
+    }]
+  })
+}
+
+export async function dismissVariantGroup(groupId: string): Promise<void> {
+  await invoke<void>('dismiss_variant_group', { groupId })
+}
+
+function normalizeCollection(raw: unknown): Collection | undefined {
+  if (!isRecord(raw)) return undefined
+  const id = stringValue(raw, ['id'], '')
+  if (id.length === 0) return undefined
+  return {
+    id,
+    kind: enumValue(pick(raw, 'kind'), ['manual', 'smart'] as const, 'manual'),
+    scope: enumValue(pick(raw, 'scope'), ['global', 'source', 'identity'] as const, 'global'),
+    scopeRefId: optionalStringValue(raw, ['scopeRefId', 'scope_ref_id']),
+    name: stringValue(raw, ['name'], ''),
+    description: optionalStringValue(raw, ['description']),
+    color: optionalStringValue(raw, ['color']),
+    ruleJson: optionalStringValue(raw, ['ruleJson', 'rule_json']),
+    coverMediaId: optionalStringValue(raw, ['coverMediaId', 'cover_media_id']),
+    pinned: booleanValue(raw, ['pinned'], false),
+    itemCount: numberValue(raw, ['itemCount', 'item_count'], 0),
+    createdAt: stringValue(raw, ['createdAt', 'created_at'], ''),
+    updatedAt: stringValue(raw, ['updatedAt', 'updated_at'], ''),
+  }
+}
+
+export async function listCollections(
+  scope?: 'global' | 'source' | 'identity',
+  scopeRefId?: string,
+): Promise<Collection[]> {
+  const raw = await invoke<unknown>('list_collections', {
+    scope: scope ?? null,
+    scopeRefId: scopeRefId ?? null,
+  })
+  return (Array.isArray(raw) ? raw : []).flatMap((value) => {
+    const collection = normalizeCollection(value)
+    return collection ? [collection] : []
+  })
+}
+
+export async function upsertCollection(input: CollectionUpsert): Promise<Collection | undefined> {
+  return normalizeCollection(await invoke<unknown>('upsert_collection', { input }))
+}
+
+export async function deleteCollection(collectionId: string): Promise<void> {
+  await invoke<void>('delete_collection', { collectionId })
+}
+
+export async function promoteCollectionToGlobal(collectionId: string): Promise<Collection | undefined> {
+  return normalizeCollection(await invoke<unknown>('promote_collection_to_global', { collectionId }))
+}
+
+export async function addProfileMediaToCollection(
+  collectionId: string,
+  sourceId: string,
+  relativePaths: string[],
+): Promise<number> {
+  const raw = await invoke<unknown>('add_profile_media_to_collection', {
+    collectionId,
+    sourceId,
+    relativePaths,
+  })
+  return typeof raw === 'number' ? raw : 0
+}
+
+export async function addTimelineItemsToCollection(
+  collectionId: string,
+  itemIds: string[],
+): Promise<number> {
+  const raw = await invoke<unknown>('add_timeline_items_to_collection', { collectionId, itemIds })
+  return typeof raw === 'number' ? raw : 0
+}
+
+export async function removeTimelineItemsFromCollection(
+  collectionId: string,
+  itemIds: string[],
+): Promise<number> {
+  const raw = await invoke<unknown>('remove_timeline_items_from_collection', {
+    collectionId,
+    itemIds,
+  })
+  return typeof raw === 'number' ? raw : 0
+}
+
+export async function loadCollectionRelativePaths(
+  collectionId: string,
+  sourceId: string,
+): Promise<string[]> {
+  const raw = await invoke<unknown>('load_collection_relative_paths', { collectionId, sourceId })
+  return (Array.isArray(raw) ? raw : []).filter((value): value is string => typeof value === 'string')
+}
+
+export async function loadCollectionTimeline(
+  collectionId: string,
+  cursor?: MediaTimelineCursor,
+  limit?: number,
+): Promise<MediaTimelinePage> {
+  const raw = await invoke<unknown>('load_collection_timeline', {
+    collectionId,
+    cursor: cursor ?? null,
+    limit: limit ?? null,
+  })
+  return normalizeTimelinePage(raw)
+}
+
+function normalizeTimelineItem(raw: unknown): MediaTimelineItem | undefined {
+  if (!isRecord(raw)) return undefined
+  const id = stringValue(raw, ['id'], '')
+  if (id.length === 0) return undefined
+  return {
+    id,
+    sourceId: stringValue(raw, ['sourceId', 'source_id'], ''),
+    provider: stringValue(raw, ['provider'], ''),
+    handle: stringValue(raw, ['handle'], ''),
+    identityId: optionalStringValue(raw, ['identityId', 'identity_id']),
+    postKey: optionalStringValue(raw, ['postKey', 'post_key']),
+    mediaType: stringValue(raw, ['mediaType', 'media_type'], 'image'),
+    mediaSection: stringValue(raw, ['mediaSection', 'media_section'], ''),
+    capturedAt: optionalNumberValue(raw, ['capturedAt', 'captured_at']),
+    downloadedAt: optionalNumberValue(raw, ['downloadedAt', 'downloaded_at']),
+    absolutePath: stringValue(raw, ['absolutePath', 'absolute_path'], ''),
+    relativePath: stringValue(raw, ['relativePath', 'relative_path'], ''),
+    fileCount: numberValue(raw, ['fileCount', 'file_count'], 1),
+    sizeBytes: numberValue(raw, ['sizeBytes', 'size_bytes'], 0),
+    upstreamMissing: booleanValue(raw, ['upstreamMissing', 'upstream_missing'], false),
+  }
+}
+
+export async function loadMediaTimeline(
+  filter: MediaTimelineFilter = {},
+  cursor?: MediaTimelineCursor,
+  limit?: number,
+): Promise<MediaTimelinePage> {
+  return normalizeTimelinePage(
+    await invoke<unknown>('load_media_timeline', {
+      request: { filter, cursor: cursor ?? null, limit: limit ?? null },
+    }),
+  )
+}
+
+function normalizeTimelinePage(raw: unknown): MediaTimelinePage {
+  const value = isRecord(raw) ? raw : {}
+  const cursorValue = pick(value, 'nextCursor', 'next_cursor')
+  return {
+    items: arrayValue(value, ['items']).flatMap((item) => {
+      const parsed = normalizeTimelineItem(item)
+      return parsed ? [parsed] : []
+    }),
+    nextCursor: isRecord(cursorValue)
+      ? {
+        capturedAt: optionalNumberValue(cursorValue, ['capturedAt', 'captured_at']),
+        id: stringValue(cursorValue, ['id'], ''),
+      }
+      : undefined,
+    newSinceLastVisit: numberValue(value, ['newSinceLastVisit', 'new_since_last_visit'], 0),
+    lastSeenAt: optionalStringValue(value, ['lastSeenAt', 'last_seen_at']),
+  }
+}
+
+export async function markTimelineSeen(): Promise<string> {
+  const raw = await invoke<unknown>('mark_timeline_seen')
+  return typeof raw === 'string' ? raw : ''
+}
+
+export async function openLibraryWindow(): Promise<void> {
+  await invoke<void>('open_library_window')
+}
+
+function normalizeIdentity(raw: unknown): Identity | undefined {
+  if (!isRecord(raw)) return undefined
+  const id = stringValue(raw, ['id'], '')
+  if (id.length === 0) return undefined
+  return {
+    id,
+    displayName: stringValue(raw, ['displayName', 'display_name'], ''),
+    notes: optionalStringValue(raw, ['notes']),
+    avatarSourceId: optionalStringValue(raw, ['avatarSourceId', 'avatar_source_id']),
+    sourceIds: arrayValue(raw, ['sourceIds', 'source_ids']).filter(
+      (value): value is string => typeof value === 'string',
+    ),
+    createdAt: stringValue(raw, ['createdAt', 'created_at'], ''),
+    updatedAt: stringValue(raw, ['updatedAt', 'updated_at'], ''),
+  }
+}
+
+export async function listIdentities(): Promise<Identity[]> {
+  const raw = await invoke<unknown>('list_identities')
+  return (Array.isArray(raw) ? raw : []).flatMap((value) => {
+    const identity = normalizeIdentity(value)
+    return identity ? [identity] : []
+  })
+}
+
+export async function createIdentity(displayName: string, notes?: string): Promise<Identity | undefined> {
+  return normalizeIdentity(await invoke<unknown>('create_identity', { displayName, notes }))
+}
+
+export async function deleteIdentity(identityId: string): Promise<void> {
+  await invoke<void>('delete_identity', { identityId })
+}
+
+export async function linkSourceToIdentity(sourceId: string, identityId?: string): Promise<void> {
+  await invoke<void>('link_source_to_identity', { sourceId, identityId: identityId ?? null })
+}
+
+export async function suggestIdentityLinks(): Promise<IdentityLinkSuggestion[]> {
+  const raw = await invoke<unknown>('suggest_identity_links')
+  return (Array.isArray(raw) ? raw : []).flatMap((value) => {
+    if (!isRecord(value)) return []
+    return [{
+      sourceId: stringValue(value, ['sourceId', 'source_id'], ''),
+      provider: stringValue(value, ['provider'], ''),
+      handle: stringValue(value, ['handle'], ''),
+      reason: stringValue(value, ['reason'], ''),
+      matchedSourceId: stringValue(value, ['matchedSourceId', 'matched_source_id'], ''),
+      matchedProvider: stringValue(value, ['matchedProvider', 'matched_provider'], ''),
+    }]
+  })
+}
+
+export async function loadSourceHandleHistory(sourceId: string): Promise<SourceHandleHistoryEntry[]> {
+  const raw = await invoke<unknown>('load_source_handle_history', { sourceId })
+  return (Array.isArray(raw) ? raw : []).flatMap((value) => {
+    if (!isRecord(value)) return []
+    return [{
+      handle: stringValue(value, ['handle'], ''),
+      providerUserId: optionalStringValue(value, ['providerUserId', 'provider_user_id']),
+      firstSeenAt: stringValue(value, ['firstSeenAt', 'first_seen_at'], ''),
+      lastSeenAt: stringValue(value, ['lastSeenAt', 'last_seen_at'], ''),
+    }]
+  })
+}
+
+function normalizeMediaIndexRun(raw: unknown): MediaIndexRun | undefined {
+  if (!isRecord(raw)) return undefined
+  const id = stringValue(raw, ['id'], '')
+  if (id.length === 0) return undefined
+  return {
+    id,
+    status: enumValue(
+      pick(raw, 'status'),
+      ['queued', 'running', 'completed', 'failed', 'cancelled'] as const,
+      'completed',
+    ),
+    stage: enumValue(
+      pick(raw, 'stage'),
+      ['inventory', 'reconcile', 'fingerprint', 'done'] as const,
+      'done',
+    ),
+    scopeSourceId: optionalStringValue(raw, ['scopeSourceId', 'scope_source_id']),
+    sourcesTotal: numberValue(raw, ['sourcesTotal', 'sources_total'], 0),
+    sourcesProcessed: numberValue(raw, ['sourcesProcessed', 'sources_processed'], 0),
+    filesIndexed: numberValue(raw, ['filesIndexed', 'files_indexed'], 0),
+    filesUpdated: numberValue(raw, ['filesUpdated', 'files_updated'], 0),
+    filesMissing: numberValue(raw, ['filesMissing', 'files_missing'], 0),
+    hashesInherited: numberValue(raw, ['hashesInherited', 'hashes_inherited'], 0),
+    fingerprintsTotal: numberValue(raw, ['fingerprintsTotal', 'fingerprints_total'], 0),
+    fingerprintsDone: numberValue(raw, ['fingerprintsDone', 'fingerprints_done'], 0),
+    fingerprintStartedAt: optionalStringValue(raw, [
+      'fingerprintStartedAt',
+      'fingerprint_started_at',
+    ]),
+    resourceProfile: stringValue(raw, ['resourceProfile', 'resource_profile'], 'balanced'),
+    currentSourceHandle: optionalStringValue(raw, ['currentSourceHandle', 'current_source_handle']),
+    error: optionalStringValue(raw, ['error']),
+    startedAt: stringValue(raw, ['startedAt', 'started_at'], ''),
+    finishedAt: optionalStringValue(raw, ['finishedAt', 'finished_at']),
+  }
+}
+
+function normalizeMediaIndexStatus(raw: unknown): MediaIndexStatus {
+  const value = isRecord(raw) ? raw : {}
+  const countsValue = isRecord(pick(value, 'counts')) ? pick(value, 'counts') as UnknownRecord : {}
+  return {
+    counts: {
+      totalFiles: numberValue(countsValue, ['totalFiles', 'total_files'], 0),
+      totalBytes: numberValue(countsValue, ['totalBytes', 'total_bytes'], 0),
+      pendingFingerprints: numberValue(countsValue, ['pendingFingerprints', 'pending_fingerprints'], 0),
+      failedFingerprints: numberValue(countsValue, ['failedFingerprints', 'failed_fingerprints'], 0),
+      missingOnDisk: numberValue(countsValue, ['missingOnDisk', 'missing_on_disk'], 0),
+      indexedSources: numberValue(countsValue, ['indexedSources', 'indexed_sources'], 0),
+    },
+    run: normalizeMediaIndexRun(pick(value, 'run')),
+  }
+}
+
+export async function loadMediaIndexStatus(): Promise<MediaIndexStatus> {
+  return normalizeMediaIndexStatus(await invoke<unknown>('media_index_status'))
+}
+
+export async function startMediaIndexScan(
+  sourceId?: string,
+  resourceProfile?: 'quiet' | 'balanced' | 'fast',
+): Promise<MediaIndexStatus> {
+  return normalizeMediaIndexStatus(
+    await invoke<unknown>('start_media_index_scan', {
+      sourceId,
+      resourceProfile: resourceProfile ?? null,
+    }),
+  )
+}
+
+export async function resumeMediaFingerprints(
+  resourceProfile?: 'quiet' | 'balanced' | 'fast',
+): Promise<MediaIndexStatus> {
+  return normalizeMediaIndexStatus(
+    await invoke<unknown>('resume_media_fingerprints', {
+      resourceProfile: resourceProfile ?? null,
+    }),
+  )
+}
+
+export async function cancelMediaIndexScan(): Promise<MediaIndexStatus> {
+  return normalizeMediaIndexStatus(await invoke<unknown>('cancel_media_index_scan'))
+}
+
 export async function loadMediaDedupeStatus(): Promise<MediaDedupeJobStatus> {
   return normalizeMediaDedupeJobStatus(await invoke<unknown>('media_dedupe_status'))
 }
@@ -2605,6 +3036,7 @@ export async function subscribeToDesktopRuntimeEvents(handlers: {
   onMediaPathMigrationQueueChanged?: (status: MediaPathMigrationQueueStatus) => void
   onMediaDedupeStatusChanged?: (status: MediaDedupeSummaryStatus) => void
   onMediaDedupeResultsChanged?: () => void
+  onMediaIndexStatusChanged?: (status: MediaIndexStatus) => void
   onImportQueueChanged?: (status: ImportQueueStatus) => void
   onConnectorRuntimeChanged?: () => void
   onRuntimeLogAppended?: (entry: RuntimeLogEntry) => void
@@ -2649,6 +3081,9 @@ export async function subscribeToDesktopRuntimeEvents(handlers: {
     }),
     listen(DESKTOP_MEDIA_DEDUPE_RESULTS_CHANGED_EVENT_NAME, () => {
       handlers.onMediaDedupeResultsChanged?.()
+    }),
+    listen(DESKTOP_MEDIA_INDEX_STATUS_CHANGED_EVENT_NAME, (event) => {
+      handlers.onMediaIndexStatusChanged?.(normalizeMediaIndexStatus(event.payload))
     }),
     listen(DESKTOP_IMPORT_QUEUE_CHANGED_EVENT_NAME, (event) => {
       handlers.onImportQueueChanged?.(normalizeImportQueueStatus(event.payload))
@@ -3233,6 +3668,8 @@ function parseSourceMediaGallery(raw: unknown, sourceId: string): SourceMediaGal
       commentCount: optionalNumberValue(post, ['commentCount', 'comment_count']),
       shareCount: optionalNumberValue(post, ['shareCount', 'share_count']),
       statsUpdatedAt: optionalStringValue(post, ['statsUpdatedAt', 'stats_updated_at']),
+      upstreamMissing: booleanValue(post, ['upstreamMissing', 'upstream_missing'], false),
+      hasVariants: booleanValue(post, ['hasVariants', 'has_variants'], false),
       files: (Array.isArray(post.files) ? post.files : []).filter(isRecord).map((file) => ({
         relativePath: stringValue(file, ['relativePath', 'relative_path'], ''),
         absolutePath: stringValue(file, ['absolutePath', 'absolute_path'], ''),
