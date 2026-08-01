@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.30.0](https://github.com/JustShinobi/NinjaCrawler/compare/v0.29.0...v0.30.0) (2026-08-01)
+
+
+### Features
+
+* **library:** add a canonical media index and the Library window ([#115](https://github.com/JustShinobi/NinjaCrawler/issues/115)) ([1622a83](https://github.com/JustShinobi/NinjaCrawler/commit/1622a8311b3c31d0d0d0cbc4d62cb76d24383100))
+
+
+### Bug Fixes
+
+* resolve TikTok sync failures and thumbnail rendering issues ([#117](https://github.com/JustShinobi/NinjaCrawler/issues/117)) ([7026867](https://github.com/JustShinobi/NinjaCrawler/commit/702686792b053d13993582bef26128b5e17b24e4))
+
 ## [0.29.0](https://github.com/JustShinobi/NinjaCrawler/compare/v0.28.0...v0.29.0) (2026-07-31)
 
 
