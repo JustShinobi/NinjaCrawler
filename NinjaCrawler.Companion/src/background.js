@@ -1,4 +1,6 @@
 import {
+  addSource,
+  detectProfileFromContextMenu,
   detectProfileFromUrl,
   detectTargetFromUrl,
   downloadTarget,
@@ -14,10 +16,29 @@ import { captureAccountFromTab } from './accountCapture.js'
 const storyHookedTabs = new Set()
 const COMPANION_UPDATE_ALARM = 'ninjacrawler-companion-update'
 const COMPANION_UPDATE_PERIOD_MINUTES = 5
+const CONTEXT_MENU_ADD = 'ninjacrawler-add-profile'
+const CONTEXT_MENU_SYNC = 'ninjacrawler-sync-profile'
+const CONTEXT_MENU_STORY = 'ninjacrawler-download-instagram-story'
+const PROVIDER_DOCUMENT_PATTERNS = [
+  'https://instagram.com/*',
+  'https://*.instagram.com/*',
+  'https://x.com/*',
+  'https://*.x.com/*',
+  'https://twitter.com/*',
+  'https://*.twitter.com/*',
+  'https://tiktok.com/*',
+  'https://*.tiktok.com/*',
+]
+const PROVIDER_LINK_PATTERNS = [...PROVIDER_DOCUMENT_PATTERNS]
+const INSTAGRAM_DOCUMENT_PATTERNS = [
+  'https://instagram.com/*',
+  'https://*.instagram.com/*',
+]
 
 chrome.runtime.onInstalled.addListener(() => {
   void initializeBadgeFeedback()
   void initializeCompanionLiveReload()
+  initializeContextMenus()
 })
 
 chrome.runtime.onStartup.addListener(() => {
@@ -68,6 +89,10 @@ chrome.commands.onCommand.addListener((command, tab) => {
   void runActiveTabCommand(command, tab)
 })
 
+chrome.contextMenus.onClicked.addListener((info, tab) => {
+  void runContextMenuAction(info, tab)
+})
+
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.type === 'storyTargetChanged') {
     const tabId = sender.tab?.id
@@ -103,6 +128,33 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 // necessarily activating or updating the current tab. Refresh feedback now.
 void initializeBadgeFeedback()
 void initializeCompanionLiveReload()
+
+function initializeContextMenus() {
+  chrome.contextMenus.removeAll(() => {
+    if (chrome.runtime.lastError) return
+
+    chrome.contextMenus.create({
+      id: CONTEXT_MENU_ADD,
+      title: 'Add profile to NinjaCrawler',
+      contexts: ['link'],
+      documentUrlPatterns: PROVIDER_DOCUMENT_PATTERNS,
+      targetUrlPatterns: PROVIDER_LINK_PATTERNS,
+    })
+    chrome.contextMenus.create({
+      id: CONTEXT_MENU_SYNC,
+      title: 'Sync profile with NinjaCrawler',
+      contexts: ['link'],
+      documentUrlPatterns: PROVIDER_DOCUMENT_PATTERNS,
+      targetUrlPatterns: PROVIDER_LINK_PATTERNS,
+    })
+    chrome.contextMenus.create({
+      id: CONTEXT_MENU_STORY,
+      title: 'Download current Instagram story',
+      contexts: ['page', 'image', 'video'],
+      documentUrlPatterns: INSTAGRAM_DOCUMENT_PATTERNS,
+    })
+  })
+}
 
 async function initializeCompanionLiveReload() {
   await chrome.alarms.create(COMPANION_UPDATE_ALARM, {
@@ -307,13 +359,73 @@ async function runActiveTabCommand(command, commandTab) {
       await showCommandSuccess(tab.id, `Story ${target.storyId} queued.`)
     }
   } catch (error) {
-    await safeAction(() => chrome.action.setBadgeText({ tabId: tab.id, text: '!' }))
-    await safeAction(() => chrome.action.setBadgeBackgroundColor({ tabId: tab.id, color: '#b42318' }))
-    await safeAction(() => chrome.action.setTitle({
-      tabId: tab.id,
-      title: `NinjaCrawler Companion: ${error?.message || 'Command failed.'}`,
-    }))
+    await showCommandFailure(tab.id, error)
   }
+}
+
+async function runContextMenuAction(info, tab) {
+  if (!tab?.id) return
+
+  try {
+    const menuItemId = String(info.menuItemId)
+    if (menuItemId === CONTEXT_MENU_STORY) {
+      await downloadInstagramStoryFromContextMenu(info, tab)
+      return
+    }
+    if (menuItemId !== CONTEXT_MENU_ADD && menuItemId !== CONTEXT_MENU_SYNC) return
+
+    const detected = detectProfileFromContextMenu(info)
+    if (!detected) {
+      throw new Error('Right-click a supported Instagram, TikTok, or X/Twitter profile handle.')
+    }
+
+    const context = await loadContext(detected.url)
+    const existing = context.existingSource
+    if (menuItemId === CONTEXT_MENU_ADD) {
+      if (existing) {
+        await showCommandSuccess(tab.id, `${detected.handle} is already added.`)
+        return
+      }
+      await showCommandProgress(tab.id, '+', `Adding ${detected.handle}…`)
+      await addSource({
+        provider: detected.provider,
+        handle: detected.handle,
+        displayName: detected.displayName,
+      })
+      await showCommandSuccess(tab.id, `Sent ${detected.handle} to NinjaCrawler.`)
+      return
+    }
+
+    if (!existing) {
+      throw new Error(`${detected.handle} is not added to NinjaCrawler.`)
+    }
+    await showCommandProgress(tab.id, '↻', `Syncing ${detected.handle}…`)
+    await syncSource({ sourceId: existing.id })
+    await showCommandSuccess(tab.id, `Sync queued for ${detected.handle}.`)
+  } catch (error) {
+    await showCommandFailure(tab.id, error)
+  }
+}
+
+async function downloadInstagramStoryFromContextMenu(info, tab) {
+  await ensureStoryNetworkHook(tab)
+  const liveUrl = await resolveLiveTabUrl(tab, { preferredUrl: info.pageUrl })
+  const detected = detectProfileFromUrl(liveUrl)
+  const target = detectTargetFromUrl(liveUrl)
+  if (detected?.provider !== 'instagram' || target?.kind !== 'instagramStory') {
+    throw new Error('Open an Instagram story before using Download current story.')
+  }
+
+  const context = await loadContext(liveUrl)
+  const existing = context.existingSource
+  if (!existing) {
+    throw new Error(`${detected.handle} is not added to NinjaCrawler.`)
+  }
+
+  const resolvedTarget = context.detectedTarget ?? target
+  await showCommandProgress(tab.id, '↓', `Queueing story ${resolvedTarget.storyId}…`)
+  await downloadTarget({ sourceId: existing.id, target: resolvedTarget })
+  await showCommandSuccess(tab.id, `Story ${resolvedTarget.storyId} queued.`)
 }
 
 async function showCommandProgress(tabId, text, title) {
@@ -326,6 +438,15 @@ async function showCommandSuccess(tabId, title) {
   await safeAction(() => chrome.action.setBadgeText({ tabId, text: '✓' }))
   await safeAction(() => chrome.action.setBadgeBackgroundColor({ tabId, color: '#25835a' }))
   await safeAction(() => chrome.action.setTitle({ tabId, title: `NinjaCrawler Companion: ${title}` }))
+}
+
+async function showCommandFailure(tabId, error) {
+  await safeAction(() => chrome.action.setBadgeText({ tabId, text: '!' }))
+  await safeAction(() => chrome.action.setBadgeBackgroundColor({ tabId, color: '#b42318' }))
+  await safeAction(() => chrome.action.setTitle({
+    tabId,
+    title: `NinjaCrawler Companion: ${error?.message || 'Command failed.'}`,
+  }))
 }
 
 async function clearBadge(tabId) {

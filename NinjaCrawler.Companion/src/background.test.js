@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 
 const backgroundSource = readFileSync(new URL('./background.js', import.meta.url), 'utf8')
+const manifest = JSON.parse(readFileSync(new URL('../manifest.json', import.meta.url), 'utf8'))
 
 describe('Companion badge lifecycle', () => {
   it('refreshes active-tab feedback when the service worker starts', () => {
@@ -26,6 +27,29 @@ describe('Companion keyboard commands', () => {
   it('reports command failures through the extension badge', () => {
     expect(backgroundSource).toContain("text: '!'")
     expect(backgroundSource).toContain('Command failed.')
+  })
+})
+
+describe('Companion context menu', () => {
+  it('declares the Chrome context menu permission and registers click handling', () => {
+    expect(manifest.permissions).toContain('contextMenus')
+    expect(backgroundSource).toContain('initializeContextMenus()')
+    expect(backgroundSource).toContain('chrome.contextMenus.onClicked.addListener')
+  })
+
+  it('exposes add and sync for supported provider links', () => {
+    expect(backgroundSource).toContain("title: 'Add profile to NinjaCrawler'")
+    expect(backgroundSource).toContain("title: 'Sync profile with NinjaCrawler'")
+    expect(backgroundSource).toContain("contexts: ['link']")
+    expect(backgroundSource).toContain('targetUrlPatterns: PROVIDER_LINK_PATTERNS')
+    expect(backgroundSource).toContain('detectProfileFromContextMenu(info)')
+  })
+
+  it('downloads the live Instagram story through the existing target contract', () => {
+    expect(backgroundSource).toContain("title: 'Download current Instagram story'")
+    expect(backgroundSource).toContain('const liveUrl = await resolveLiveTabUrl(tab')
+    expect(backgroundSource).toContain("target?.kind !== 'instagramStory'")
+    expect(backgroundSource).toContain('downloadTarget({ sourceId: existing.id, target: resolvedTarget })')
   })
 })
 
