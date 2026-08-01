@@ -671,6 +671,54 @@ pub(super) fn persist_tiktok_user_id_hint(
         .map_err(|error| error.to_string())?;
     Ok(())
 }
+
+/// Guarda o `secUid` resolvido pelo WebView. Ao contrário do `user_id_hint`,
+/// sobrescreve o valor anterior: um `secUid` salvo que parou de listar é
+/// justamente o motivo de termos reaberto o WebView.
+pub(super) fn persist_tiktok_sec_uid_hint(
+    connection: &Connection,
+    source_id: &str,
+    sec_uid: &str,
+    timestamp: &str,
+) -> Result<(), String> {
+    let sec_uid = sec_uid.trim();
+    if sec_uid.is_empty() {
+        return Ok(());
+    }
+    let Some(json) = connection
+        .query_row(
+            "SELECT sync_options_json FROM source_profiles WHERE id = ?1 AND deleted_at IS NULL",
+            params![source_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?
+    else {
+        return Ok(());
+    };
+    let mut options =
+        serde_json::from_str::<SourceSyncOptions>(&json).unwrap_or_else(|_| SourceSyncOptions {
+            tiktok: Some(normalize_tiktok_source_sync_options(None)),
+            ..Default::default()
+        });
+    let tiktok = options
+        .tiktok
+        .get_or_insert_with(|| normalize_tiktok_source_sync_options(None));
+    if tiktok.sec_uid_hint.as_deref().map(str::trim) == Some(sec_uid) {
+        return Ok(());
+    }
+    tiktok.sec_uid_hint = Some(sec_uid.to_string());
+    let serialized = serialize_source_sync_options("tiktok", &options)?;
+    connection
+        .execute(
+            "UPDATE source_profiles SET sync_options_json = ?2, updated_at = ?3
+             WHERE id = ?1 AND deleted_at IS NULL",
+            params![source_id, serialized, timestamp],
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
 pub(super) fn source_sync_cancel_registry() -> &'static Mutex<HashMap<String, Arc<AtomicBool>>> {
     static REGISTRY: OnceLock<Mutex<HashMap<String, Arc<AtomicBool>>>> = OnceLock::new();
     REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
@@ -3474,6 +3522,32 @@ pub(super) fn execute_vsco_source_sync_with_connection(
     Ok(outcome)
 }
 
+/// Fallback do connector do TikTok: quando o yt-dlp não resolve o `secUid` do
+/// perfil, resolve-o pelo WebView autenticado da conta.
+fn resolve_tiktok_sec_uid_with_session<C>(
+    account_id: &str,
+    handle: &str,
+    is_cancelled: C,
+) -> tiktok_connector::TikTokSecUidOutcome
+where
+    C: Fn() -> bool,
+{
+    let app = match source_sync_runtime::registered_app_handle() {
+        Ok(app) => app,
+        // Sem WebView (headless/CLI) não há como contornar o desafio do WAF.
+        Err(_) => return tiktok_connector::TikTokSecUidOutcome::Unsupported,
+    };
+    match tiktok_timeline_runtime::resolve_sec_uid(&app, account_id, handle, is_cancelled) {
+        Ok(sec_uid) => tiktok_connector::TikTokSecUidOutcome::Resolved(sec_uid),
+        Err(tiktok_timeline_runtime::TikTokSecUidError::ProfileUnavailable(message)) => {
+            tiktok_connector::TikTokSecUidOutcome::ProfileUnavailable(message)
+        }
+        Err(tiktok_timeline_runtime::TikTokSecUidError::Failed(message)) => {
+            tiktok_connector::TikTokSecUidOutcome::Failed(message)
+        }
+    }
+}
+
 pub(super) fn execute_tiktok_source_sync_with_connection(
     connection: &Connection,
     layout: &StorageLayout,
@@ -3651,6 +3725,10 @@ pub(super) fn execute_tiktok_source_sync_with_connection(
             .user_id_hint
             .clone()
             .filter(|value| !value.trim().is_empty()),
+        sec_uid_hint: options
+            .sec_uid_hint
+            .clone()
+            .filter(|value| !value.trim().is_empty()),
     };
 
     let cancel_token = register_source_sync_cancel_token(&context.source.id);
@@ -3748,6 +3826,13 @@ pub(super) fn execute_tiktok_source_sync_with_connection(
                             .flatten()
                             .is_some()
                     },
+                    |fallback_handle| {
+                        resolve_tiktok_sec_uid_with_session(
+                            &context.account.id,
+                            fallback_handle,
+                            || cancel_token.load(Ordering::SeqCst),
+                        )
+                    },
                 )
             } else {
                 Ok(tiktok_connector::TikTokConnectorResult {
@@ -3762,6 +3847,8 @@ pub(super) fn execute_tiktok_source_sync_with_connection(
                     resolved_handle: None,
                     profile_unavailable: false,
                     profile_private: false,
+                    listing_blocked: None,
+                    resolved_sec_uid: None,
                     manifest_summary: tiktok_connector::TikTokManifestSummary::default(),
                 })
             };
@@ -3896,6 +3983,55 @@ pub(super) fn execute_tiktok_source_sync_with_connection(
                     );
                     return Ok(outcome);
                 }
+            }
+
+            // Listing bloqueado: nem o yt-dlp nem o fallback autenticado
+            // conseguiram enumerar a timeline, e o motivo não permite concluir
+            // nada sobre o perfil. Falha o sync sem marcar a fonte — marcá-la
+            // como indisponível aqui produziria um falso positivo de "conta
+            // banida" para perfis que estão apenas com o embed desligado.
+            if let Some(reason) = result.listing_blocked.as_deref() {
+                log_runtime_event(
+                    layout,
+                    "sync.profile",
+                    "warning",
+                    RuntimeLogAnchor {
+                        account_id: Some(&context.account.id),
+                        provider: Some(&context.source.provider),
+                        source_id: Some(&context.source.id),
+                        source_handle: Some(&context.source.handle),
+                    },
+                    format!("TikTok listing blocked for '@{handle}': {reason}"),
+                    None,
+                );
+                let summary = format!("TikTok listing blocked: {reason}");
+                let outcome = SourceSyncOutcome {
+                    tool: "internal.tiktok".to_string(),
+                    status: "failed".to_string(),
+                    summary: summary.clone(),
+                    command_preview: command_preview.clone(),
+                    manifest_summary_json: None,
+                    degraded_capabilities: Vec::new(),
+                    validation_error: Some(summary),
+                };
+                persist_source_sync_run(
+                    connection,
+                    context,
+                    &outcome,
+                    trigger,
+                    &started_at,
+                    &finished_at,
+                )?;
+                propagate_source_sync_account_health(connection, context, &outcome, &finished_at)?;
+                source_sync_runtime::report_source_sync_progress(
+                    &context.source.id,
+                    Some(100),
+                    Some("Listing blocked".to_string()),
+                    Some(outcome.summary.clone()),
+                    false,
+                    None,
+                );
+                return Ok(outcome);
             }
 
             // Perfil indisponível: o yt-dlp não resolveu o dono do perfil e não
@@ -4133,6 +4269,17 @@ pub(super) fn execute_tiktok_source_sync_with_connection(
                     Some(error),
                 ),
                 _ => {}
+            }
+
+            // Guardado assim que resolvido: o próximo sync lista direto por
+            // `tiktokuser:<secUid>`, sem reabrir o WebView.
+            if let Some(sec_uid) = result.resolved_sec_uid.as_deref() {
+                let _ = persist_tiktok_sec_uid_hint(
+                    connection,
+                    &context.source.id,
+                    sec_uid,
+                    &finished_at,
+                );
             }
 
             if let Some(user_id) = result.resolved_user_id.as_deref() {

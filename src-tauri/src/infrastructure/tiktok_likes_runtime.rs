@@ -23,7 +23,7 @@ use chrono::Utc;
 use uuid::Uuid;
 
 const LIKES_WINDOW_LABEL_PREFIX: &str = "tiktok-likes";
-const TIKTOK_HOME: &str = "https://www.tiktok.com/";
+pub(crate) const TIKTOK_HOME: &str = "https://www.tiktok.com/";
 const JAVASCRIPT_TIMEOUT: Duration = Duration::from_secs(10);
 const PAGE_READY_TIMEOUT: Duration = Duration::from_secs(45);
 const REQUEST_INACTIVITY_TIMEOUT: Duration = Duration::from_secs(180);
@@ -47,7 +47,7 @@ struct StoredSessionMetadata {
 }
 
 #[derive(Clone, Deserialize)]
-struct StoredCookie {
+pub(crate) struct StoredCookie {
     domain: String,
     name: String,
     value: String,
@@ -57,6 +57,15 @@ struct StoredCookie {
     secure: bool,
     #[serde(default, alias = "httpOnly", alias = "http_only")]
     http_only: bool,
+}
+
+/// Credenciais de uma conta TikTok prontas para alimentar um WebView. Usado
+/// tanto pela varredura de likes quanto pelo fallback de timeline.
+pub(crate) struct WebviewSession {
+    #[allow(dead_code)]
+    pub(crate) account_name: String,
+    pub(crate) user_agent: Option<String>,
+    pub(crate) cookies: Vec<StoredCookie>,
 }
 
 struct StoredSession {
@@ -261,16 +270,28 @@ fn create_likes_window(
     app: &AppHandle,
     session: &StoredSession,
 ) -> Result<WebviewWindow<Wry>, String> {
-    let label = format!("{LIKES_WINDOW_LABEL_PREFIX}-{}", session.account_id);
+    open_tiktok_window(
+        app,
+        format!("{LIKES_WINDOW_LABEL_PREFIX}-{}", session.account_id),
+        format!("TikTok liked videos — {}", session.account_name),
+        session.user_agent.clone(),
+        session.cookies.clone(),
+    )
+}
+
+/// Abre um WebView invisível já autenticado na sessão TikTok informada. Fecha
+/// uma janela anterior com o mesmo label para não acumular WebViews órfãos.
+pub(crate) fn open_tiktok_window(
+    app: &AppHandle,
+    label: String,
+    title: String,
+    user_agent: Option<String>,
+    cookies: Vec<StoredCookie>,
+) -> Result<WebviewWindow<Wry>, String> {
     if let Some(existing) = app.get_webview_window(&label) {
         let _ = existing.close();
     }
-    let account_name = session.account_name.clone();
-    let user_agent = session
-        .user_agent
-        .clone()
-        .filter(|value| !value.trim().is_empty());
-    let cookies = session.cookies.clone();
+    let user_agent = user_agent.filter(|value| !value.trim().is_empty());
     let app_handle = app.clone();
     let (sender, receiver) = mpsc::sync_channel(1);
     app.run_on_main_thread(move || {
@@ -280,7 +301,7 @@ fn create_likes_window(
                 .map_err(|error| format!("Invalid TikTok URL: {error}"))?;
             let mut builder =
                 WebviewWindowBuilder::new(&app_handle, &label, WebviewUrl::External(url))
-                    .title(format!("TikTok liked videos — {account_name}"))
+                    .title(title.as_str())
                     .visible(false)
                     .skip_taskbar(true)
                     .incognito(true)
@@ -367,7 +388,7 @@ fn load_tiktok_session(request: &TikTokLikesSourceRequest) -> Result<StoredSessi
     {
         layout.media_root = PathBuf::from(media_root);
     }
-    let row = load_tiktok_account_session(&connection, &request.account_id)?;
+    let account_id = load_tiktok_account_session(&connection, &request.account_id)?.0;
     let yt_dlp = connector_runtime::resolve_connector_executable(&connection, &layout, "yt-dlp")?;
     let output_root = request.profile_root.join("Liked");
     let legacy_output_roots = vec![request.profile_root.join("Likes")];
@@ -375,6 +396,32 @@ fn load_tiktok_session(request: &TikTokLikesSourceRequest) -> Result<StoredSessi
         .cache_root
         .join("tiktok-likes")
         .join(&request.source_id);
+    drop(connection);
+
+    let webview_session = load_webview_session(&request.account_id)?;
+
+    Ok(StoredSession {
+        account_id,
+        account_name: webview_session.account_name,
+        source_id: request.source_id.clone(),
+        source_handle: request.source_handle.clone(),
+        profile_root: request.profile_root.clone(),
+        user_agent: webview_session.user_agent,
+        cookies: webview_session.cookies,
+        output_root,
+        legacy_output_roots,
+        cookie_root,
+        yt_dlp,
+    })
+}
+
+/// Carrega os cookies e o user agent persistidos de uma conta TikTok, sem os
+/// diretórios de saída específicos da varredura de likes.
+pub(crate) fn load_webview_session(account_id: &str) -> Result<WebviewSession, String> {
+    let layout = storage::ensure_workspace_layout().map_err(|error| error.to_string())?;
+    let connection =
+        database::open_connection(&layout.db_path).map_err(|error| error.to_string())?;
+    let row = load_tiktok_account_session(&connection, account_id)?;
     drop(connection);
 
     let payload = session_secret_store::load_secret(&layout, &row.2)?;
@@ -390,18 +437,10 @@ fn load_tiktok_session(request: &TikTokLikesSourceRequest) -> Result<StoredSessi
         return Err("Stored TikTok session does not contain any cookies.".to_string());
     }
 
-    Ok(StoredSession {
-        account_id: row.0,
+    Ok(WebviewSession {
         account_name: row.1,
-        source_id: request.source_id.clone(),
-        source_handle: request.source_handle.clone(),
-        profile_root: request.profile_root.clone(),
         user_agent: metadata.user_agent,
         cookies,
-        output_root,
-        legacy_output_roots,
-        cookie_root,
-        yt_dlp,
     })
 }
 
@@ -436,7 +475,10 @@ fn load_tiktok_account_session(
         })
 }
 
-fn inject_cookies(window: &WebviewWindow<Wry>, cookies: &[StoredCookie]) -> Result<(), String> {
+pub(crate) fn inject_cookies(
+    window: &WebviewWindow<Wry>,
+    cookies: &[StoredCookie],
+) -> Result<(), String> {
     for stored in cookies {
         if stored.domain.trim().is_empty() || stored.name.trim().is_empty() {
             continue;
@@ -606,7 +648,7 @@ fn likes_request_timeout_reason(
     None
 }
 
-fn wait_until<C>(
+pub(crate) fn wait_until<C>(
     window: &WebviewWindow<Wry>,
     script: &str,
     timeout: Duration,
@@ -631,7 +673,7 @@ where
     Err(timeout_message.to_string())
 }
 
-fn evaluate_json(window: &WebviewWindow<Wry>, script: &str) -> Result<Value, String> {
+pub(crate) fn evaluate_json(window: &WebviewWindow<Wry>, script: &str) -> Result<Value, String> {
     let (sender, receiver) = mpsc::sync_channel(1);
     window
         .eval_with_callback(script, move |serialized| {

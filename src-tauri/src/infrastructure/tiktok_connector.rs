@@ -98,6 +98,9 @@ pub struct TikTokConnectorRequest {
     /// Id numérico estável do dono do perfil (`userIdHint`), quando já conhecido.
     /// Usado para validar a identidade ao recuperar o handle após renomeação.
     pub user_id_hint: Option<String>,
+    /// `secUid` já resolvido em um sync anterior. Quando presente, a enumeração
+    /// começa por `tiktokuser:<secUid>` e dispensa a página do perfil.
+    pub sec_uid_hint: Option<String>,
 }
 
 #[derive(Clone)]
@@ -156,6 +159,13 @@ pub struct TikTokConnectorResult {
     /// `true` quando o perfil existe mas é privado e a conta autenticada não o
     /// segue (não há mídia acessível). O chamador marca "perfil privado".
     pub profile_private: bool,
+    /// Preenchido quando a enumeração falhou por um motivo que não permite
+    /// concluir nada sobre o perfil (yt-dlp sem `secUid` e fallback também
+    /// indisponível). O chamador reporta falha transiente, sem marcar a fonte
+    /// como indisponível.
+    pub listing_blocked: Option<String>,
+    /// `secUid` do perfil, quando o fallback via WebView precisou resolvê-lo.
+    pub resolved_sec_uid: Option<String>,
     pub manifest_summary: TikTokManifestSummary,
 }
 
@@ -167,8 +177,24 @@ enum ProfileProbeStatus {
     Available,
     /// Conta privada não seguida (embed `errorCode` 10222).
     Private,
-    /// Conta inexistente/banida (embed `errorCode` 10221) ou probe inconclusivo.
+    /// Conta inexistente/banida (embed `errorCode` 10221).
     Unavailable,
+    /// A embed page não respondeu nada conclusivo — tipicamente um perfil com
+    /// embedding desabilitado (`errorCode` 10101/10204) ou uma falha de rede.
+    /// Não prova nada sobre a existência da conta.
+    Inconclusive,
+}
+
+/// Desfecho da resolução do `secUid` por fora do yt-dlp (hoje, pelo WebView
+/// autenticado). O connector só a aciona quando o yt-dlp aborta sem resolver o
+/// `secUid` do perfil.
+pub enum TikTokSecUidOutcome {
+    Resolved(String),
+    /// A sessão autenticada também não resolveu o perfil: ele realmente sumiu.
+    ProfileUnavailable(String),
+    /// Não há como resolver neste contexto (por exemplo, sem WebView).
+    Unsupported,
+    Failed(String),
 }
 
 pub struct TikTokProgress {
@@ -193,16 +219,18 @@ struct EnumeratedPost {
     share_count: Option<i64>,
 }
 
-pub fn run_profile_sync<F, C, D>(
+pub fn run_profile_sync<F, C, D, L>(
     request: &TikTokConnectorRequest,
     mut report_progress: F,
     is_cancelled: C,
     is_duplicate_user_id: D,
+    resolve_sec_uid: L,
 ) -> Result<TikTokConnectorResult, String>
 where
     F: FnMut(TikTokProgress),
     C: Fn() -> bool,
     D: Fn(&str) -> bool,
+    L: Fn(&str) -> TikTokSecUidOutcome,
 {
     fs::create_dir_all(&request.cache_root).map_err(|error| error.to_string())?;
     fs::create_dir_all(&request.profile_root).map_err(|error| error.to_string())?;
@@ -257,6 +285,8 @@ where
             resolved_handle: None,
             profile_unavailable: false,
             profile_private: false,
+            listing_blocked: None,
+            resolved_sec_uid: None,
             manifest_summary: summary,
         });
     }
@@ -272,6 +302,18 @@ where
         return Err("source sync cancelled by user".to_string());
     }
 
+    // Com um `secUid` já conhecido, a rota `tiktokuser:` dispensa a página do
+    // perfil — que hoje é sempre o desafio do WAF — e evita reabrir um WebView.
+    let sec_uid_hint = request
+        .sec_uid_hint
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let listing_url = match sec_uid_hint {
+        Some(sec_uid) => format!("tiktokuser:{sec_uid}"),
+        None => profile_url.clone(),
+    };
+
     let mut listed = if request.sections.timeline {
         report_progress(TikTokProgress {
             label: "Parsing profile".to_string(),
@@ -283,7 +325,7 @@ where
         // Cada linha do yt-dlp é um post enumerado; reporta a contagem ao vivo
         // para o parse de perfis grandes não parecer travado.
         let mut listed_count: u32 = 0;
-        let listed = enumerate_posts(request, &profile_url, &is_cancelled, &mut |line| {
+        let listed = enumerate_posts(request, &listing_url, &is_cancelled, &mut |line| {
             if line.trim().is_empty() {
                 return;
             }
@@ -314,6 +356,89 @@ where
     } else {
         None
     };
+    let mut listing_blocked: Option<String> = None;
+    let mut resolved_sec_uid: Option<String> = None;
+    let mut fallback_profile_unavailable = false;
+    // O `secUid` foi resolvido pela sessão autenticada: o perfil existe e está
+    // acessível, mesmo que a timeline tenha vindo vazia.
+    let mut fallback_resolved_profile = false;
+
+    // O yt-dlp abortou sem resolver o `secUid`: a página do perfil só devolve o
+    // desafio do WAF e a embed page do perfil está indisponível (tipicamente
+    // embedding desligado). Nada disso diz que a conta sumiu, então resolvemos o
+    // `secUid` pela sessão autenticada e voltamos ao yt-dlp por `tiktokuser:`.
+    // Um `secUid` salvo que parou de listar também cai aqui: ele pode ter sido
+    // gravado errado ou o perfil pode ter sido recriado, e resolver de novo é
+    // barato perto de falhar o sync.
+    if listed.as_ref().is_some_and(|value| {
+        value.posts.is_empty()
+            && !value.rate_limited
+            && (value.sec_uid_unavailable
+                || (sec_uid_hint.is_some() && value.fatal_error.is_some()))
+    }) {
+        if is_cancelled() {
+            return Err("source sync cancelled by user".to_string());
+        }
+        report_progress(TikTokProgress {
+            label: "Parsing profile".to_string(),
+            detail: format!(
+                "yt-dlp could not resolve '@{handle}'. Listing the timeline with the signed-in session."
+            ),
+            downloaded_items: Some(0),
+            progress_percent: None,
+            indeterminate: true,
+        });
+        match resolve_sec_uid(&handle) {
+            TikTokSecUidOutcome::Resolved(sec_uid) => {
+                resolved_sec_uid = Some(sec_uid.clone());
+                fallback_resolved_profile = true;
+                listed = Some(enumerate_posts_by_sec_uid(
+                    request,
+                    &sec_uid,
+                    &handle,
+                    &is_cancelled,
+                    &mut report_progress,
+                )?);
+            }
+            // Conclusivo, mas não encerra o sync aqui: um perfil renomeado
+            // também deixa de resolver pelo handle antigo, e a recuperação de
+            // handle (adiante) ainda pode salvá-lo.
+            TikTokSecUidOutcome::ProfileUnavailable(message) => {
+                fallback_profile_unavailable = true;
+                connector_debug::append_current(
+                    "internal.tiktok",
+                    "system",
+                    "listing.secuid.unavailable",
+                    format!("handle={handle}\nreason={message}"),
+                );
+            }
+            TikTokSecUidOutcome::Unsupported => {
+                listing_blocked = Some(format!(
+                    "yt-dlp could not resolve the TikTok profile '@{handle}' (its page is behind the WAF challenge and its embed page is unavailable), and no signed-in session was available to resolve its secUid instead."
+                ));
+            }
+            TikTokSecUidOutcome::Failed(message) => {
+                listing_blocked = Some(format!(
+                    "yt-dlp could not resolve the TikTok profile '@{handle}', and resolving its secUid with the signed-in session also failed: {message}"
+                ));
+            }
+        }
+    }
+
+    // Erro fatal do yt-dlp por outro motivo: `--ignore-errors` esconde a falha
+    // e devolve zero posts. Reportamos o erro em vez de fingir sync vazio.
+    if listing_blocked.is_none() {
+        if let Some(error) = listed
+            .as_ref()
+            .filter(|value| value.posts.is_empty() && !value.rate_limited)
+            .and_then(|value| value.fatal_error.clone())
+        {
+            listing_blocked = Some(format!(
+                "yt-dlp could not list the TikTok profile '@{handle}': {error}"
+            ));
+        }
+    }
+
     let resolved_user_id = listed.as_ref().and_then(|value| value.uploader_id.clone());
 
     // Duplicata no primeiro sync: cancela antes de baixar qualquer coisa.
@@ -360,7 +485,9 @@ where
     // apenas lista zero posts, sem emitir erro. Marcamos a fonte adequadamente
     // em vez de reportar um sync bem-sucedido com zero posts.
     let mut profile_unavailable = false;
-    let mut profile_private = false;
+    // Nenhum probe disponível prova que a conta autenticada não vê o perfil: a
+    // embed page é pública, e o `secUid` resolvido já significa acesso.
+    let profile_private = false;
     if resolved_handle.is_none()
         && duplicate_user_id.is_none()
         && listed
@@ -370,13 +497,49 @@ where
         if is_cancelled() {
             return Err("source sync cancelled by user".to_string());
         }
-        let (probed_private, probed_unavailable) = empty_listing_profile_probe_outcome(
-            request,
-            &handle,
-            probe_profile_status(request, &handle),
-        )?;
-        profile_private = probed_private;
-        profile_unavailable = probed_unavailable;
+        // A sessão autenticada é sempre mais confiável que a embed page, então
+        // o veredito do fallback tem precedência sobre o probe público.
+        let outcome = if fallback_resolved_profile {
+            EmptyListingOutcome::LegitimatelyEmpty
+        } else if fallback_profile_unavailable {
+            EmptyListingOutcome::Unavailable
+        } else if let Some(message) = listing_blocked.take() {
+            EmptyListingOutcome::Blocked(message)
+        } else {
+            empty_listing_profile_probe_outcome(
+                request,
+                &handle,
+                probe_profile_status(request, &handle),
+            )
+        };
+        match outcome {
+            EmptyListingOutcome::LegitimatelyEmpty => {}
+            EmptyListingOutcome::Unavailable => profile_unavailable = true,
+            EmptyListingOutcome::Blocked(message) => {
+                connector_debug::append_current(
+                    "internal.tiktok",
+                    "error",
+                    "profile.probe.blocked",
+                    format!("handle={handle}\nreason={message}"),
+                );
+                return Ok(TikTokConnectorResult {
+                    observed_posts,
+                    downloaded_media,
+                    section_errors,
+                    rate_limited,
+                    limit_aborted,
+                    resolved_user_id,
+                    resolved_avatar_url: None,
+                    duplicate_user_id: None,
+                    resolved_handle: None,
+                    profile_unavailable: false,
+                    profile_private: false,
+                    listing_blocked: Some(message),
+                    resolved_sec_uid,
+                    manifest_summary: summary,
+                });
+            }
+        }
         connector_debug::append_current(
             "internal.tiktok",
             "system",
@@ -710,6 +873,8 @@ where
         resolved_handle,
         profile_unavailable,
         profile_private,
+        listing_blocked: None,
+        resolved_sec_uid,
         manifest_summary: summary,
     })
 }
@@ -902,6 +1067,71 @@ struct EnumeratedPosts {
     posts: Vec<EnumeratedPost>,
     uploader_id: Option<String>,
     rate_limited: bool,
+    /// O yt-dlp abortou porque não resolveu o `secUid` do perfil (página do
+    /// perfil sob o desafio do WAF e embed page indisponível). Sem isto, o
+    /// `--ignore-errors` faz a falha parecer um perfil sem posts.
+    sec_uid_unavailable: bool,
+    /// Primeira linha de `ERROR:` emitida pelo yt-dlp, quando houve alguma.
+    fatal_error: Option<String>,
+}
+
+/// Marcador do yt-dlp para "não consegui resolver o dono do perfil". Ver
+/// `TikTokUserIE._real_extract`.
+const YT_DLP_SEC_UID_FAILURE: &str = "unable to extract secondary user id";
+
+/// Enumera a timeline pela rota `tiktokuser:<secUid>` do yt-dlp, que dispensa
+/// tanto a página do perfil (bloqueada pelo WAF) quanto a embed page.
+fn enumerate_posts_by_sec_uid<C, F>(
+    request: &TikTokConnectorRequest,
+    sec_uid: &str,
+    handle: &str,
+    is_cancelled: &C,
+    report_progress: &mut F,
+) -> Result<EnumeratedPosts, String>
+where
+    C: Fn() -> bool,
+    F: FnMut(TikTokProgress),
+{
+    let mut listed_count: u32 = 0;
+    let listed = enumerate_posts(
+        request,
+        &format!("tiktokuser:{sec_uid}"),
+        is_cancelled,
+        &mut |line| {
+            if line.trim().is_empty() {
+                return;
+            }
+            listed_count += 1;
+            if listed_count.is_multiple_of(10) {
+                report_progress(TikTokProgress {
+                    label: "Parsing profile".to_string(),
+                    detail: format!("Listed {listed_count} post(s) so far for '{handle}'."),
+                    downloaded_items: Some(0),
+                    progress_percent: None,
+                    indeterminate: true,
+                });
+            }
+        },
+    )?;
+    connector_debug::append_current(
+        "internal.tiktok",
+        "system",
+        "listing.by_sec_uid.complete",
+        format!(
+            "handle={handle}\nsec_uid={sec_uid}\nposts_received={}\nrate_limited={}",
+            listed.posts.len(),
+            listed.rate_limited
+        ),
+    );
+    Ok(listed)
+}
+
+fn first_yt_dlp_error(stderr: &str) -> Option<String> {
+    stderr
+        .lines()
+        .map(str::trim)
+        .find(|line| line.starts_with("ERROR:"))
+        .map(str::to_string)
 }
 
 /// Lista os posts do perfil (`--flat-playlist`), distinguindo vídeo de foto
@@ -959,6 +1189,10 @@ where
         }
     };
     let rate_limited = output_is_rate_limited(&stderr);
+    let sec_uid_unavailable = stderr
+        .to_ascii_lowercase()
+        .contains(YT_DLP_SEC_UID_FAILURE);
+    let fatal_error = first_yt_dlp_error(&stderr);
 
     let mut posts = Vec::new();
     let mut uploader_id = None;
@@ -1032,6 +1266,8 @@ where
         posts,
         uploader_id,
         rate_limited,
+        sec_uid_unavailable,
+        fatal_error,
     })
 }
 
@@ -1096,29 +1332,44 @@ fn recover_posts_from_listing_pages(
             if !recovered_ids.insert(post_id.to_string()) {
                 continue;
             }
-            let handle = item
-                .pointer("/author/uniqueId")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .unwrap_or_else(|| request.handle.trim().trim_start_matches('@'));
-            let likely_photo_post = !listing_photo_urls.is_empty();
-            let kind = if likely_photo_post { "photo" } else { "video" };
-            recovered.push(EnumeratedPost {
-                post_id: post_id.to_string(),
-                webpage_url: format!("https://www.tiktok.com/@{handle}/{kind}/{post_id}"),
-                likely_photo_post,
-                listing_photo_urls,
-                listing_audio_url,
-                captured_at_timestamp,
-                view_count: parse_item_count(item, "playCount"),
-                like_count: parse_item_count(item, "diggCount"),
-                comment_count: parse_item_count(item, "commentCount"),
-                share_count: parse_item_count(item, "shareCount"),
-            });
+            recovered.push(enumerated_post_from_item(request, item, post_id));
         }
     }
     recovered
+}
+
+/// Converte um item cru do `itemList` do TikTok num post enumerado. Serve tanto
+/// para as páginas gravadas pelo yt-dlp quanto para o fallback via WebView.
+fn enumerated_post_from_item(
+    request: &TikTokConnectorRequest,
+    item: &Value,
+    post_id: &str,
+) -> EnumeratedPost {
+    let listing_photo_urls = tiktok_photo_urls_from_item(item);
+    let handle = item
+        .pointer("/author/uniqueId")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| request.handle.trim().trim_start_matches('@'));
+    let likely_photo_post = !listing_photo_urls.is_empty();
+    let kind = if likely_photo_post { "photo" } else { "video" };
+    EnumeratedPost {
+        post_id: post_id.to_string(),
+        webpage_url: format!("https://www.tiktok.com/@{handle}/{kind}/{post_id}"),
+        likely_photo_post,
+        listing_photo_urls,
+        listing_audio_url: tiktok_audio_url_from_item(item),
+        captured_at_timestamp: item
+            .get("createTime")
+            .and_then(parse_unix_timestamp)
+            .filter(|value| *value > 0)
+            .or_else(|| timestamp_from_tiktok_id(post_id)),
+        view_count: parse_item_count(item, "playCount"),
+        like_count: parse_item_count(item, "diggCount"),
+        comment_count: parse_item_count(item, "commentCount"),
+        share_count: parse_item_count(item, "shareCount"),
+    }
 }
 
 fn tiktok_photo_urls_from_item(item: &Value) -> Vec<String> {
@@ -2427,7 +2678,7 @@ fn output_is_rate_limited(text: &str) -> bool {
 fn probe_profile_status(request: &TikTokConnectorRequest, handle: &str) -> ProfileProbeStatus {
     let client = match build_download_client(request) {
         Ok(client) => client,
-        Err(_) => return ProfileProbeStatus::Unavailable,
+        Err(_) => return ProfileProbeStatus::Inconclusive,
     };
     let url = format!("https://www.tiktok.com/embed/@{handle}");
     connector_debug::append_current("tiktok-http", "call", "GET embed", format!("GET {url}"));
@@ -2435,7 +2686,7 @@ fn probe_profile_status(request: &TikTokConnectorRequest, handle: &str) -> Profi
         Ok(body) => body,
         Err(error) => {
             connector_debug::append_current("tiktok-http", "error", "GET embed", error.to_string());
-            return ProfileProbeStatus::Unavailable;
+            return ProfileProbeStatus::Inconclusive;
         }
     };
     classify_embed_profile_status(&body)
@@ -2444,8 +2695,9 @@ fn probe_profile_status(request: &TikTokConnectorRequest, handle: &str) -> Profi
 /// Classifica o corpo da embed page. Os `errorCode` do TikTok distinguem os
 /// casos: `10222` = conta privada; `10221` = conta inexistente/banida. Um perfil
 /// público resolvido responde 200 e traz `"privateAccount":false` no objeto do
-/// dono. Qualquer outra coisa é inconclusiva → tratamos como indisponível, já
-/// que o listing não conseguiu resolver o perfil.
+/// dono. Qualquer outro código (`10101`, `10204`, …) significa apenas que a
+/// embed não respondeu — perfis com embedding desligado caem aqui — e não
+/// autoriza concluir que a conta sumiu.
 fn classify_embed_profile_status(body: &str) -> ProfileProbeStatus {
     if body.contains("\"errorCode\":10222") {
         return ProfileProbeStatus::Private;
@@ -2459,31 +2711,45 @@ fn classify_embed_profile_status(body: &str) -> ProfileProbeStatus {
     if body.contains("\"privateAccount\":false") {
         return ProfileProbeStatus::Available;
     }
-    ProfileProbeStatus::Unavailable
+    ProfileProbeStatus::Inconclusive
+}
+
+/// O que fazer com um listing vazio, depois de consultar a embed page.
+enum EmptyListingOutcome {
+    /// Perfil público acessível que de fato não tem posts a baixar.
+    LegitimatelyEmpty,
+    Unavailable,
+    /// Não dá para concluir nada; falha o sync sem marcar a fonte.
+    Blocked(String),
 }
 
 fn empty_listing_profile_probe_outcome(
     request: &TikTokConnectorRequest,
     handle: &str,
     status: ProfileProbeStatus,
-) -> Result<(bool, bool), String> {
+) -> EmptyListingOutcome {
     match status {
         // Listing falhou por motivo transiente; o perfil é público válido.
         ProfileProbeStatus::Available => {
             if has_known_tiktok_timeline_history(request) {
-                return Err(format!(
+                return EmptyListingOutcome::Blocked(format!(
                     "TikTok listing returned zero posts for '@{handle}', but this profile already has local TikTok history. Treating it as a transient provider listing failure instead of a successful empty sync."
                 ));
             }
-            Ok((false, false))
+            EmptyListingOutcome::LegitimatelyEmpty
         }
         // A embed page é pública e não sabe se a conta logada segue o perfil.
         // "Private" só prova que o probe público não vê a timeline; não prova
         // que devemos pausar a fonte como não seguida ou falhar o sync. Se a
         // conta autenticada segue o perfil e ele apagou tudo, zero posts é o
         // resultado correto.
-        ProfileProbeStatus::Private => Ok((false, false)),
-        ProfileProbeStatus::Unavailable => Ok((false, true)),
+        ProfileProbeStatus::Private => EmptyListingOutcome::LegitimatelyEmpty,
+        ProfileProbeStatus::Unavailable => EmptyListingOutcome::Unavailable,
+        // Embed indisponível (embedding desligado, erro do TikTok, falha de
+        // rede): não sabemos se a conta sumiu, então não a marcamos.
+        ProfileProbeStatus::Inconclusive => EmptyListingOutcome::Blocked(format!(
+            "TikTok returned no posts for '@{handle}' and its embed page did not resolve the profile, so it is not possible to tell whether the account is still available."
+        )),
     }
 }
 
@@ -2579,6 +2845,7 @@ mod tests {
             ledger_media_keys,
             existing_relative_paths,
             user_id_hint: None,
+            sec_uid_hint: None,
         }
     }
 
@@ -2745,8 +3012,27 @@ mod tests {
         // Corpo sem sinais úteis (ex.: página de bloqueio): inconclusivo.
         assert!(matches!(
             classify_embed_profile_status("<html>Please wait...</html>"),
-            ProfileProbeStatus::Unavailable
+            ProfileProbeStatus::Inconclusive
         ));
+        // Embedding desabilitado: a embed responde 400 com um código que não é
+        // nem 10221 nem 10222. Não prova que a conta sumiu.
+        let embedding_disabled = r#"...,"errorCode":10101,"errorStatus":400,"isError":true,"pageName":"error"}..."#;
+        assert!(matches!(
+            classify_embed_profile_status(embedding_disabled),
+            ProfileProbeStatus::Inconclusive
+        ));
+    }
+
+    #[test]
+    fn yt_dlp_sec_uid_failure_is_recognized_in_stderr() {
+        let stderr = "ERROR: [tiktok:user] elly_misaki: Unable to extract secondary user ID. If you are able to get the channel_id from a video posted by this user, try using \"tiktokuser:channel_id\" as the input URL";
+        assert!(stderr.to_ascii_lowercase().contains(YT_DLP_SEC_UID_FAILURE));
+        assert_eq!(
+            first_yt_dlp_error(stderr).as_deref(),
+            Some(stderr),
+            "the first ERROR line should be surfaced verbatim"
+        );
+        assert_eq!(first_yt_dlp_error("WARNING: nothing fatal here"), None);
     }
 
     #[test]
@@ -2757,41 +3043,54 @@ mod tests {
             HashSet::new(),
         );
 
-        assert_eq!(
-            empty_listing_profile_probe_outcome(&request, "dalilahoo", ProfileProbeStatus::Private)
-                .expect("private profile with zero posts should be a valid empty sync"),
-            (false, false)
-        );
+        assert!(matches!(
+            empty_listing_profile_probe_outcome(&request, "dalilahoo", ProfileProbeStatus::Private),
+            EmptyListingOutcome::LegitimatelyEmpty
+        ));
     }
 
     #[test]
     fn empty_listing_private_probe_allows_empty_sync_without_known_history() {
         let request = test_request_with_history(HashSet::new(), HashSet::new(), HashSet::new());
 
-        assert_eq!(
+        assert!(matches!(
             empty_listing_profile_probe_outcome(
                 &request,
                 "brand_new_private",
                 ProfileProbeStatus::Private,
-            )
-            .expect("public private probe cannot prove the signed-in account lacks access"),
-            (false, false)
-        );
+            ),
+            EmptyListingOutcome::LegitimatelyEmpty
+        ));
     }
 
     #[test]
     fn empty_listing_unavailable_probe_marks_unavailable() {
         let request = test_request_with_history(HashSet::new(), HashSet::new(), HashSet::new());
 
-        assert_eq!(
+        assert!(matches!(
             empty_listing_profile_probe_outcome(
                 &request,
                 "missing_profile",
                 ProfileProbeStatus::Unavailable
-            )
-            .expect("unavailable probe should classify"),
-            (false, true)
-        );
+            ),
+            EmptyListingOutcome::Unavailable
+        ));
+    }
+
+    #[test]
+    fn empty_listing_inconclusive_probe_never_marks_the_source_unavailable() {
+        let request = test_request_with_history(HashSet::new(), HashSet::new(), HashSet::new());
+
+        // Perfil com embedding desligado: o probe não resolve nada, e marcar a
+        // fonte como banida seria um falso positivo.
+        assert!(matches!(
+            empty_listing_profile_probe_outcome(
+                &request,
+                "elly_misaki",
+                ProfileProbeStatus::Inconclusive
+            ),
+            EmptyListingOutcome::Blocked(_)
+        ));
     }
 
     #[test]
@@ -2830,6 +3129,7 @@ mod tests {
                 "2026-07-07 12.04.09 7659802061789302034_001.jpg".to_string(),
             ]),
             user_id_hint: None,
+            sec_uid_hint: None,
         };
 
         assert!(has_known_tiktok_timeline_history(&request));

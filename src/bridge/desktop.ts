@@ -1781,6 +1781,7 @@ function normalizeTikTokSourceSyncOptions(value: unknown): TikTokSourceSyncOptio
     description: stringValue(value, ['description'], DEFAULT_TIKTOK_SOURCE_SYNC_OPTIONS.description ?? ''),
     color: stringValue(value, ['color'], DEFAULT_TIKTOK_SOURCE_SYNC_OPTIONS.color ?? ''),
     userIdHint: optionalStringValue(value, ['userIdHint', 'user_id_hint']),
+    secUidHint: optionalStringValue(value, ['secUidHint', 'sec_uid_hint']),
   })
 }
 
