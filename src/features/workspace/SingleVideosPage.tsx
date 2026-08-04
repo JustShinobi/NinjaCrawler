@@ -17,8 +17,8 @@ import type { ProviderKey, SingleVideo, SingleVideosRootStatus } from '../../dom
 import { WindowShell } from '../brand/WindowShell'
 import { WindowTitlebar } from '../brand/WindowTitlebar'
 import { MediaCard } from './MediaCard'
-import { MediaLightbox } from './MediaLightbox'
-import { useLightboxSession } from './lightboxSession'
+import { MediaLightbox } from '../media/MediaLightbox'
+import { useLightboxSession } from '../media/lightboxSession'
 
 const PROVIDER_LABELS: Record<string, string> = {
   tiktok: 'TikTok',

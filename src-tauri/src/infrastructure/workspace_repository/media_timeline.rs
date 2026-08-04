@@ -201,6 +201,11 @@ pub(super) fn load_media_timeline_with_connection(
             })
             .map_err(|error| error.to_string())?;
 
+        let timeline_rows = rows
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())?;
+        drop(prepared);
+
         // Profile roots are resolved once per source, not once per row: the
         // lookup reads account settings and would dominate the page otherwise.
         let mut roots: HashMap<String, PathBuf> = HashMap::new();
@@ -209,9 +214,103 @@ pub(super) fn load_media_timeline_with_connection(
             .map(|source| (source.id.clone(), source))
             .collect::<HashMap<_, _>>();
 
+        for row in &timeline_rows {
+            if roots.contains_key(&row.source_id) {
+                continue;
+            }
+            let Some(source) = sources.get(&row.source_id) else {
+                continue;
+            };
+            let root = resolved_source_media_output_root_with_connection(
+                connection,
+                layout,
+                source,
+            )?;
+            roots.insert(row.source_id.clone(), root);
+        }
+
+        // Hydrate every carousel in one query. The VALUES CTE remains below
+        // SQLite's default variable limit even at the maximum 200-card page.
+        let mut files_by_group: HashMap<String, Vec<MediaGalleryFile>> = HashMap::new();
+        let mut titles_by_group: HashMap<String, String> = HashMap::new();
+        if !timeline_rows.is_empty() {
+            let values = timeline_rows
+                .iter()
+                .map(|_| "(?, ?, ?)")
+                .collect::<Vec<_>>()
+                .join(", ");
+            let files_sql = format!(
+                "WITH selected(group_id, source_id, post_key) AS (VALUES {values})
+                 SELECT selected.group_id, media_index.source_id,
+                        media_index.relative_path, media_index.media_type,
+                        COALESCE(
+                          (SELECT title FROM provider_sync_media_ledger
+                           WHERE provider_sync_media_ledger.provider = media_index.provider
+                             AND provider_sync_media_ledger.source_id = media_index.source_id
+                             AND provider_sync_media_ledger.relative_path = media_index.relative_path
+                             AND NULLIF(TRIM(provider_sync_media_ledger.title), '') IS NOT NULL
+                           ORDER BY provider_sync_media_ledger.last_seen_at DESC LIMIT 1),
+                          (SELECT title FROM instagram_sync_media_ledger
+                           WHERE instagram_sync_media_ledger.source_id = media_index.source_id
+                             AND instagram_sync_media_ledger.relative_path = media_index.relative_path
+                             AND NULLIF(TRIM(instagram_sync_media_ledger.title), '') IS NOT NULL
+                           ORDER BY instagram_sync_media_ledger.last_seen_at DESC LIMIT 1)
+                        ) AS title
+                 FROM selected
+                 JOIN media_index ON media_index.source_id = selected.source_id
+                  AND ((selected.post_key IS NOT NULL
+                        AND media_index.provider_post_key = selected.post_key)
+                       OR (selected.post_key IS NULL AND media_index.id = selected.group_id))
+                 WHERE media_index.local_state = 'present'
+                   AND media_index.is_canonical = 1
+                 ORDER BY selected.group_id, media_index.relative_path"
+            );
+            let mut file_bindings: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+            for row in &timeline_rows {
+                file_bindings.push(Box::new(row.id.clone()));
+                file_bindings.push(Box::new(row.source_id.clone()));
+                file_bindings.push(Box::new(row.post_key.clone()));
+            }
+            let bound_files = file_bindings
+                .iter()
+                .map(|value| value.as_ref())
+                .collect::<Vec<&dyn rusqlite::ToSql>>();
+            let mut files_statement = connection
+                .prepare(&files_sql)
+                .map_err(|error| error.to_string())?;
+            let file_rows = files_statement
+                .query_map(bound_files.as_slice(), |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                    ))
+                })
+                .map_err(|error| error.to_string())?;
+            for file_row in file_rows {
+                let (group_id, source_id, relative_path, media_type, title) =
+                    file_row.map_err(|error| error.to_string())?;
+                let Some(root) = roots.get(&source_id) else {
+                    continue;
+                };
+                files_by_group
+                    .entry(group_id.clone())
+                    .or_default()
+                    .push(MediaGalleryFile {
+                        absolute_path: root.join(&relative_path).to_string_lossy().to_string(),
+                        relative_path,
+                        media_type,
+                    });
+                if let Some(title) = title {
+                    titles_by_group.entry(group_id).or_insert(title);
+                }
+            }
+        }
+
         let mut items = Vec::new();
-        for row in rows {
-            let row = row.map_err(|error| error.to_string())?;
+        for row in timeline_rows {
             let root = match roots.get(&row.source_id) {
                 Some(root) => root.clone(),
                 None => {
@@ -225,6 +324,27 @@ pub(super) fn load_media_timeline_with_connection(
                 }
             };
             let absolute_path = root.join(&row.relative_path);
+            let files = files_by_group.remove(&row.id).unwrap_or_else(|| {
+                vec![MediaGalleryFile {
+                    relative_path: row.relative_path.clone(),
+                    absolute_path: absolute_path.to_string_lossy().to_string(),
+                    media_type: if row.has_video { "video" } else { "image" }.to_string(),
+                }]
+            });
+            let is_video = row.has_video;
+            let post_url = build_post_url(
+                &row.provider,
+                &row.handle,
+                row.post_key.as_deref(),
+                is_video,
+                Some(&row.media_section),
+            );
+            let (_, audio_absolute_path) = if !is_video && files.len() > 1 {
+                find_slideshow_audio(&root, &files, row.post_key.as_deref())
+            } else {
+                (None, None)
+            };
+            let title = titles_by_group.remove(&row.id);
             items.push(MediaTimelineItem {
                 id: row.id,
                 source_id: row.source_id,
@@ -247,6 +367,10 @@ pub(super) fn load_media_timeline_with_connection(
                 file_count: row.file_count,
                 size_bytes: row.size_bytes,
                 upstream_missing: row.upstream_missing,
+                files,
+                post_url,
+                title,
+                audio_absolute_path,
             });
         }
 

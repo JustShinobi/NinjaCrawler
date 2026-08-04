@@ -431,7 +431,7 @@ pub struct PlanEditorWindowIntent {
     pub scheduler_set_id: Option<String>,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct MediaGalleryFile {
     pub relative_path: String,
@@ -1844,6 +1844,8 @@ pub struct MediaVariantMember {
     pub handle: String,
     pub media_section: String,
     pub relative_path: String,
+    pub absolute_path: String,
+    pub media_type: String,
     pub size_bytes: i64,
 }
 
@@ -1928,6 +1930,11 @@ pub struct MediaTimelineItem {
     pub file_count: i64,
     pub size_bytes: i64,
     pub upstream_missing: bool,
+    /// All files in the post, loaded in one batched query for the page.
+    pub files: Vec<MediaGalleryFile>,
+    pub post_url: Option<String>,
+    pub title: Option<String>,
+    pub audio_absolute_path: Option<String>,
 }
 
 /// Filters for the aggregated timeline. Everything is optional; an empty filter
@@ -2035,7 +2042,7 @@ pub struct MediaIndexCounts {
 /// A background indexing pass over the library. Progress is tracked per profile
 /// rather than per file: walking one profile folder is the unit of work, and a
 /// per-file counter would cost more to publish than it is worth.
-#[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
+#[derive(Clone, Serialize, Deserialize, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct MediaIndexRun {
     pub id: String,
@@ -2057,13 +2064,22 @@ pub struct MediaIndexRun {
     pub fingerprint_started_at: Option<String>,
     /// quiet | balanced | fast
     pub resource_profile: String,
+    /// Current candidate-driven phase counters. The legacy fingerprint totals
+    /// remain populated with the aggregate so older frontends degrade safely.
+    pub phase_total: i64,
+    pub phase_done: i64,
+    pub phase_failed: i64,
+    pub bytes_processed: i64,
+    pub last_progress_at: Option<String>,
+    pub rate_per_second: f64,
+    pub eta_seconds: Option<i64>,
     pub current_source_handle: Option<String>,
     pub error: Option<String>,
     pub started_at: String,
     pub finished_at: Option<String>,
 }
 
-#[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
+#[derive(Clone, Serialize, Deserialize, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct MediaIndexStatus {
     pub counts: MediaIndexCounts,

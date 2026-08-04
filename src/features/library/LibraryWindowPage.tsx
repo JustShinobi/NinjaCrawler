@@ -1,4 +1,6 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
+import { useVirtualizer } from '@tanstack/react-virtual'
+import { convertFileSrc } from '@tauri-apps/api/core'
 import {
   addTimelineItemsToCollection,
   deleteCollection,
@@ -12,8 +14,10 @@ import {
   loadVariantGroups,
   cancelMediaIndexScan,
   resumeMediaFingerprints,
+  retryFailedMediaFingerprints,
+  setMediaIndexResourceProfile,
   markTimelineSeen,
-  openMediaFile,
+  openExternalTarget,
   openProfileViewWindow,
   openWorkspaceHealthWindow,
   promoteCollectionToGlobal,
@@ -30,10 +34,13 @@ import type {
   MediaTimelineFilter,
   MediaTimelineItem,
   MediaVariantGroup,
+  MediaVariantMember,
 } from '../../domain/models'
 import { WindowShell } from '../brand/WindowShell'
 import { WindowTitlebar } from '../brand/WindowTitlebar'
 import { MediaCard } from '../workspace/MediaCard'
+import { MediaLightbox } from '../media/MediaLightbox'
+import { useLightboxSession } from '../media/lightboxSession'
 
 const PROVIDER_LABELS: Record<string, string> = {
   instagram: 'Instagram',
@@ -71,6 +78,66 @@ function formatBytes(value: number): string {
 }
 
 const INDEX_SPEED_STORAGE_KEY = 'library.indexSpeed'
+const LIBRARY_DENSITY_STORAGE_KEY = 'library.density'
+
+type LibraryDensity = 'compact' | 'comfortable' | 'large'
+
+const LIBRARY_DENSITIES: Array<{ value: LibraryDensity; label: string; size: number }> = [
+  { value: 'compact', label: 'Compact', size: 132 },
+  { value: 'comfortable', label: 'Comfortable', size: 168 },
+  { value: 'large', label: 'Large', size: 216 },
+]
+
+function readStoredDensity(): LibraryDensity {
+  try {
+    const stored = localStorage.getItem(LIBRARY_DENSITY_STORAGE_KEY)
+    if (stored === 'compact' || stored === 'comfortable' || stored === 'large') return stored
+  } catch {
+    /* best-effort preference */
+  }
+  return 'comfortable'
+}
+
+interface LibraryViewerItem {
+  timeline: MediaTimelineItem
+  absolutePath: string
+  mediaType: string
+  groupKey: string
+}
+
+interface VariantViewerItem {
+  group: MediaVariantGroup
+  member: MediaVariantMember
+  groupKey: string
+}
+
+function variantSectionLabel(member: MediaVariantMember): string {
+  const folder = member.relativePath.replace(/\\/g, '/').split('/')[0]?.toLowerCase()
+  const folderLabels: Record<string, string> = {
+    favorites: 'Favorites',
+    favourite: 'Favorites',
+    liked: 'Likes',
+    likes: 'Likes',
+    stories: 'Stories',
+    story: 'Stories',
+    reels: 'Reels',
+    posts: 'Posts',
+    media: 'Media',
+    video: 'Videos',
+  }
+  if (folder && folderLabels[folder]) return folderLabels[folder]
+  const section = member.mediaSection.trim()
+  if (!section) return 'Imported media'
+  return section.charAt(0).toUpperCase() + section.slice(1)
+}
+
+function variantMatchLabel(group: MediaVariantGroup): string {
+  if (group.matchKind === 'exact_sha256') return 'Exact match'
+  if (group.matchKind === 'perceptual_video') return 'Similar video'
+  return 'Similar image'
+}
+
+type LibraryTextDialog = 'save-filter' | 'new-collection'
 
 /**
  * How much of the machine indexing may use. The wording says what it costs, not
@@ -137,13 +204,20 @@ export function LibraryWindowPage() {
   const [thumbs, setThumbs] = useState<Record<string, string>>({})
   const [collections, setCollections] = useState<Collection[]>([])
   const [variantGroups, setVariantGroups] = useState<MediaVariantGroup[]>([])
+  const [variantLimit, setVariantLimit] = useState(100)
   const [dashboard, setDashboard] = useState<LibraryDashboard>()
   const [indexStatus, setIndexStatus] = useState<MediaIndexStatus>()
   const [selection, setSelection] = useState<Set<string>>(() => new Set())
   const [resourceProfile, setResourceProfile] = useState<'quiet' | 'balanced' | 'fast'>(
     () => readStoredIndexSpeed(),
   )
+  const [density, setDensity] = useState<LibraryDensity>(readStoredDensity)
+  const [textDialog, setTextDialog] = useState<LibraryTextDialog>()
+  const [dialogName, setDialogName] = useState('')
+  const [collectionToDelete, setCollectionToDelete] = useState<Collection>()
   const sentinelRef = useRef<HTMLDivElement>(null)
+  const scrollRef = useRef<HTMLDivElement>(null)
+  const lastSelectedIndexRef = useRef<number | undefined>(undefined)
 
   const activeCollection = useMemo(
     () =>
@@ -207,11 +281,11 @@ export function LibraryWindowPage() {
 
   const refreshVariants = useCallback(async () => {
     try {
-      setVariantGroups(await loadVariantGroups(100))
+      setVariantGroups(await loadVariantGroups(variantLimit))
     } catch {
       /* ignore */
     }
-  }, [])
+  }, [variantLimit])
 
   // The dashboard doubles as the source of the sidebar counters, so it is
   // fetched once on open rather than only when its own destination is visited.
@@ -277,9 +351,14 @@ export function LibraryWindowPage() {
   }, [cursor, loadMore])
 
   useEffect(() => {
-    const videos = items
+    const videos = [
+      ...items
       .filter((item) => item.mediaType === 'video')
-      .map((item) => item.absolutePath)
+      .map((item) => item.absolutePath),
+      ...variantGroups.flatMap((group) => group.members)
+        .filter((member) => member.mediaType === 'video')
+        .map((member) => member.absolutePath),
+    ]
       .filter((path) => path.length > 0 && !(path in thumbs))
     if (videos.length === 0) return
     let active = true
@@ -291,7 +370,7 @@ export function LibraryWindowPage() {
     return () => {
       active = false
     }
-  }, [items, thumbs])
+  }, [items, thumbs, variantGroups])
 
   const markSeen = useCallback(async () => {
     try {
@@ -303,21 +382,10 @@ export function LibraryWindowPage() {
     }
   }, [destination, load])
 
-  const saveFilterAsCollection = useCallback(async () => {
-    const name = window.prompt('Name this smart collection:')?.trim()
-    if (!name) return
-    try {
-      await upsertCollection({
-        name,
-        kind: 'smart',
-        scope: 'global',
-        ruleJson: JSON.stringify(filter),
-      })
-      await refreshCollections()
-    } catch (saveError) {
-      setError(saveError instanceof Error ? saveError.message : 'Failed to save the collection.')
-    }
-  }, [filter, refreshCollections])
+  const saveFilterAsCollection = useCallback(() => {
+    setDialogName('')
+    setTextDialog('save-filter')
+  }, [])
 
   const addSelectionToCollection = useCallback(
     async (collectionId: string) => {
@@ -334,27 +402,54 @@ export function LibraryWindowPage() {
     [refreshCollections, selection],
   )
 
-  const createCollectionFromSelection = useCallback(async () => {
-    const name = window.prompt('Name the new collection:')?.trim()
-    if (!name) return
+  const submitTextDialog = useCallback(async () => {
+    const name = dialogName.trim()
+    if (!name || !textDialog) return
     try {
-      const created = await upsertCollection({ name, kind: 'manual', scope: 'global' })
-      if (created) await addSelectionToCollection(created.id)
-    } catch (createError) {
-      setError(
-        createError instanceof Error ? createError.message : 'Failed to create the collection.',
-      )
+      if (textDialog === 'save-filter') {
+        await upsertCollection({
+          name,
+          kind: 'smart',
+          scope: 'global',
+          ruleJson: JSON.stringify(filter),
+        })
+        await refreshCollections()
+      } else {
+        const created = await upsertCollection({ name, kind: 'manual', scope: 'global' })
+        if (created) await addSelectionToCollection(created.id)
+      }
+      setTextDialog(undefined)
+      setDialogName('')
+    } catch (saveError) {
+      setError(saveError instanceof Error ? saveError.message : 'Failed to save the collection.')
     }
-  }, [addSelectionToCollection])
+  }, [addSelectionToCollection, dialogName, filter, refreshCollections, textDialog])
 
-  const toggleSelected = useCallback((id: string) => {
+  const createCollectionFromSelection = useCallback(() => {
+    setDialogName('')
+    setTextDialog('new-collection')
+  }, [])
+
+  const toggleSelected = useCallback((id: string, shiftKey = false) => {
+    const itemIndex = items.findIndex((item) => item.id === id)
+    const anchor = lastSelectedIndexRef.current
     setSelection((current) => {
       const next = new Set(current)
-      if (next.has(id)) next.delete(id)
-      else next.add(id)
+      if (shiftKey && anchor !== undefined && itemIndex >= 0) {
+        const [from, to] = anchor < itemIndex ? [anchor, itemIndex] : [itemIndex, anchor]
+        for (let index = from; index <= to; index += 1) {
+          const rangeItem = items[index]
+          if (rangeItem) next.add(rangeItem.id)
+        }
+      } else if (next.has(id)) {
+        next.delete(id)
+      } else {
+        next.add(id)
+      }
       return next
     })
-  }, [])
+    if (itemIndex >= 0) lastSelectedIndexRef.current = itemIndex
+  }, [items])
 
   const startIndexing = useCallback(async () => {
     try {
@@ -364,11 +459,6 @@ export function LibraryWindowPage() {
     }
   }, [resourceProfile])
 
-  /**
-   * Changing speed mid-run restarts the backlog with a different worker count.
-   * Work already hashed is kept — only what is still pending is redone at the
-   * new pace.
-   */
   const resumeFingerprints = useCallback(async () => {
     try {
       setIndexStatus(await resumeMediaFingerprints(resourceProfile))
@@ -387,20 +477,13 @@ export function LibraryWindowPage() {
       }
       if (indexStatus?.run?.status === 'running') {
         try {
-          await cancelMediaIndexScan()
-          // Only the pending backlog is redone at the new pace; the profile
-          // walk does not need repeating.
-          setIndexStatus(
-            indexStatus.run.stage === 'fingerprint'
-              ? await resumeMediaFingerprints(next)
-              : await startMediaIndexScan(undefined, next),
-          )
+          setIndexStatus(await setMediaIndexResourceProfile(next))
         } catch {
           /* ignore */
         }
       }
     },
-    [indexStatus?.run?.stage, indexStatus?.run?.status],
+    [indexStatus?.run?.status],
   )
 
   const days = useMemo(() => {
@@ -414,13 +497,85 @@ export function LibraryWindowPage() {
     return [...grouped.entries()].map(([key, value]) => ({ key, ...value }))
   }, [items])
 
-  const indexing = indexStatus?.run?.status === 'running' || indexStatus?.run?.status === 'queued'
+  const timelineViewerItems = useMemo<LibraryViewerItem[]>(() =>
+    items.flatMap((timeline) => {
+      const files = timeline.files.length > 0
+        ? timeline.files
+        : [{
+          absolutePath: timeline.absolutePath,
+          relativePath: timeline.relativePath,
+          mediaType: timeline.mediaType,
+        }]
+      return files.map((file) => ({
+        timeline,
+        absolutePath: file.absolutePath,
+        mediaType: file.mediaType,
+        groupKey: timeline.id,
+      }))
+    }), [items])
+  const lightbox = useLightboxSession({
+    items: timelineViewerItems,
+    groupKeyFor: useCallback((item: LibraryViewerItem) => item.groupKey, []),
+  })
+  const variantViewerItems = useMemo<VariantViewerItem[]>(() =>
+    variantGroups.flatMap((group) => group.members.map((member) => ({
+      group,
+      member,
+      groupKey: group.id,
+    }))), [variantGroups])
+  const variantLightbox = useLightboxSession({
+    items: variantViewerItems,
+    groupKeyFor: useCallback((item: VariantViewerItem) => item.groupKey, []),
+  })
+  const variantViewerIndexByMedia = useMemo(() => new Map(
+    variantViewerItems.map((item, index) => [item.member.mediaId, index]),
+  ), [variantViewerItems])
+  const firstViewerIndexByTimeline = useMemo(() => {
+    const result = new Map<string, number>()
+    timelineViewerItems.forEach((item, index) => {
+      if (!result.has(item.timeline.id)) result.set(item.timeline.id, index)
+    })
+    return result
+  }, [timelineViewerItems])
+
+  const densitySize = LIBRARY_DENSITIES.find((entry) => entry.value === density)?.size ?? 168
+  const estimateDaySize = useCallback((index: number) => {
+    const availableWidth = scrollRef.current?.clientWidth || 1024
+    const columns = Math.max(1, Math.floor((availableWidth + 9) / (densitySize + 9)))
+    const rows = Math.max(1, Math.ceil((days[index]?.items.length ?? 1) / columns))
+    return 36 + rows * (densitySize * 4 / 3 + 9) + 18
+  }, [days, densitySize])
+  const dayVirtualizer = useVirtualizer({
+    count: days.length,
+    getScrollElement: () => scrollRef.current,
+    estimateSize: estimateDaySize,
+    initialRect: { width: 1024, height: 768 },
+    observeElementRect: (_instance, callback) => {
+      const element = scrollRef.current
+      const notify = () => callback({
+        width: element?.clientWidth || 1024,
+        height: element?.clientHeight || 768,
+      })
+      notify()
+      if (!element || typeof ResizeObserver === 'undefined') return () => undefined
+      const observer = new ResizeObserver(notify)
+      observer.observe(element)
+      return () => observer.disconnect()
+    },
+    overscan: 2,
+  })
+
+  const indexing = indexStatus?.run?.status === 'running'
+    || indexStatus?.run?.status === 'queued'
+    || indexStatus?.run?.status === 'pausing'
+  const planningCandidates = indexing && indexStatus?.run?.stage === 'planning'
   // Nothing indexed yet is a first-run state, not an empty result: the operator
   // needs the reason and the fix, not an empty grid.
   const libraryIsUnindexed = (indexStatus?.counts.totalFiles ?? 0) === 0
   // Work left over from a previous session: duplicate detection cannot run
   // until these are hashed, so it stays visible and resumable.
   const hashingPending = (indexStatus?.counts.pendingFingerprints ?? 0) > 0
+  const hashingFailed = (indexStatus?.counts.failedFingerprints ?? 0) > 0
 
   /**
    * Walking the profile folders is only the first stage; hashing every file for
@@ -430,25 +585,32 @@ export function LibraryWindowPage() {
   const indexingDetail = (() => {
     const run = indexStatus?.run
     if (!run) return 'Starting…'
-    if (run.stage === 'fingerprint') {
+    if (run.stage === 'planning') return 'Planning duplicate candidates…'
+    if (['planning', 'exact', 'image_similarity', 'video_similarity', 'grouping', 'fingerprint'].includes(run.stage)) {
       const total = run.fingerprintsTotal
       const done = run.fingerprintsDone
       const remaining = Math.max(0, total - done)
       if (remaining === 0) return 'Finishing duplicate detection · your media is already browsable'
       const percent = total > 0 ? Math.round((done / total) * 100) : 0
-      const elapsedMs = run.fingerprintStartedAt
-        ? Date.now() - Date.parse(run.fingerprintStartedAt)
-        : 0
-      // A rate needs a sample to be honest: below ~20 files the estimate swings
-      // wildly, so it is simply not shown yet.
-      const rate = done > 20 && elapsedMs > 0 ? done / (elapsedMs / 1000) : 0
+      const heartbeatExpired = Boolean(run.lastProgressAt)
+        && Date.now() - Date.parse(run.lastProgressAt!) > 10_000
+      const rate = heartbeatExpired ? 0 : run.ratePerSecond
+      const phaseLabel = ({
+        planning: 'Planning candidates',
+        exact: 'Exact duplicates',
+        image_similarity: 'Image similarity',
+        video_similarity: 'Video similarity',
+        grouping: 'Grouping matches',
+        fingerprint: 'Fingerprinting',
+      } as Record<string, string>)[run.stage] ?? 'Fingerprinting'
       const parts = [
-        `Hashing for duplicate detection · ${done.toLocaleString()} of ${total.toLocaleString()} (${percent}%)`,
+        `${heartbeatExpired && run.status === 'running' ? 'Stopped' : phaseLabel} · ${done.toLocaleString()} of ${total.toLocaleString()} (${percent}%)`,
       ]
       if (rate > 0) {
         parts.push(`${rate < 10 ? rate.toFixed(1) : Math.round(rate)}/s`)
-        parts.push(`about ${formatDuration(remaining / rate)} left`)
+        parts.push(`about ${formatDuration(run.etaSeconds ?? remaining / rate)} left`)
       }
+      if (run.phaseFailed > 0) parts.push(`${run.phaseFailed.toLocaleString()} failed`)
       return parts.join(' · ')
     }
     const percent =
@@ -530,46 +692,76 @@ export function LibraryWindowPage() {
       )
     }
     return (
-      <div className="library-scroll">
-        {days.map((day) => (
-          <section className="library-day" key={day.key}>
-            <h2 className="library-day-heading">
-              {day.label}
-              <span className="library-day-count">{day.items.length}</span>
-            </h2>
-            <div className="library-grid">
-              {day.items.map((item) => (
-                <MediaCard
-                  key={item.id}
-                  posterAbsPath={
-                    item.mediaType === 'video' ? thumbs[item.absolutePath] : item.absolutePath
-                  }
-                  videoThumbAbsPath={item.mediaType === 'video' ? item.absolutePath : undefined}
-                  eagerPoster
-                  isVideo={item.mediaType === 'video'}
-                  archivedOnly={item.upstreamMissing}
-                  slideshowCount={item.fileCount > 1 ? item.fileCount : undefined}
-                  badge={`${providerLabel(item.provider)} · ${item.handle.replace(/^@/, '')}`}
-                  overlayText={
-                    item.capturedAt
-                      ? new Date(item.capturedAt * 1000).toLocaleTimeString(undefined, {
-                        hour: '2-digit',
-                        minute: '2-digit',
-                      })
-                      : ''
-                  }
-                  selected={selection.has(item.id)}
-                  selectMode={selection.size > 0}
-                  onToggleSelect={() => toggleSelected(item.id)}
-                  onOpen={() => void openMediaFile(item.absolutePath)}
-                  hideOnline
-                  onReveal={() => void revealMediaInFolder(item.absolutePath)}
-                  onContextMenu={() => void openProfileViewWindow(item.sourceId)}
-                />
-              ))}
-            </div>
-          </section>
-        ))}
+      <div
+        className="library-scroll"
+        ref={scrollRef}
+        style={{ '--library-card-size': `${densitySize}px` } as CSSProperties}
+      >
+        <div
+          className="library-virtual-days"
+          style={{ height: `${dayVirtualizer.getTotalSize()}px` }}
+        >
+          {dayVirtualizer.getVirtualItems().map((virtualDay) => {
+            const day = days[virtualDay.index]
+            if (!day) return null
+            return (
+              <section
+                className="library-day"
+                data-index={virtualDay.index}
+                key={day.key}
+                ref={dayVirtualizer.measureElement}
+                style={{ transform: `translateY(${virtualDay.start}px)` }}
+              >
+                <h2 className="library-day-heading">
+                  {day.label}
+                  <span className="library-day-count">{day.items.length}</span>
+                </h2>
+                <div className="library-grid">
+                  {day.items.map((item) => (
+                    <MediaCard
+                      key={item.id}
+                      posterAbsPath={
+                        item.mediaType === 'video' ? thumbs[item.absolutePath] : item.absolutePath
+                      }
+                      videoThumbAbsPath={item.mediaType === 'video' ? item.absolutePath : undefined}
+                      isVideo={item.mediaType === 'video'}
+                      archivedOnly={item.upstreamMissing}
+                      slideshowCount={item.fileCount > 1 ? item.fileCount : undefined}
+                      badge={`${providerLabel(item.provider)} · ${item.handle.replace(/^@/, '')}`}
+                      overlayText={
+                        item.capturedAt
+                          ? new Date(item.capturedAt * 1000).toLocaleTimeString(undefined, {
+                            hour: '2-digit',
+                            minute: '2-digit',
+                          })
+                          : ''
+                      }
+                      selected={selection.has(item.id)}
+                      selectMode={selection.size > 0}
+                      onToggleSelect={(shiftKey) => toggleSelected(item.id, shiftKey)}
+                      onOpen={(shiftKey) => {
+                        if (selection.size > 0 || shiftKey) {
+                          toggleSelected(item.id, shiftKey)
+                          return
+                        }
+                        const viewerIndex = firstViewerIndexByTimeline.get(item.id)
+                        if (viewerIndex !== undefined) {
+                          variantLightbox.close()
+                          lightbox.open(viewerIndex)
+                        }
+                      }}
+                      hideOnline={!item.postUrl}
+                      onlineDisabled={!item.postUrl}
+                      onOnline={item.postUrl ? () => void openExternalTarget(item.postUrl!) : undefined}
+                      onReveal={() => void revealMediaInFolder(item.absolutePath)}
+                      onContextMenu={() => void openProfileViewWindow(item.sourceId)}
+                    />
+                  ))}
+                </div>
+              </section>
+            )
+          })}
+        </div>
         <div ref={sentinelRef} className="library-sentinel">
           {loadingMore ? 'Loading more…' : cursor ? '' : 'End of the library.'}
         </div>
@@ -591,28 +783,71 @@ export function LibraryWindowPage() {
     }
     return (
       <div className="library-scroll">
-        <p className="library-empty-hint">
-          Nothing was deleted. Extra copies are collapsed behind the best one in the grid.
-        </p>
-        <ul className="library-collection-list">
+        <header className="library-duplicates-header">
+          <div>
+            <strong>Review duplicate matches</strong>
+            <p>Nothing was deleted. The copy marked “Kept” remains visible in the grid.</p>
+          </div>
+          <span>{variantGroups.length.toLocaleString()} of {(dashboard?.variantGroups ?? variantGroups.length).toLocaleString()}</span>
+        </header>
+        <ul className="library-duplicate-list">
           {variantGroups.map((group) => (
-            <li className="library-collection" key={group.id}>
-              <div className="library-collection-open">
-                <strong>
-                  {group.scope === 'cross_source'
-                    ? 'Same upload on two providers'
-                    : 'Reposted inside one profile'}
-                </strong>
-                <span className="library-collection-meta">
-                  {group.members
-                    .map(
-                      (member) =>
-                        `${providerLabel(member.provider)} ${member.mediaSection || 'timeline'}${member.role === 'canonical' ? ' (kept)' : ''}`,
-                    )
-                    .join(' · ')}
+            <li className="library-duplicate-card" key={group.id}>
+              <header className="library-duplicate-card-header">
+                <div>
+                  <strong>
+                    {group.scope === 'cross_source'
+                      ? 'Same upload across linked profiles'
+                      : 'Reposted inside one profile'}
+                  </strong>
+                  <span>@{group.members[0]?.handle.replace(/^@/, '')}</span>
+                </div>
+                <span className="library-duplicate-match">
+                  {variantMatchLabel(group)}
+                  {group.matchKind !== 'exact_sha256'
+                    ? ` · ${Math.round(group.confidence * 100)}%`
+                    : ''}
                 </span>
+              </header>
+              <div className="library-duplicate-members">
+                {group.members.map((member) => {
+                  const previewPath = member.mediaType === 'video'
+                    ? thumbs[member.absolutePath]
+                    : member.absolutePath
+                  return (
+                    <button
+                      aria-label={`Preview ${variantSectionLabel(member)} copy`}
+                      className="library-duplicate-member"
+                      key={member.mediaId}
+                      onClick={() => {
+                        lightbox.close()
+                        const index = variantViewerIndexByMedia.get(member.mediaId)
+                        if (index !== undefined) variantLightbox.open(index)
+                      }}
+                      type="button"
+                    >
+                      <span className="library-duplicate-preview">
+                        {previewPath ? (
+                          <img alt="" loading="lazy" src={convertFileSrc(previewPath)} />
+                        ) : (
+                          <span className="library-duplicate-placeholder">
+                            {member.mediaType === 'video' ? 'VIDEO' : 'MEDIA'}
+                          </span>
+                        )}
+                        <span className={member.role === 'canonical' ? 'is-kept' : 'is-extra'}>
+                          {member.role === 'canonical' ? 'Kept' : 'Extra'}
+                        </span>
+                      </span>
+                      <span className="library-duplicate-member-meta">
+                        <strong>{variantSectionLabel(member)}</strong>
+                        <span>{providerLabel(member.provider)} · {formatBytes(member.sizeBytes)}</span>
+                      </span>
+                    </button>
+                  )
+                })}
               </div>
-              <span className="library-collection-actions">
+              <footer className="library-duplicate-card-actions">
+                <span>{group.members.length} copies linked</span>
                 <button
                   className="ghost-button"
                   onClick={() => void dismissVariantGroup(group.id).then(refreshVariants)}
@@ -621,10 +856,19 @@ export function LibraryWindowPage() {
                 >
                   Not duplicates
                 </button>
-              </span>
+              </footer>
             </li>
           ))}
         </ul>
+        {(dashboard?.variantGroups ?? 0) > variantGroups.length ? (
+          <button
+            className="ghost-button library-duplicates-more"
+            onClick={() => setVariantLimit((current) => current + 100)}
+            type="button"
+          >
+            Load 100 more
+          </button>
+        ) : null}
       </div>
     )
   }
@@ -770,55 +1014,96 @@ export function LibraryWindowPage() {
 
           {/* Hashing outlives a session, so the strip stays whenever work is
               pending — not only while a run happens to be alive. */}
-          {(indexing || hashingPending) && !libraryIsUnindexed ? (
+          {(indexing || hashingPending || hashingFailed) && !libraryIsUnindexed ? (
             <div className="library-indexing-strip">
-              {indexing ? <span aria-hidden="true" className="health-activity-indicator" /> : null}
-              <span className="library-indexing-detail">
-                {indexing
-                  ? indexingDetail
-                  : `Duplicate detection is paused · ${(
-                    indexStatus?.counts.pendingFingerprints ?? 0
-                  ).toLocaleString()} files still to hash`}
-              </span>
-              <span className="library-speed-picker">
-                {INDEX_SPEED_OPTIONS.map((option) => (
+              <div className="library-indexing-summary">
+                <span className="library-indexing-state">
+                  {indexing ? <span aria-hidden="true" className="health-activity-indicator" /> : null}
+                  <span className="library-indexing-detail">
+                    {indexing
+                      ? indexingDetail
+                      : hashingPending
+                        ? `Duplicate detection is paused · ${(
+                          indexStatus?.counts.pendingFingerprints ?? 0
+                        ).toLocaleString()} candidates remain`
+                        : `Duplicate detection completed · ${(
+                          indexStatus?.counts.failedFingerprints ?? 0
+                        ).toLocaleString()} files need review or retry`}
+                  </span>
+                </span>
+                <div
+                  aria-label="Fingerprint progress"
+                  aria-valuemax={indexStatus?.run?.fingerprintsTotal || 1}
+                  aria-valuemin={0}
+                  aria-valuenow={planningCandidates ? undefined : (indexStatus?.run?.fingerprintsDone ?? 0)}
+                  className={planningCandidates
+                    ? 'library-indexing-progress is-indeterminate'
+                    : 'library-indexing-progress'}
+                  role="progressbar"
+                >
+                  <span
+                    style={{
+                      width: planningCandidates
+                        ? undefined
+                        : `${Math.min(100, Math.max(0,
+                          ((indexStatus?.run?.fingerprintsDone ?? 0)
+                            / Math.max(1, indexStatus?.run?.fingerprintsTotal ?? 0)) * 100,
+                        ))}%`,
+                    }}
+                  />
+                </div>
+              </div>
+              <div className="library-indexing-controls">
+                <span aria-label="Indexing speed" className="library-speed-picker" role="group">
+                  {INDEX_SPEED_OPTIONS.map((option) => (
+                    <button
+                      aria-pressed={resourceProfile === option.value}
+                      className={
+                        resourceProfile === option.value
+                          ? 'library-speed-option is-active'
+                          : 'library-speed-option'
+                      }
+                      key={option.value}
+                      onClick={() => void changeIndexingSpeed(option.value)}
+                      title={option.hint}
+                      type="button"
+                    >
+                      {option.label}
+                    </button>
+                  ))}
+                </span>
+                {(indexStatus?.counts.failedFingerprints ?? 0) > 0 ? (
                   <button
-                    aria-pressed={resourceProfile === option.value}
-                    className={
-                      resourceProfile === option.value
-                        ? 'library-speed-option is-active'
-                        : 'library-speed-option'
-                    }
-                    key={option.value}
-                    onClick={() => void changeIndexingSpeed(option.value)}
-                    title={option.hint}
+                    className="ghost-button library-indexing-action"
+                    onClick={() => void retryFailedMediaFingerprints().then(setIndexStatus)}
                     type="button"
                   >
-                    {option.label}
+                    Retry failed
                   </button>
-                ))}
-              </span>
-              {indexing ? (
-                <button
-                  className="ghost-button"
-                  onClick={() => void cancelMediaIndexScan().then(setIndexStatus)}
-                  type="button"
-                >
-                  Pause
-                </button>
-              ) : (
-                <button
-                  className="ghost-button"
-                  onClick={() => void resumeFingerprints()}
-                  type="button"
-                >
-                  Resume
-                </button>
-              )}
+                ) : null}
+                {indexing ? (
+                  <button
+                    className="ghost-button library-indexing-action"
+                    disabled={indexStatus?.run?.status === 'pausing'}
+                    onClick={() => void cancelMediaIndexScan().then(setIndexStatus)}
+                    type="button"
+                  >
+                    {indexStatus?.run?.status === 'pausing' ? 'Pausing…' : 'Pause'}
+                  </button>
+                ) : hashingPending ? (
+                  <button
+                    className="ghost-button library-indexing-action"
+                    onClick={() => void resumeFingerprints()}
+                    type="button"
+                  >
+                    Resume
+                  </button>
+                ) : null}
+              </div>
             </div>
           ) : null}
 
-          {showsMedia && !libraryIsUnindexed && !indexing ? (
+          {showsMedia && !libraryIsUnindexed ? (
             <header className="library-toolbar">
               <div className="library-filters">
                 <label className="library-filter">
@@ -845,6 +1130,27 @@ export function LibraryWindowPage() {
                 </label>
               </div>
               <div className="library-toolbar-actions">
+                <span aria-label="Card density" className="library-density-picker" role="group">
+                  {LIBRARY_DENSITIES.map((entry) => (
+                    <button
+                      aria-pressed={density === entry.value}
+                      className={density === entry.value ? 'is-active' : ''}
+                      key={entry.value}
+                      onClick={() => {
+                        setDensity(entry.value)
+                        try {
+                          localStorage.setItem(LIBRARY_DENSITY_STORAGE_KEY, entry.value)
+                        } catch {
+                          /* best-effort preference */
+                        }
+                      }}
+                      title={`${entry.label} · ${entry.size}px`}
+                      type="button"
+                    >
+                      {entry.label}
+                    </button>
+                  ))}
+                </span>
                 {activeCollection ? (
                   <>
                     {activeCollection.scope !== 'global' ? (
@@ -862,15 +1168,7 @@ export function LibraryWindowPage() {
                     ) : null}
                     <button
                       className="ghost-button"
-                      onClick={() => {
-                        if (!window.confirm(`Delete "${activeCollection.name}"? The media stays on disk.`)) {
-                          return
-                        }
-                        void deleteCollection(activeCollection.id).then(() => {
-                          setDestination('all')
-                          void refreshCollections()
-                        })
-                      }}
+                      onClick={() => setCollectionToDelete(activeCollection)}
                       type="button"
                     >
                       Delete collection
@@ -930,6 +1228,177 @@ export function LibraryWindowPage() {
               : renderMedia()}
         </main>
       </div>
+      {lightbox.active ? (
+        <MediaLightbox
+          fileAbsPath={lightbox.active.item.absolutePath}
+          isVideo={lightbox.active.item.mediaType === 'video'}
+          audioAbsPath={lightbox.active.item.timeline.audioAbsolutePath}
+          title={`@${lightbox.active.item.timeline.handle.replace(/^@/, '')}`}
+          meta={[
+            providerLabel(lightbox.active.item.timeline.provider),
+            lightbox.active.item.timeline.mediaSection,
+            lightbox.active.slideCount > 1
+              ? `${lightbox.active.slideIndex + 1}/${lightbox.active.slideCount}`
+              : undefined,
+          ].filter(Boolean).join(' · ')}
+          caption={lightbox.active.item.timeline.title}
+          hasPrev={lightbox.active.hasPrev}
+          hasNext={lightbox.active.hasNext}
+          hasSlidePrev={lightbox.active.hasSlidePrev}
+          hasSlideNext={lightbox.active.hasSlideNext}
+          onPrev={() => lightbox.stepPost(-1)}
+          onNext={() => lightbox.stepPost(1)}
+          onSlidePrev={() => lightbox.stepSlide(-1)}
+          onSlideNext={() => lightbox.stepSlide(1)}
+          onClose={lightbox.close}
+          actions={(
+            <>
+              {lightbox.active.item.timeline.postUrl ? (
+                <button
+                  className="ghost-button"
+                  onClick={() => void openExternalTarget(lightbox.active!.item.timeline.postUrl!)}
+                  type="button"
+                >
+                  Open original
+                </button>
+              ) : null}
+              <button
+                className="ghost-button"
+                onClick={() => void revealMediaInFolder(lightbox.active!.item.absolutePath)}
+                type="button"
+              >
+                Reveal
+              </button>
+              <button
+                className="ghost-button"
+                onClick={() => void openProfileViewWindow(lightbox.active!.item.timeline.sourceId)}
+                type="button"
+              >
+                Open profile
+              </button>
+            </>
+          )}
+        />
+      ) : null}
+      {variantLightbox.active ? (
+        <MediaLightbox
+          fileAbsPath={variantLightbox.active.item.member.absolutePath}
+          isVideo={variantLightbox.active.item.member.mediaType === 'video'}
+          title={`@${variantLightbox.active.item.member.handle.replace(/^@/, '')}`}
+          meta={[
+            variantSectionLabel(variantLightbox.active.item.member),
+            variantMatchLabel(variantLightbox.active.item.group),
+            variantLightbox.active.item.member.role === 'canonical' ? 'Kept copy' : 'Extra copy',
+            variantLightbox.active.slideCount > 1
+              ? `${variantLightbox.active.slideIndex + 1}/${variantLightbox.active.slideCount}`
+              : undefined,
+          ].filter(Boolean).join(' · ')}
+          hasPrev={variantLightbox.active.hasPrev}
+          hasNext={variantLightbox.active.hasNext}
+          hasSlidePrev={variantLightbox.active.hasSlidePrev}
+          hasSlideNext={variantLightbox.active.hasSlideNext}
+          onPrev={() => variantLightbox.stepPost(-1)}
+          onNext={() => variantLightbox.stepPost(1)}
+          onSlidePrev={() => variantLightbox.stepSlide(-1)}
+          onSlideNext={() => variantLightbox.stepSlide(1)}
+          onClose={variantLightbox.close}
+          actions={(
+            <>
+              <button
+                className="ghost-button"
+                onClick={() => void revealMediaInFolder(variantLightbox.active!.item.member.absolutePath)}
+                type="button"
+              >
+                Reveal
+              </button>
+              <button
+                className="ghost-button"
+                onClick={() => void openProfileViewWindow(variantLightbox.active!.item.member.sourceId)}
+                type="button"
+              >
+                Open profile
+              </button>
+              <button
+                className="ghost-button"
+                onClick={() => {
+                  const groupId = variantLightbox.active!.item.group.id
+                  variantLightbox.close()
+                  void dismissVariantGroup(groupId).then(refreshVariants)
+                }}
+                type="button"
+              >
+                Not duplicates
+              </button>
+            </>
+          )}
+        />
+      ) : null}
+      {textDialog ? (
+        <div className="library-dialog-backdrop" role="presentation">
+          <form
+            aria-labelledby="library-text-dialog-title"
+            aria-modal="true"
+            className="library-dialog"
+            onSubmit={(event) => {
+              event.preventDefault()
+              void submitTextDialog()
+            }}
+            role="dialog"
+          >
+            <h2 id="library-text-dialog-title">
+              {textDialog === 'save-filter' ? 'Save filter as collection' : 'Create collection'}
+            </h2>
+            <label>
+              <span>Name</span>
+              <input
+                autoFocus
+                onChange={(event) => setDialogName(event.target.value)}
+                value={dialogName}
+              />
+            </label>
+            <div className="library-dialog-actions">
+              <button className="ghost-button" onClick={() => setTextDialog(undefined)} type="button">
+                Cancel
+              </button>
+              <button className="primary-button" disabled={!dialogName.trim()} type="submit">
+                Save
+              </button>
+            </div>
+          </form>
+        </div>
+      ) : null}
+      {collectionToDelete ? (
+        <div className="library-dialog-backdrop" role="presentation">
+          <div
+            aria-labelledby="library-delete-dialog-title"
+            aria-modal="true"
+            className="library-dialog"
+            role="alertdialog"
+          >
+            <h2 id="library-delete-dialog-title">Delete “{collectionToDelete.name}”?</h2>
+            <p>The collection will be removed. Its media stays on disk.</p>
+            <div className="library-dialog-actions">
+              <button className="ghost-button" onClick={() => setCollectionToDelete(undefined)} type="button">
+                Cancel
+              </button>
+              <button
+                className="danger-button"
+                onClick={() => {
+                  const collectionId = collectionToDelete.id
+                  setCollectionToDelete(undefined)
+                  void deleteCollection(collectionId).then(() => {
+                    setDestination('all')
+                    void refreshCollections()
+                  })
+                }}
+                type="button"
+              >
+                Delete collection
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </WindowShell>
   )
 }

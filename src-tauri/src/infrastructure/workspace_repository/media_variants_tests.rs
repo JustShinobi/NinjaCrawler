@@ -112,7 +112,7 @@ fn a_story_reposted_to_the_feed_is_grouped_within_the_same_profile() {
         assert_eq!(outcome.groups_created, 1);
         assert_eq!(outcome.media_grouped, 2);
 
-        let groups = load_variant_groups_with_connection(connection, 10)?;
+        let groups = load_variant_groups_with_connection(connection, test_layout, 10)?;
         assert_eq!(groups[0].scope, "intra_source");
         assert_eq!(groups[0].match_kind, "perceptual_video");
         assert_eq!(groups[0].policy_applied, "link_only", "nothing is deleted by default");
@@ -202,7 +202,7 @@ fn the_same_upload_on_two_providers_is_grouped_through_the_identity() {
         )?;
         assert_eq!(outcome.groups_created, 1);
 
-        let groups = load_variant_groups_with_connection(connection, 10)?;
+        let groups = load_variant_groups_with_connection(connection, test_layout, 10)?;
         assert_eq!(groups[0].scope, "cross_source");
         assert_eq!(groups[0].identity_id.as_deref(), Some("identity-1"));
         assert_eq!(groups[0].members.len(), 2);
@@ -313,7 +313,7 @@ fn grouping_collapses_variants_in_the_timeline_and_dismissing_restores_them() {
         );
         assert_eq!(page.items[0].relative_path, "feed.mp4");
 
-        let group_id = load_variant_groups_with_connection(connection, 1)?[0].id.clone();
+        let group_id = load_variant_groups_with_connection(connection, test_layout, 1)?[0].id.clone();
         connection
             .execute(
                 "UPDATE media_index SET variant_group_id = NULL, is_canonical = 1
