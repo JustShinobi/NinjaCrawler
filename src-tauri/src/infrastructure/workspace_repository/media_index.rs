@@ -382,63 +382,328 @@ pub(crate) fn media_index_reconcile_targets(
 pub(crate) struct PendingFingerprint {
     pub(crate) id: String,
     pub(crate) absolute_path: PathBuf,
-    pub(crate) media_type: String,
+    pub(crate) kind: String,
+    pub(crate) also_needs_exact: bool,
     pub(crate) duration_ms: Option<i64>,
     pub(crate) size_bytes: i64,
     pub(crate) modified_at_ms: i64,
 }
 
-/// Size of the fingerprint backlog, for progress and a finish estimate.
-pub(crate) fn count_pending_fingerprints() -> Result<i64, String> {
-    with_workspace(|connection, _| {
-        connection
-            .query_row(
-                "SELECT COUNT(*) FROM media_index
-                 WHERE fingerprint_status = 'pending' AND local_state = 'present'",
-                [],
-                |row| row.get::<_, i64>(0),
-            )
-            .map_err(|error| error.to_string())
-    })
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
+pub(crate) struct FingerprintJobCounts {
+    pub(crate) exact: i64,
+    pub(crate) perceptual_image: i64,
+    pub(crate) perceptual_video: i64,
+    pub(crate) failed: i64,
 }
 
-/// Next slice of the fingerprint backlog. Paths are rebuilt from the profile
-/// root so the runtime never has to trust the lowercased `normalized_path`.
-pub(crate) fn load_pending_fingerprints(limit: u32) -> Result<Vec<PendingFingerprint>, String> {
-    with_workspace(|connection, layout| {
-        let mut statement = connection
-            .prepare(
-                "SELECT id, source_id, relative_path, media_type, duration_ms,
-                        size_bytes, modified_at_ms
+impl FingerprintJobCounts {
+    pub(crate) fn pending(self) -> i64 {
+        self.exact + self.perceptual_image + self.perceptual_video
+    }
+}
+
+const FINGERPRINT_POLICY_VERSION: i64 = 1;
+const CROSS_SOURCE_WINDOW_SECONDS: i64 = 7 * 24 * 60 * 60;
+
+/// Rebuilds the missing-work queue from comparison eligibility, not from the
+/// number of catalog rows. A fingerprint that cannot participate in a variant
+/// group is deliberately not scheduled.
+pub(super) fn plan_media_fingerprint_jobs_with_connection(
+    connection: &Connection,
+) -> Result<FingerprintJobCounts, String> {
+        let transaction = connection
+            .unchecked_transaction()
+            .map_err(|error| error.to_string())?;
+        let timestamp = Utc::now().to_rfc3339();
+        transaction
+            .execute(
+                "UPDATE media_fingerprint_jobs
+                 SET status = 'queued', lease_owner = NULL, lease_expires_at = NULL,
+                     updated_at = ?1
+                 WHERE status = 'running'",
+                params![timestamp],
+            )
+            .map_err(|error| error.to_string())?;
+        transaction
+            .execute("UPDATE media_fingerprint_jobs SET priority = -1", [])
+            .map_err(|error| error.to_string())?;
+        transaction
+            .execute_batch(&format!(
+                "DROP TABLE IF EXISTS temp.planned_fingerprint_jobs;
+                 CREATE TEMP TABLE planned_fingerprint_jobs (
+                    media_id TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    PRIMARY KEY (media_id, kind)
+                 ) WITHOUT ROWID;
+
+                 INSERT OR IGNORE INTO planned_fingerprint_jobs(media_id, kind)
+                 SELECT media_index.id, 'exact'
                  FROM media_index
-                 WHERE fingerprint_status = 'pending' AND local_state = 'present'
-                 ORDER BY downloaded_at DESC
-                 LIMIT ?1",
+                 JOIN (
+                    SELECT source_id, size_bytes
+                    FROM media_index
+                    WHERE local_state = 'present'
+                    GROUP BY source_id, size_bytes
+                    HAVING COUNT(DISTINCT LOWER(TRIM(media_section))) > 1
+                 ) eligible
+                   ON eligible.source_id = media_index.source_id
+                  AND eligible.size_bytes = media_index.size_bytes
+                 WHERE media_index.local_state = 'present';
+
+                 INSERT OR IGNORE INTO planned_fingerprint_jobs(media_id, kind)
+                 SELECT media_index.id,
+                        CASE WHEN media_index.media_type = 'video'
+                             THEN 'perceptual_video' ELSE 'perceptual_image' END
+                 FROM media_index
+                 JOIN (
+                    SELECT source_id, media_type
+                    FROM media_index
+                    WHERE local_state = 'present'
+                    GROUP BY source_id, media_type
+                    HAVING COUNT(DISTINCT LOWER(TRIM(media_section))) > 1
+                 ) eligible
+                   ON eligible.source_id = media_index.source_id
+                  AND eligible.media_type = media_index.media_type
+                 WHERE media_index.local_state = 'present';
+
+                 INSERT OR IGNORE INTO planned_fingerprint_jobs(media_id, kind)
+                 SELECT left_media.id, 'exact'
+                 FROM media_index left_media
+                 JOIN source_profiles left_source ON left_source.id = left_media.source_id
+                 JOIN source_profiles right_source
+                   ON right_source.identity_id = left_source.identity_id
+                  AND right_source.id <> left_source.id
+                 JOIN media_index right_media
+                   ON right_media.source_id = right_source.id
+                  AND right_media.local_state = 'present'
+                  AND right_media.size_bytes = left_media.size_bytes
+                 WHERE left_media.local_state = 'present'
+                   AND left_source.identity_id IS NOT NULL
+                   AND (left_media.captured_at IS NULL OR right_media.captured_at IS NULL
+                        OR ABS(left_media.captured_at - right_media.captured_at) <= {CROSS_SOURCE_WINDOW_SECONDS});
+
+                 INSERT OR IGNORE INTO planned_fingerprint_jobs(media_id, kind)
+                 SELECT left_media.id,
+                        CASE WHEN left_media.media_type = 'video'
+                             THEN 'perceptual_video' ELSE 'perceptual_image' END
+                 FROM media_index left_media
+                 JOIN source_profiles left_source ON left_source.id = left_media.source_id
+                 JOIN source_profiles right_source
+                   ON right_source.identity_id = left_source.identity_id
+                  AND right_source.id <> left_source.id
+                 JOIN media_index right_media
+                   ON right_media.source_id = right_source.id
+                  AND right_media.local_state = 'present'
+                  AND right_media.media_type = left_media.media_type
+                 WHERE left_media.local_state = 'present'
+                   AND left_source.identity_id IS NOT NULL
+                   AND (left_media.captured_at IS NULL OR right_media.captured_at IS NULL
+                        OR ABS(left_media.captured_at - right_media.captured_at) <= {CROSS_SOURCE_WINDOW_SECONDS});"
+            ))
+            .map_err(|error| error.to_string())?;
+
+        for (kind, media_predicate, output_predicate, priority) in [
+            (
+                "exact",
+                "1 = 1",
+                "media_index.sha256 IS NULL",
+                300_i64,
+            ),
+            (
+                "perceptual_image",
+                "media_index.media_type <> 'video'",
+                "(media_index.ahash64 IS NULL OR media_index.dhash64 IS NULL)",
+                200_i64,
+            ),
+            (
+                "perceptual_video",
+                "media_index.media_type = 'video'",
+                "media_index.video_signature IS NULL",
+                100_i64,
+            ),
+        ] {
+            let sql = format!(
+                "INSERT INTO media_fingerprint_jobs (
+                    media_id, kind, status, priority, attempts, policy_version,
+                    candidate_context, expected_size_bytes, expected_modified_at_ms,
+                    created_at, updated_at
+                 )
+                 SELECT media_index.id, ?1,
+                        CASE WHEN {output_predicate} THEN 'queued' ELSE 'complete' END,
+                        ?2, 0, ?3,
+                        media_index.source_id || '|' ||
+                        LOWER(TRIM(media_index.media_section)) || '|' ||
+                        COALESCE(source_profiles.identity_id, '-') || '|' || ?3,
+                        media_index.size_bytes, media_index.modified_at_ms, ?4, ?4
+                 FROM media_index
+                 JOIN source_profiles ON source_profiles.id = media_index.source_id
+                 WHERE media_index.local_state = 'present'
+                   AND {media_predicate}
+                   AND EXISTS (SELECT 1 FROM planned_fingerprint_jobs planned
+                               WHERE planned.media_id = media_index.id
+                                 AND planned.kind = ?1)
+                 ON CONFLICT(media_id, kind) DO UPDATE SET
+                    status = CASE
+                        WHEN excluded.status = 'complete' THEN 'complete'
+                        WHEN media_fingerprint_jobs.expected_size_bytes <> excluded.expected_size_bytes
+                          OR media_fingerprint_jobs.expected_modified_at_ms <> excluded.expected_modified_at_ms
+                          OR media_fingerprint_jobs.policy_version <> excluded.policy_version
+                          OR media_fingerprint_jobs.candidate_context <> excluded.candidate_context
+                        THEN excluded.status
+                        WHEN media_fingerprint_jobs.status = 'failed'
+                             AND media_fingerprint_jobs.attempts >= 2 THEN 'failed'
+                        WHEN media_fingerprint_jobs.status = 'complete' THEN 'queued'
+                        ELSE 'queued'
+                    END,
+                    priority = excluded.priority,
+                    policy_version = excluded.policy_version,
+                    candidate_context = excluded.candidate_context,
+                    attempts = CASE
+                        WHEN media_fingerprint_jobs.expected_size_bytes <> excluded.expected_size_bytes
+                          OR media_fingerprint_jobs.expected_modified_at_ms <> excluded.expected_modified_at_ms
+                          OR media_fingerprint_jobs.policy_version <> excluded.policy_version
+                          OR media_fingerprint_jobs.candidate_context <> excluded.candidate_context
+                        THEN 0 ELSE media_fingerprint_jobs.attempts END,
+                    expected_size_bytes = excluded.expected_size_bytes,
+                    expected_modified_at_ms = excluded.expected_modified_at_ms,
+                    lease_owner = NULL,
+                    lease_expires_at = NULL,
+                    error = CASE
+                        WHEN media_fingerprint_jobs.attempts >= 2 THEN media_fingerprint_jobs.error
+                        ELSE NULL
+                    END,
+                    updated_at = excluded.updated_at"
+            );
+            transaction
+                .execute(
+                    &sql,
+                    params![kind, priority, FINGERPRINT_POLICY_VERSION, timestamp],
+                )
+                .map_err(|error| error.to_string())?;
+        }
+
+        transaction
+            .execute("DELETE FROM media_fingerprint_jobs WHERE priority = -1", [])
+            .map_err(|error| error.to_string())?;
+        transaction
+            .execute("DROP TABLE temp.planned_fingerprint_jobs", [])
+            .map_err(|error| error.to_string())?;
+        refresh_media_index_fingerprint_status_with_connection(&transaction, &timestamp)?;
+        let counts = fingerprint_job_counts_with_connection(&transaction)?;
+        transaction.commit().map_err(|error| error.to_string())?;
+        Ok(counts)
+}
+
+pub(crate) fn plan_media_fingerprint_jobs() -> Result<FingerprintJobCounts, String> {
+    with_workspace(|connection, _| plan_media_fingerprint_jobs_with_connection(connection))
+}
+
+fn fingerprint_job_counts_with_connection(
+    connection: &Connection,
+) -> Result<FingerprintJobCounts, String> {
+    connection
+        .query_row(
+            "SELECT
+                COALESCE(SUM(CASE WHEN kind = 'exact' AND status IN ('queued', 'running') THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN kind = 'perceptual_image' AND status IN ('queued', 'running') THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN kind = 'perceptual_video' AND status IN ('queued', 'running') THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END), 0)
+             FROM media_fingerprint_jobs",
+            [],
+            |row| {
+                Ok(FingerprintJobCounts {
+                    exact: row.get(0)?,
+                    perceptual_image: row.get(1)?,
+                    perceptual_video: row.get(2)?,
+                    failed: row.get(3)?,
+                })
+            },
+        )
+        .map_err(|error| error.to_string())
+}
+
+/// Leases the next slice of one phase. Paths are rebuilt from the profile root
+/// so the runtime never has to trust the lowercased `normalized_path`.
+pub(super) fn lease_pending_fingerprints_with_connection(
+    connection: &Connection,
+    layout: &StorageLayout,
+    kind: &str,
+    limit: u32,
+    lease_owner: &str,
+) -> Result<Vec<PendingFingerprint>, String> {
+        let transaction = connection
+            .unchecked_transaction()
+            .map_err(|error| error.to_string())?;
+        let now = Utc::now();
+        let expires = (now + Duration::minutes(2)).to_rfc3339();
+        let now = now.to_rfc3339();
+        transaction
+            .execute(
+                "UPDATE media_fingerprint_jobs
+                 SET status = 'running', lease_owner = ?3, lease_expires_at = ?4,
+                     attempts = attempts + 1, updated_at = ?5
+                 WHERE (media_id, kind) IN (
+                     SELECT media_id, kind FROM media_fingerprint_jobs
+                     WHERE kind = ?1 AND status = 'queued'
+                     ORDER BY priority DESC, updated_at, media_id
+                     LIMIT ?2
+                 )",
+                params![kind, limit, lease_owner, expires, now],
+            )
+            .map_err(|error| error.to_string())?;
+
+        let mut statement = transaction
+            .prepare(
+                "SELECT media_index.id, media_index.source_id, media_index.relative_path,
+                        media_index.duration_ms,
+                        media_index.size_bytes, media_index.modified_at_ms,
+                        jobs.kind,
+                        EXISTS (
+                            SELECT 1 FROM media_fingerprint_jobs exact_job
+                            WHERE exact_job.media_id = media_index.id
+                              AND exact_job.kind = 'exact'
+                              AND exact_job.status IN ('queued', 'running')
+                        )
+                 FROM media_fingerprint_jobs jobs
+                 JOIN media_index ON media_index.id = jobs.media_id
+                 WHERE jobs.kind = ?1 AND jobs.status = 'running'
+                   AND jobs.lease_owner = ?2
+                 ORDER BY jobs.priority DESC, jobs.updated_at, jobs.media_id",
             )
             .map_err(|error| error.to_string())?;
         let rows = statement
-            .query_map(params![limit], |row| {
+            .query_map(params![kind, lease_owner], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, Option<i64>>(4)?,
+                    row.get::<_, Option<i64>>(3)?,
+                    row.get::<_, i64>(4)?,
                     row.get::<_, i64>(5)?,
-                    row.get::<_, i64>(6)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, i64>(7)? == 1,
                 ))
             })
             .map_err(|error| error.to_string())?;
 
-        let sources = load_sources(connection)?
+        let sources = load_sources(&transaction)?
             .into_iter()
             .map(|source| (source.id.clone(), source))
             .collect::<HashMap<_, _>>();
         let mut roots: HashMap<String, PathBuf> = HashMap::new();
         let mut pending = Vec::new();
         for row in rows {
-            let (id, source_id, relative_path, media_type, duration_ms, size_bytes, modified_at_ms) =
-                row.map_err(|error| error.to_string())?;
+            let (
+                id,
+                source_id,
+                relative_path,
+                duration_ms,
+                size_bytes,
+                modified_at_ms,
+                kind,
+                also_needs_exact,
+            ) = row.map_err(|error| error.to_string())?;
             let root = match roots.get(&source_id) {
                 Some(root) => root.clone(),
                 None => {
@@ -446,7 +711,7 @@ pub(crate) fn load_pending_fingerprints(limit: u32) -> Result<Vec<PendingFingerp
                         continue;
                     };
                     let root = resolved_source_media_output_root_with_connection(
-                        connection, layout, source,
+                        &transaction, layout, source,
                     )?;
                     roots.insert(source_id.clone(), root.clone());
                     root
@@ -455,63 +720,212 @@ pub(crate) fn load_pending_fingerprints(limit: u32) -> Result<Vec<PendingFingerp
             pending.push(PendingFingerprint {
                 id,
                 absolute_path: root.join(&relative_path),
-                media_type,
+                kind,
+                also_needs_exact,
                 duration_ms,
                 size_bytes,
                 modified_at_ms,
             });
         }
+        drop(statement);
+        transaction.commit().map_err(|error| error.to_string())?;
         Ok(pending)
+}
+
+pub(crate) fn lease_pending_fingerprints(
+    kind: &str,
+    limit: u32,
+    lease_owner: &str,
+) -> Result<Vec<PendingFingerprint>, String> {
+    with_workspace(|connection, layout| {
+        lease_pending_fingerprints_with_connection(connection, layout, kind, limit, lease_owner)
     })
 }
 
 /// Stores a computed fingerprint. The size/mtime guard means a file replaced
 /// while the runtime was hashing it stays `pending` instead of being recorded
 /// with a hash of bytes that no longer exist.
-pub(crate) fn store_media_fingerprint(
-    media_id: &str,
+pub(super) fn complete_media_fingerprint_job_with_connection(
+    connection: &Connection,
+    item: &PendingFingerprint,
     sha256: Option<&str>,
     ahash64: Option<&str>,
     dhash64: Option<&str>,
     video_signature: Option<&str>,
     width: Option<i64>,
     height: Option<i64>,
-    size_bytes: i64,
-    modified_at_ms: i64,
 ) -> Result<bool, String> {
-    with_workspace(|connection, _| {
-        let updated = connection
+        let transaction = connection
+            .unchecked_transaction()
+            .map_err(|error| error.to_string())?;
+        let timestamp = Utc::now().to_rfc3339();
+        let updated = transaction
             .execute(
                 "UPDATE media_index
-                 SET sha256 = ?2, ahash64 = ?3, dhash64 = ?4, video_signature = ?5,
+                 SET sha256 = COALESCE(?2, sha256),
+                     ahash64 = COALESCE(?3, ahash64),
+                     dhash64 = COALESCE(?4, dhash64),
+                     video_signature = COALESCE(?5, video_signature),
                      width = COALESCE(?6, width), height = COALESCE(?7, height),
                      fingerprint_status = 'complete', updated_at = ?8
                  WHERE id = ?1 AND size_bytes = ?9 AND modified_at_ms = ?10",
                 params![
-                    media_id,
+                    item.id,
                     sha256,
                     ahash64,
                     dhash64,
                     video_signature,
                     width,
                     height,
-                    Utc::now().to_rfc3339(),
-                    size_bytes,
-                    modified_at_ms,
+                    timestamp,
+                    item.size_bytes,
+                    item.modified_at_ms,
                 ],
             )
             .map_err(|error| error.to_string())?;
+        if updated > 0 {
+            transaction
+                .execute(
+                    "UPDATE media_fingerprint_jobs
+                     SET status = 'complete', lease_owner = NULL, lease_expires_at = NULL,
+                         error = NULL, updated_at = ?3
+                     WHERE media_id = ?1 AND kind = ?2",
+                    params![item.id, item.kind, timestamp],
+                )
+                .map_err(|error| error.to_string())?;
+            if item.also_needs_exact && sha256.is_some() {
+                transaction
+                    .execute(
+                        "UPDATE media_fingerprint_jobs
+                         SET status = 'complete', lease_owner = NULL, lease_expires_at = NULL,
+                             error = NULL, updated_at = ?2
+                         WHERE media_id = ?1 AND kind = 'exact'",
+                        params![item.id, timestamp],
+                    )
+                    .map_err(|error| error.to_string())?;
+            }
+        } else {
+            transaction
+                .execute(
+                    "UPDATE media_fingerprint_jobs
+                     SET status = 'queued', lease_owner = NULL, lease_expires_at = NULL,
+                         error = 'file_changed', updated_at = ?2
+                     WHERE media_id = ?1 AND kind = ?3",
+                    params![item.id, timestamp, item.kind],
+                )
+                .map_err(|error| error.to_string())?;
+        }
+        transaction.commit().map_err(|error| error.to_string())?;
         Ok(updated > 0)
+}
+
+pub(crate) fn complete_media_fingerprint_job(
+    item: &PendingFingerprint,
+    sha256: Option<&str>,
+    ahash64: Option<&str>,
+    dhash64: Option<&str>,
+    video_signature: Option<&str>,
+    width: Option<i64>,
+    height: Option<i64>,
+) -> Result<bool, String> {
+    with_workspace(|connection, _| {
+        complete_media_fingerprint_job_with_connection(
+            connection,
+            item,
+            sha256,
+            ahash64,
+            dhash64,
+            video_signature,
+            width,
+            height,
+        )
     })
 }
 
-pub(crate) fn mark_fingerprint_failed(media_id: &str) -> Result<(), String> {
+pub(crate) fn mark_fingerprint_job_failed(item: &PendingFingerprint, error_code: &str) -> Result<bool, String> {
+    with_workspace(|connection, _| {
+        let updated = connection
+            .execute(
+                "UPDATE media_fingerprint_jobs
+                 SET status = CASE WHEN attempts >= 2 THEN 'failed' ELSE 'queued' END,
+                     lease_owner = NULL, lease_expires_at = NULL, error = ?3, updated_at = ?4
+                 WHERE media_id = ?1 AND kind = ?2",
+                params![item.id, item.kind, error_code, Utc::now().to_rfc3339()],
+            )
+            .map_err(|error| error.to_string())?;
+        let failed = connection
+            .query_row(
+                "SELECT status = 'failed' FROM media_fingerprint_jobs
+                 WHERE media_id = ?1 AND kind = ?2",
+                params![item.id, item.kind],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()
+            .map_err(|error| error.to_string())?
+            .unwrap_or(0)
+            == 1;
+        Ok(updated > 0 && failed)
+    })
+}
+
+fn refresh_media_index_fingerprint_status_with_connection(
+    connection: &Connection,
+    timestamp: &str,
+) -> Result<(), String> {
+    connection
+        .execute(
+            "UPDATE media_index
+             SET fingerprint_status = CASE
+                 WHEN EXISTS (SELECT 1 FROM media_fingerprint_jobs jobs
+                              WHERE jobs.media_id = media_index.id
+                                AND jobs.status IN ('queued', 'running')) THEN 'pending'
+                 WHEN EXISTS (SELECT 1 FROM media_fingerprint_jobs jobs
+                              WHERE jobs.media_id = media_index.id
+                                AND jobs.status = 'failed') THEN 'failed'
+                 ELSE 'complete'
+             END,
+             updated_at = ?1
+             WHERE local_state = 'present'",
+            params![timestamp],
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+pub(crate) fn finalize_media_fingerprint_jobs() -> Result<FingerprintJobCounts, String> {
+    with_workspace(|connection, _| {
+        refresh_media_index_fingerprint_status_with_connection(
+            connection,
+            &Utc::now().to_rfc3339(),
+        )?;
+        fingerprint_job_counts_with_connection(connection)
+    })
+}
+
+pub(crate) fn retry_failed_media_fingerprint_jobs() -> Result<i64, String> {
     with_workspace(|connection, _| {
         connection
             .execute(
-                "UPDATE media_index SET fingerprint_status = 'failed', updated_at = ?2
-                 WHERE id = ?1",
-                params![media_id, Utc::now().to_rfc3339()],
+                "UPDATE media_fingerprint_jobs
+                 SET status = 'queued', attempts = 0, error = NULL,
+                     lease_owner = NULL, lease_expires_at = NULL, updated_at = ?1
+                 WHERE status = 'failed'",
+                params![Utc::now().to_rfc3339()],
+            )
+            .map(|value| value as i64)
+            .map_err(|error| error.to_string())
+    })
+}
+
+pub(crate) fn release_media_fingerprint_leases(lease_owner: &str) -> Result<(), String> {
+    with_workspace(|connection, _| {
+        connection
+            .execute(
+                "UPDATE media_fingerprint_jobs
+                 SET status = 'queued', lease_owner = NULL, lease_expires_at = NULL,
+                     updated_at = ?2
+                 WHERE status = 'running' AND lease_owner = ?1",
+                params![lease_owner, Utc::now().to_rfc3339()],
             )
             .map_err(|error| error.to_string())?;
         Ok(())
@@ -525,11 +939,13 @@ pub(crate) fn insert_media_index_run(run: &MediaIndexRun) -> Result<(), String> 
                 "INSERT INTO media_index_runs (
                     id, status, stage, scope_source_id, sources_total, sources_processed,
                     files_indexed, files_updated, files_missing, hashes_inherited,
+                    current_source_handle, error, started_at, finished_at,
                     fingerprints_total, fingerprints_done, fingerprint_started_at,
-                    resource_profile, current_source_handle, error, started_at,
-                    finished_at, updated_at
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?15, ?16, ?17, ?18,
-                           ?11, ?12, ?13, ?14, ?13)",
+                    resource_profile, phase_total, phase_done, phase_failed,
+                    bytes_processed, last_progress_at, rate_per_second, eta_seconds,
+                    updated_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
+                           ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26)",
                 params![
                     run.id,
                     run.status,
@@ -549,6 +965,14 @@ pub(crate) fn insert_media_index_run(run: &MediaIndexRun) -> Result<(), String> 
                     run.fingerprints_done,
                     run.fingerprint_started_at,
                     run.resource_profile,
+                    run.phase_total,
+                    run.phase_done,
+                    run.phase_failed,
+                    run.bytes_processed,
+                    run.last_progress_at,
+                    run.rate_per_second,
+                    run.eta_seconds,
+                    Utc::now().to_rfc3339(),
                 ],
             )
             .map_err(|error| error.to_string())?;
@@ -566,7 +990,10 @@ pub(crate) fn persist_media_index_run(run: &MediaIndexRun) -> Result<(), String>
                      hashes_inherited = ?9, current_source_handle = ?10, error = ?11,
                      finished_at = ?12, updated_at = ?13,
                      fingerprints_total = ?14, fingerprints_done = ?15,
-                     fingerprint_started_at = ?16, resource_profile = ?17
+                     fingerprint_started_at = ?16, resource_profile = ?17,
+                     phase_total = ?18, phase_done = ?19, phase_failed = ?20,
+                     bytes_processed = ?21, last_progress_at = ?22,
+                     rate_per_second = ?23, eta_seconds = ?24
                  WHERE id = ?1",
                 params![
                     run.id,
@@ -586,6 +1013,13 @@ pub(crate) fn persist_media_index_run(run: &MediaIndexRun) -> Result<(), String>
                     run.fingerprints_done,
                     run.fingerprint_started_at,
                     run.resource_profile,
+                    run.phase_total,
+                    run.phase_done,
+                    run.phase_failed,
+                    run.bytes_processed,
+                    run.last_progress_at,
+                    run.rate_per_second,
+                    run.eta_seconds,
                 ],
             )
             .map_err(|error| error.to_string())?;
@@ -609,6 +1043,13 @@ fn media_index_run_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<MediaIn
         fingerprints_done: row.get(15).unwrap_or(0),
         fingerprint_started_at: row.get(16).unwrap_or(None),
         resource_profile: row.get(17).unwrap_or_else(|_| "balanced".to_string()),
+        phase_total: row.get(18).unwrap_or(0),
+        phase_done: row.get(19).unwrap_or(0),
+        phase_failed: row.get(20).unwrap_or(0),
+        bytes_processed: row.get(21).unwrap_or(0),
+        last_progress_at: row.get(22).unwrap_or(None),
+        rate_per_second: row.get(23).unwrap_or(0.0),
+        eta_seconds: row.get(24).unwrap_or(None),
         current_source_handle: row.get(10)?,
         error: row.get(11)?,
         started_at: row.get(12)?,
@@ -625,7 +1066,8 @@ pub(crate) fn load_latest_media_index_run(
                     files_indexed, files_updated, files_missing, hashes_inherited,
                     current_source_handle, error, started_at, finished_at,
                     fingerprints_total, fingerprints_done, fingerprint_started_at,
-                    resource_profile
+                    resource_profile, phase_total, phase_done, phase_failed,
+                    bytes_processed, last_progress_at, rate_per_second, eta_seconds
              FROM media_index_runs
              ORDER BY started_at DESC, updated_at DESC
              LIMIT 1",
@@ -636,18 +1078,29 @@ pub(crate) fn load_latest_media_index_run(
         .map_err(|error| error.to_string())
 }
 
-/// A run that was still `running` when the app exited never resumes on its own;
-/// leaving it that way would show a phantom progress bar forever.
+/// Interrupted runs become explicitly resumable and their leases return to the
+/// queue. They are not auto-started because a fast run may intentionally have
+/// been stopped before the next application launch.
 pub(crate) fn recover_interrupted_media_index_runs() -> Result<(), String> {
     with_workspace(|connection, _| {
+        let timestamp = Utc::now().to_rfc3339();
         connection
             .execute(
                 "UPDATE media_index_runs
-                 SET status = 'failed', stage = 'done',
+                 SET status = 'paused',
                      error = COALESCE(error, 'Interrupted when the app closed.'),
-                     finished_at = COALESCE(finished_at, ?1), updated_at = ?1
-                 WHERE status IN ('queued', 'running')",
-                params![Utc::now().to_rfc3339()],
+                     updated_at = ?1
+                 WHERE status IN ('queued', 'running', 'pausing')",
+                params![timestamp],
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .execute(
+                "UPDATE media_fingerprint_jobs
+                 SET status = 'queued', lease_owner = NULL, lease_expires_at = NULL,
+                     updated_at = ?1
+                 WHERE status = 'running'",
+                params![timestamp],
             )
             .map_err(|error| error.to_string())?;
         Ok(())

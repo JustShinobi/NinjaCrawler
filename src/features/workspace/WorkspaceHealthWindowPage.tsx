@@ -11,6 +11,7 @@ import {
   type KeyboardEvent as ReactKeyboardEvent,
   type SetStateAction,
 } from "react";
+import { MediaViewer } from "../media/MediaViewer";
 import {
   applyMediaDedupe,
   cancelMediaDedupe,
@@ -2807,11 +2808,11 @@ function DedupeCompareModal({
                 key={file.path}
               >
                 <div className="health-dedupe-compare-preview">
-                  {file.mediaType === "video" ? (
-                    <video controls src={convertFileSrc(file.path)} />
-                  ) : (
-                    <img alt="" src={convertFileSrc(file.path)} />
-                  )}
+                  <MediaViewer
+                    fileAbsPath={file.path}
+                    isVideo={file.mediaType === "video"}
+                    alt={fileNameOf(file.path)}
+                  />
                 </div>
                 <dl className="health-dedupe-compare-meta">
                   <dt>Name</dt>

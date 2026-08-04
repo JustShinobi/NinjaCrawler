@@ -38,8 +38,8 @@ import type {
 import { WindowShell } from '../brand/WindowShell'
 import { WindowTitlebar } from '../brand/WindowTitlebar'
 import { MediaCard } from './MediaCard'
-import { MediaLightbox } from './MediaLightbox'
-import { useLightboxSession } from './lightboxSession'
+import { MediaLightbox } from '../media/MediaLightbox'
+import { useLightboxSession } from '../media/lightboxSession'
 
 interface ProfileViewPageProps {
   initialSourceId?: string

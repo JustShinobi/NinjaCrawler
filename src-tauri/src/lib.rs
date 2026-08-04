@@ -88,6 +88,8 @@ pub fn run() {
             application::commands::start_media_index_scan,
             application::commands::cancel_media_index_scan,
             application::commands::resume_media_fingerprints,
+            application::commands::set_media_index_resource_profile,
+            application::commands::retry_failed_media_fingerprints,
             application::commands::apply_media_dedupe,
             application::commands::prepare_connector_runtimes,
             application::commands::check_connector_updates,

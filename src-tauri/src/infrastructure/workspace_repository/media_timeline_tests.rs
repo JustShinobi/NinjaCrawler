@@ -72,6 +72,14 @@ fn the_timeline_merges_profiles_newest_first_and_collapses_a_post_into_one_card(
         index_media(connection, test_layout, "source-1", "a_0.jpg", "image", Some("post-a"), 1_000)?;
         index_media(connection, test_layout, "source-1", "a_1.jpg", "image", Some("post-a"), 1_000)?;
         index_media(connection, test_layout, "source-2", "b.mp4", "video", Some("post-b"), 2_000)?;
+        connection.execute(
+            "INSERT INTO provider_sync_media_ledger (
+                provider, source_id, account_id, source_handle, provider_media_key,
+                media_type, media_section, relative_path, first_seen_at, last_seen_at, title
+             ) VALUES ('twitter', 'source-1', 'account-1', '@source-1', 'a_0.jpg',
+                       'image', 'timeline', 'a_0.jpg', ?1, ?1, 'Carousel title')",
+            params!["2026-03-10T00:00:00Z"],
+        ).map_err(|error| error.to_string())?;
 
         let page = load_media_timeline_with_connection(
             connection,
@@ -84,6 +92,7 @@ fn the_timeline_merges_profiles_newest_first_and_collapses_a_post_into_one_card(
         assert_eq!(page.items[1].source_id, "source-1");
         assert_eq!(page.items[1].file_count, 2);
         assert_eq!(page.items[1].media_type, "slideshow");
+        assert_eq!(page.items[1].title.as_deref(), Some("Carousel title"));
         assert!(
             page.items[1].absolute_path.ends_with("a_0.jpg"),
             "the card points at a real file on disk"

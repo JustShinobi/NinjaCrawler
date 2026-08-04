@@ -1269,6 +1269,8 @@ export interface MediaVariantMember {
   handle: string
   mediaSection: string
   relativePath: string
+  absolutePath: string
+  mediaType: string
   sizeBytes: number
 }
 
@@ -1380,6 +1382,10 @@ export interface MediaTimelineItem {
   fileCount: number
   sizeBytes: number
   upstreamMissing: boolean
+  files: MediaGalleryFile[]
+  postUrl?: string
+  title?: string
+  audioAbsolutePath?: string
 }
 
 export interface MediaTimelineFilter {
@@ -1454,8 +1460,8 @@ export interface MediaIndexCounts {
 /** A background indexing pass. Progress is counted in profiles, not files. */
 export interface MediaIndexRun {
   id: string
-  status: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled'
-  stage: 'inventory' | 'reconcile' | 'fingerprint' | 'done'
+  status: 'queued' | 'running' | 'pausing' | 'paused' | 'completed' | 'failed' | 'cancelled'
+  stage: 'inventory' | 'reconcile' | 'planning' | 'exact' | 'image_similarity' | 'video_similarity' | 'grouping' | 'fingerprint' | 'done'
   scopeSourceId?: string
   sourcesTotal: number
   sourcesProcessed: number
@@ -1469,6 +1475,13 @@ export interface MediaIndexRun {
   fingerprintStartedAt?: string
   /** quiet | balanced | fast — how much of the machine indexing may use. */
   resourceProfile: string
+  phaseTotal: number
+  phaseDone: number
+  phaseFailed: number
+  bytesProcessed: number
+  lastProgressAt?: string
+  ratePerSecond: number
+  etaSeconds?: number
   currentSourceHandle?: string
   error?: string
   startedAt: string
