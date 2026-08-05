@@ -477,6 +477,21 @@ pub fn cancel_media_index_scan(app: tauri::AppHandle) -> Result<MediaIndexStatus
 }
 
 #[tauri::command]
+pub fn set_media_index_resource_profile(
+    app: tauri::AppHandle,
+    resource_profile: Option<String>,
+) -> Result<MediaIndexStatus, String> {
+    media_index_runtime::set_resource_profile(&app, resource_profile)
+}
+
+#[tauri::command]
+pub fn retry_failed_media_fingerprints(
+    app: tauri::AppHandle,
+) -> Result<MediaIndexStatus, String> {
+    media_index_runtime::retry_failed_fingerprints(&app)
+}
+
+#[tauri::command]
 pub fn apply_media_dedupe(
     app: tauri::AppHandle,
     input: MediaDedupeApplyInput,

@@ -2622,6 +2622,8 @@ export async function loadVariantGroups(limit?: number): Promise<MediaVariantGro
           handle: stringValue(member, ['handle'], ''),
           mediaSection: stringValue(member, ['mediaSection', 'media_section'], ''),
           relativePath: stringValue(member, ['relativePath', 'relative_path'], ''),
+          absolutePath: stringValue(member, ['absolutePath', 'absolute_path'], ''),
+          mediaType: stringValue(member, ['mediaType', 'media_type'], 'image'),
           sizeBytes: numberValue(member, ['sizeBytes', 'size_bytes'], 0),
         }]
       }),
@@ -2753,6 +2755,19 @@ function normalizeTimelineItem(raw: unknown): MediaTimelineItem | undefined {
     fileCount: numberValue(raw, ['fileCount', 'file_count'], 1),
     sizeBytes: numberValue(raw, ['sizeBytes', 'size_bytes'], 0),
     upstreamMissing: booleanValue(raw, ['upstreamMissing', 'upstream_missing'], false),
+    files: arrayValue(raw, ['files']).flatMap((file) => {
+      if (!isRecord(file)) return []
+      const absolutePath = stringValue(file, ['absolutePath', 'absolute_path'], '')
+      if (!absolutePath) return []
+      return [{
+        relativePath: stringValue(file, ['relativePath', 'relative_path'], ''),
+        absolutePath,
+        mediaType: stringValue(file, ['mediaType', 'media_type'], 'image'),
+      }]
+    }),
+    postUrl: optionalStringValue(raw, ['postUrl', 'post_url']),
+    title: optionalStringValue(raw, ['title']),
+    audioAbsolutePath: optionalStringValue(raw, ['audioAbsolutePath', 'audio_absolute_path']),
   }
 }
 
@@ -2869,12 +2884,12 @@ function normalizeMediaIndexRun(raw: unknown): MediaIndexRun | undefined {
     id,
     status: enumValue(
       pick(raw, 'status'),
-      ['queued', 'running', 'completed', 'failed', 'cancelled'] as const,
+      ['queued', 'running', 'pausing', 'paused', 'completed', 'failed', 'cancelled'] as const,
       'completed',
     ),
     stage: enumValue(
       pick(raw, 'stage'),
-      ['inventory', 'reconcile', 'fingerprint', 'done'] as const,
+      ['inventory', 'reconcile', 'planning', 'exact', 'image_similarity', 'video_similarity', 'grouping', 'fingerprint', 'done'] as const,
       'done',
     ),
     scopeSourceId: optionalStringValue(raw, ['scopeSourceId', 'scope_source_id']),
@@ -2891,6 +2906,13 @@ function normalizeMediaIndexRun(raw: unknown): MediaIndexRun | undefined {
       'fingerprint_started_at',
     ]),
     resourceProfile: stringValue(raw, ['resourceProfile', 'resource_profile'], 'balanced'),
+    phaseTotal: numberValue(raw, ['phaseTotal', 'phase_total'], 0),
+    phaseDone: numberValue(raw, ['phaseDone', 'phase_done'], 0),
+    phaseFailed: numberValue(raw, ['phaseFailed', 'phase_failed'], 0),
+    bytesProcessed: numberValue(raw, ['bytesProcessed', 'bytes_processed'], 0),
+    lastProgressAt: optionalStringValue(raw, ['lastProgressAt', 'last_progress_at']),
+    ratePerSecond: numberValue(raw, ['ratePerSecond', 'rate_per_second'], 0),
+    etaSeconds: optionalNumberValue(raw, ['etaSeconds', 'eta_seconds']),
     currentSourceHandle: optionalStringValue(raw, ['currentSourceHandle', 'current_source_handle']),
     error: optionalStringValue(raw, ['error']),
     startedAt: stringValue(raw, ['startedAt', 'started_at'], ''),
@@ -2942,6 +2964,18 @@ export async function resumeMediaFingerprints(
 
 export async function cancelMediaIndexScan(): Promise<MediaIndexStatus> {
   return normalizeMediaIndexStatus(await invoke<unknown>('cancel_media_index_scan'))
+}
+
+export async function setMediaIndexResourceProfile(
+  resourceProfile: 'quiet' | 'balanced' | 'fast',
+): Promise<MediaIndexStatus> {
+  return normalizeMediaIndexStatus(
+    await invoke<unknown>('set_media_index_resource_profile', { resourceProfile }),
+  )
+}
+
+export async function retryFailedMediaFingerprints(): Promise<MediaIndexStatus> {
+  return normalizeMediaIndexStatus(await invoke<unknown>('retry_failed_media_fingerprints'))
 }
 
 export async function loadMediaDedupeStatus(): Promise<MediaDedupeJobStatus> {

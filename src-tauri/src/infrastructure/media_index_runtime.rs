@@ -1,114 +1,36 @@
-//! Background indexing of the media library into the canonical `media_index`.
+//! Candidate-driven background indexing for the canonical media library.
 //!
-//! The sync path registers every file it downloads, but that only covers media
-//! this app fetched itself. Everything else — libraries imported from SCrawler
-//! or 4K Stogram, files moved or deleted outside the app, media downloaded
-//! before the index existed — only reaches the index through a run started
-//! here.
-//!
-//! Work is scheduled per profile: walking one profile folder is the unit of
-//! progress. Fingerprints are not computed here; the run inherits whatever the
-//! dedupe catalog already hashed and leaves the rest `pending` for the
-//! fingerprint backlog.
+//! Reconciliation still discovers files per profile, but expensive fingerprints
+//! are only produced when another eligible file can actually be compared with
+//! them. The runtime owns leases, progress snapshots and child-process lifetime.
 
-use crate::domain::models::{MediaIndexRun, MediaIndexStatus};
+use crate::domain::models::{MediaIndexCounts, MediaIndexRun, MediaIndexStatus};
 use crate::infrastructure::{media_dedupe_runtime, media_tool_runtime, workspace_repository};
 use chrono::Utc;
 use sha2::{Digest, Sha256};
 use std::io::Read;
 use std::path::Path;
-use std::process::Command;
-use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
 use uuid::Uuid;
 
-/// Frames sampled along a video to build its signature. Five points spread
-/// across the runtime survive a story being a trimmed cut of the feed post,
-/// while staying cheap enough to run over a whole library.
 const VIDEO_SIGNATURE_POSITIONS: [f64; 5] = [0.1, 0.3, 0.5, 0.7, 0.9];
-
-fn file_sha256(path: &Path) -> Option<String> {
-    let mut file = std::fs::File::open(path).ok()?;
-    let mut hasher = Sha256::new();
-    let mut buffer = [0u8; 64 * 1024];
-    loop {
-        let read = file.read(&mut buffer).ok()?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-    }
-    Some(format!("{:x}", hasher.finalize()))
-}
-
-/// Perceptual hashes of frames sampled along the video, as a JSON array.
-///
-/// This is what makes "the story and the feed post are the same video"
-/// detectable at all: the two files differ byte for byte (different encode,
-/// different crop), so only their visual content can pair them.
-fn video_signature(path: &Path, duration_ms: Option<i64>) -> Option<String> {
-    let ffmpeg = media_tool_runtime::ffmpeg_executable()?;
-    let duration_seconds = duration_ms.map(|value| value as f64 / 1000.0).unwrap_or(0.0);
-    let temp_dir = std::env::temp_dir().join(format!("ninjacrawler-vsig-{}", Uuid::new_v4()));
-    std::fs::create_dir_all(&temp_dir).ok()?;
-
-    let mut hashes = Vec::new();
-    for position in VIDEO_SIGNATURE_POSITIONS {
-        let seek = if duration_seconds > 1.0 {
-            duration_seconds * position
-        } else {
-            0.0
-        };
-        let frame_path = temp_dir.join(format!("frame-{position}.png"));
-        let mut command = Command::new(&ffmpeg);
-        media_tool_runtime::configure_tool_path(&mut command);
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            command.creation_flags(0x0800_0000);
-        }
-        let output = command
-            .arg("-hide_banner")
-            .arg("-loglevel")
-            .arg("error")
-            .arg("-y")
-            .arg("-ss")
-            .arg(format!("{seek:.2}"))
-            .arg("-i")
-            .arg(path)
-            .arg("-frames:v")
-            .arg("1")
-            .arg("-vf")
-            .arg("scale=64:64")
-            .arg(&frame_path)
-            .output()
-            .ok();
-        let produced = output.is_some_and(|value| value.status.success()) && frame_path.is_file();
-        if produced {
-            if let Ok(image) = image::open(&frame_path) {
-                let (_, dhash) = media_dedupe_runtime::image_hashes(&image);
-                hashes.push(dhash);
-            }
-        }
-        let _ = std::fs::remove_file(&frame_path);
-    }
-    let _ = std::fs::remove_dir_all(&temp_dir);
-
-    // A single frame says almost nothing; refuse to publish a signature that
-    // would produce confident-looking but meaningless matches.
-    if hashes.len() < 2 {
-        return None;
-    }
-    serde_json::to_string(&hashes).ok()
-}
+const PROCESS_TIMEOUT: Duration = Duration::from_secs(60);
+const SNAPSHOT_INTERVAL: Duration = Duration::from_millis(500);
+const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(2);
 
 pub const MEDIA_INDEX_STATUS_CHANGED_EVENT: &str = "media-index://status-changed";
 
 #[derive(Default)]
 struct RuntimeState {
     run: Option<MediaIndexRun>,
+    counts: Option<MediaIndexCounts>,
     cancel: Option<Arc<AtomicBool>>,
+    resource_profile: Option<Arc<Mutex<String>>>,
+    last_persisted_at: Option<Instant>,
 }
 
 fn runtime_state() -> &'static Mutex<RuntimeState> {
@@ -116,21 +38,20 @@ fn runtime_state() -> &'static Mutex<RuntimeState> {
     STATE.get_or_init(|| Mutex::new(RuntimeState::default()))
 }
 
-fn is_running(run: &MediaIndexRun) -> bool {
-    run.status == "queued" || run.status == "running"
+fn is_active(run: &MediaIndexRun) -> bool {
+    matches!(run.status.as_str(), "queued" | "running" | "pausing")
 }
 
-/// Publishes the in-memory run when there is one, falling back to whatever the
-/// database holds. Callers get a consistent answer whether or not a run is
-/// active in this process.
 pub fn status() -> Result<MediaIndexStatus, String> {
-    let mut status = workspace_repository::load_media_index_status()?;
     if let Ok(state) = runtime_state().lock() {
-        if let Some(run) = state.run.clone() {
-            status.run = Some(run);
+        if let (Some(run), Some(counts)) = (state.run.clone(), state.counts.clone()) {
+            return Ok(MediaIndexStatus {
+                counts,
+                run: Some(run),
+            });
         }
     }
-    Ok(status)
+    workspace_repository::load_media_index_status()
 }
 
 fn publish(app: &AppHandle) {
@@ -139,40 +60,57 @@ fn publish(app: &AppHandle) {
     }
 }
 
-/// Mutates the active run, persists it and notifies the UI. Persistence errors
-/// are swallowed on purpose: losing a progress row must not abort an indexing
-/// pass that is otherwise making progress.
-fn update_run(app: &AppHandle, update: impl FnOnce(&mut MediaIndexRun)) {
-    let snapshot = {
+fn update_run(app: &AppHandle, force_persist: bool, update: impl FnOnce(&mut MediaIndexRun)) {
+    let (snapshot, should_persist) = {
         let Ok(mut state) = runtime_state().lock() else {
             return;
         };
+        let now = Instant::now();
+        let should_persist = force_persist
+            || state
+                .last_persisted_at
+                .is_none_or(|last| now.duration_since(last) >= HEARTBEAT_INTERVAL);
+        if should_persist {
+            state.last_persisted_at = Some(now);
+        }
         let Some(run) = state.run.as_mut() else {
             return;
         };
         update(run);
-        run.clone()
+        (run.clone(), should_persist)
     };
-    let _ = workspace_repository::persist_media_index_run(&snapshot);
+    if should_persist {
+        let _ = workspace_repository::persist_media_index_run(&snapshot);
+    }
     publish(app);
+}
+
+fn refresh_cached_counts() {
+    let Ok(status) = workspace_repository::load_media_index_status() else {
+        return;
+    };
+    if let Ok(mut state) = runtime_state().lock() {
+        state.counts = Some(status.counts);
+    }
 }
 
 pub fn recover_interrupted_runs() {
     let _ = workspace_repository::recover_interrupted_media_index_runs();
+    cleanup_owned_signature_temporaries();
 }
 
-/// How many files are fingerprinted at once, from the same vocabulary the media
-/// cleanup already uses. Nothing takes the whole machine unless the operator
-/// asks for it — `balanced` is half the logical cores.
-fn worker_count(resource_profile: &str) -> usize {
-    let cores = std::thread::available_parallelism()
-        .map(usize::from)
-        .unwrap_or(2)
-        .max(1);
-    match resource_profile {
-        "quiet" => 1,
-        "fast" => cores.saturating_sub(1).max(1),
-        _ => (cores / 2).max(2),
+fn cleanup_owned_signature_temporaries() {
+    let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with("ninjacrawler-vsig-")
+        {
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
     }
 }
 
@@ -187,6 +125,88 @@ fn normalize_resource_profile(profile: Option<String>) -> String {
         "fast" => "fast".to_string(),
         _ => "balanced".to_string(),
     }
+}
+
+fn current_profile(profile: &Arc<Mutex<String>>) -> String {
+    profile
+        .lock()
+        .map(|value| value.clone())
+        .unwrap_or_else(|_| "balanced".to_string())
+}
+
+fn worker_count(kind: &str, profile: &str) -> usize {
+    match kind {
+        "perceptual_video" => match profile {
+            "fast" => 2,
+            _ => 1,
+        },
+        "exact" => match profile {
+            "fast" => 2,
+            _ => 1,
+        },
+        // Image decoding is CPU-bound after the read, but each worker is also
+        // a storage reader. Capping this lane prevents a high-core machine from
+        // turning one volume into the old 15-reader seek storm.
+        _ => match profile {
+            "fast" => 2,
+            _ => 1,
+        },
+    }
+}
+
+fn blank_run(
+    id: String,
+    stage: &str,
+    scope_source_id: Option<String>,
+    resource_profile: String,
+) -> MediaIndexRun {
+    MediaIndexRun {
+        id,
+        status: "running".to_string(),
+        stage: stage.to_string(),
+        scope_source_id,
+        sources_total: 0,
+        sources_processed: 0,
+        files_indexed: 0,
+        files_updated: 0,
+        files_missing: 0,
+        hashes_inherited: 0,
+        fingerprints_total: 0,
+        fingerprints_done: 0,
+        fingerprint_started_at: None,
+        resource_profile,
+        phase_total: 0,
+        phase_done: 0,
+        phase_failed: 0,
+        bytes_processed: 0,
+        last_progress_at: Some(Utc::now().to_rfc3339()),
+        rate_per_second: 0.0,
+        eta_seconds: None,
+        current_source_handle: None,
+        error: None,
+        started_at: Utc::now().to_rfc3339(),
+        finished_at: None,
+    }
+}
+
+fn install_run(
+    run: MediaIndexRun,
+    cancel: Arc<AtomicBool>,
+    profile: Arc<Mutex<String>>,
+) -> Result<(), String> {
+    let counts = workspace_repository::load_media_index_status()?.counts;
+    let mut state = runtime_state()
+        .lock()
+        .map_err(|_| "The media index runtime is unavailable.".to_string())?;
+    if state.run.as_ref().is_some_and(is_active) {
+        return Err("An indexing run is already in progress.".to_string());
+    }
+    state.run = Some(run);
+    state.counts = Some(counts);
+    state.cancel = Some(cancel);
+    state.resource_profile = Some(profile);
+    state.last_persisted_at = Some(Instant::now());
+    Ok(())
 }
 
 pub fn start_scan(
@@ -204,122 +224,64 @@ pub fn start_scan(
     }
 
     let cancel = Arc::new(AtomicBool::new(false));
-    let run = MediaIndexRun {
-        id: Uuid::new_v4().to_string(),
-        status: "running".to_string(),
-        stage: "reconcile".to_string(),
-        scope_source_id: scope_source_id.clone(),
-        sources_total: targets.len() as i64,
-        sources_processed: 0,
-        files_indexed: 0,
-        files_updated: 0,
-        files_missing: 0,
-        hashes_inherited: 0,
-        fingerprints_total: 0,
-        fingerprints_done: 0,
-        fingerprint_started_at: None,
-        resource_profile: resource_profile.clone(),
-        current_source_handle: None,
-        error: None,
-        started_at: Utc::now().to_rfc3339(),
-        finished_at: None,
-    };
-
-    {
-        let mut state = runtime_state()
-            .lock()
-            .map_err(|_| "The media index runtime is unavailable.".to_string())?;
-        if state.run.as_ref().is_some_and(is_running) {
-            return Err("An indexing run is already in progress.".to_string());
-        }
-        state.run = Some(run.clone());
-        state.cancel = Some(cancel.clone());
-    }
+    let profile = Arc::new(Mutex::new(resource_profile.clone()));
+    let mut run = blank_run(
+        Uuid::new_v4().to_string(),
+        "reconcile",
+        scope_source_id,
+        resource_profile,
+    );
+    run.sources_total = targets.len() as i64;
+    install_run(run.clone(), Arc::clone(&cancel), Arc::clone(&profile))?;
     workspace_repository::insert_media_index_run(&run)?;
     publish(app);
 
-    let workers = worker_count(&resource_profile);
     let app = app.clone();
-    std::thread::spawn(move || run_scan(app, targets, cancel, workers));
+    std::thread::spawn(move || run_scan(app, targets, cancel, profile));
     status()
 }
 
-/// Resumes only the fingerprint backlog.
-///
-/// Hashing a large library takes far longer than one session, and re-walking
-/// every profile folder first would waste minutes before the first hash. This
-/// picks up exactly where the previous run stopped.
 pub fn resume_fingerprints(
     app: &AppHandle,
     resource_profile: Option<String>,
 ) -> Result<MediaIndexStatus, String> {
     let resource_profile = normalize_resource_profile(resource_profile);
-    let pending = workspace_repository::count_pending_fingerprints()?;
-    if pending == 0 {
-        return status();
-    }
-
     let cancel = Arc::new(AtomicBool::new(false));
-    let run = MediaIndexRun {
-        id: Uuid::new_v4().to_string(),
-        status: "running".to_string(),
-        stage: "fingerprint".to_string(),
-        scope_source_id: None,
-        sources_total: 0,
-        sources_processed: 0,
-        files_indexed: 0,
-        files_updated: 0,
-        files_missing: 0,
-        hashes_inherited: 0,
-        fingerprints_total: pending,
-        fingerprints_done: 0,
-        fingerprint_started_at: Some(Utc::now().to_rfc3339()),
-        resource_profile: resource_profile.clone(),
-        current_source_handle: None,
-        error: None,
-        started_at: Utc::now().to_rfc3339(),
-        finished_at: None,
-    };
-
-    {
-        let mut state = runtime_state()
-            .lock()
-            .map_err(|_| "The media index runtime is unavailable.".to_string())?;
-        if state.run.as_ref().is_some_and(is_running) {
-            return Err("An indexing run is already in progress.".to_string());
-        }
-        state.run = Some(run.clone());
-        state.cancel = Some(cancel.clone());
+    let profile = Arc::new(Mutex::new(resource_profile.clone()));
+    let previous = workspace_repository::load_media_index_status()?
+        .run
+        .filter(|run| run.status == "paused");
+    let resumed_existing = previous.is_some();
+    let mut run = previous.unwrap_or_else(|| {
+        blank_run(
+            Uuid::new_v4().to_string(),
+            "planning",
+            None,
+            resource_profile.clone(),
+        )
+    });
+    run.status = "running".to_string();
+    run.stage = "planning".to_string();
+    run.resource_profile = resource_profile;
+    run.finished_at = None;
+    run.error = None;
+    // Candidate planning can take tens of seconds on a very large catalog. It
+    // must only run on the background worker below; doing it here blocks the
+    // Tauri command (and the Library window) and then plans the same run twice.
+    run.fingerprints_total = 0;
+    run.fingerprints_done = 0;
+    run.fingerprint_started_at = Some(Utc::now().to_rfc3339());
+    run.last_progress_at = Some(Utc::now().to_rfc3339());
+    install_run(run.clone(), Arc::clone(&cancel), Arc::clone(&profile))?;
+    if resumed_existing {
+        workspace_repository::persist_media_index_run(&run)?;
+    } else {
+        workspace_repository::insert_media_index_run(&run)?;
     }
-    workspace_repository::insert_media_index_run(&run)?;
     publish(app);
 
-    let workers = worker_count(&resource_profile);
-    let app_handle = app.clone();
-    std::thread::spawn(move || {
-        run_fingerprint_backlog(&app_handle, &cancel, workers);
-        let cancelled = cancel.load(Ordering::SeqCst);
-        // Variant detection needs fingerprints, so it only runs on a complete pass.
-        if !cancelled {
-            if let Ok(sources) = workspace_repository::media_index_reconcile_targets(None) {
-                for (source_id, _) in sources {
-                    if cancel.load(Ordering::SeqCst) {
-                        break;
-                    }
-                    let _ = workspace_repository::detect_variants_for_source(source_id);
-                }
-            }
-        }
-        update_run(&app_handle, |run| {
-            run.status = if cancelled { "cancelled" } else { "completed" }.to_string();
-            run.stage = "done".to_string();
-            run.finished_at = Some(Utc::now().to_rfc3339());
-        });
-        if let Ok(mut state) = runtime_state().lock() {
-            state.cancel = None;
-        }
-        publish(&app_handle);
-    });
+    let app = app.clone();
+    std::thread::spawn(move || finish_fingerprint_run(&app, &cancel, &profile, Vec::new()));
     status()
 }
 
@@ -330,138 +292,600 @@ pub fn cancel_scan(app: &AppHandle) -> Result<MediaIndexStatus, String> {
         .and_then(|state| state.cancel.clone());
     if let Some(cancel) = cancel {
         cancel.store(true, Ordering::SeqCst);
+        update_run(app, true, |run| {
+            if run.status == "running" {
+                run.status = "pausing".to_string();
+            }
+        });
     }
-    publish(app);
     status()
 }
 
-/// Works through the fingerprint backlog: sha256 for everything, perceptual
-/// hashes for images, sampled-frame signatures for videos.
-///
-/// Runs after the reconciliation pass so newly indexed media is included, and
-/// stops as soon as cancellation is requested — hashing a library is long, and
-/// an operator who cancels means it.
-/// Hashes one file. Returns false when the file changed mid-flight, in which
-/// case it stays pending for the next run instead of storing a stale hash.
-fn fingerprint_one(item: &workspace_repository::PendingFingerprint) -> bool {
-    let Some(sha256) = file_sha256(&item.absolute_path) else {
-        let _ = workspace_repository::mark_fingerprint_failed(&item.id);
-        return true;
-    };
-    let (ahash, dhash, signature, width, height) = if item.media_type == "video" {
-        (
-            None,
-            None,
-            video_signature(&item.absolute_path, item.duration_ms),
-            None,
-            None,
-        )
-    } else {
-        match image::open(&item.absolute_path) {
-            Ok(image) => {
-                let (ahash, dhash) = media_dedupe_runtime::image_hashes(&image);
-                let width = i64::from(image::GenericImageView::width(&image));
-                let height = i64::from(image::GenericImageView::height(&image));
-                (Some(ahash), Some(dhash), None, Some(width), Some(height))
-            }
-            Err(_) => (None, None, None, None, None),
+pub fn set_resource_profile(
+    app: &AppHandle,
+    resource_profile: Option<String>,
+) -> Result<MediaIndexStatus, String> {
+    let normalized = normalize_resource_profile(resource_profile);
+    let profile = runtime_state()
+        .lock()
+        .ok()
+        .and_then(|state| state.resource_profile.clone());
+    if let Some(profile) = profile {
+        if let Ok(mut value) = profile.lock() {
+            *value = normalized.clone();
         }
-    };
+        update_run(app, true, |run| run.resource_profile = normalized);
+    }
+    status()
+}
 
-    !matches!(
-        workspace_repository::store_media_fingerprint(
-            &item.id,
-            Some(&sha256),
-            ahash.as_deref(),
-            dhash.as_deref(),
-            signature.as_deref(),
-            width,
-            height,
-            item.size_bytes,
-            item.modified_at_ms,
-        ),
-        Ok(false)
+pub fn retry_failed_fingerprints(app: &AppHandle) -> Result<MediaIndexStatus, String> {
+    let retried = workspace_repository::retry_failed_media_fingerprint_jobs()?;
+    if retried == 0 {
+        refresh_cached_counts();
+        publish(app);
+        return status();
+    }
+    let resource_profile = runtime_state()
+        .lock()
+        .ok()
+        .and_then(|state| state.run.as_ref().map(|run| run.resource_profile.clone()));
+    resume_fingerprints(app, resource_profile)
+}
+
+fn file_sha256(path: &Path) -> Result<String, &'static str> {
+    let mut file = std::fs::File::open(path).map_err(|_| "unreadable")?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 1024 * 1024];
+    loop {
+        let read = file.read(&mut buffer).map_err(|_| "unreadable")?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn bytes_sha256(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+fn configure_child(command: &mut Command) {
+    media_tool_runtime::configure_tool_path(command);
+    command.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x0800_0000);
+    }
+}
+
+#[cfg(windows)]
+struct KillOnCloseJob(windows_sys::Win32::Foundation::HANDLE);
+
+#[cfg(windows)]
+impl KillOnCloseJob {
+    fn attach(child: &Child) -> Option<Self> {
+        use std::mem::{size_of, zeroed};
+        use std::os::windows::io::AsRawHandle;
+        use std::ptr::null;
+        use windows_sys::Win32::System::JobObjects::{
+            AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+            SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        };
+
+        unsafe {
+            let job = CreateJobObjectW(null(), null());
+            if job.is_null() {
+                return None;
+            }
+            let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = zeroed();
+            limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            let configured = SetInformationJobObject(
+                job,
+                JobObjectExtendedLimitInformation,
+                &limits as *const _ as *const _,
+                size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            ) != 0;
+            let assigned = configured
+                && AssignProcessToJobObject(job, child.as_raw_handle() as _) != 0;
+            if assigned {
+                Some(Self(job))
+            } else {
+                let _ = windows_sys::Win32::Foundation::CloseHandle(job);
+                None
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+impl Drop for KillOnCloseJob {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = windows_sys::Win32::Foundation::CloseHandle(self.0);
+        }
+    }
+}
+
+fn terminate_child_tree(child: &mut Child) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        let _ = Command::new("taskkill")
+            .args(["/PID", &child.id().to_string(), "/T", "/F"])
+            .creation_flags(0x0800_0000)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+trait ProcessControl {
+    fn poll(&mut self) -> Result<Option<bool>, ()>;
+    fn terminate(&mut self);
+}
+
+struct ChildProcess<'a>(&'a mut Child);
+
+impl ProcessControl for ChildProcess<'_> {
+    fn poll(&mut self) -> Result<Option<bool>, ()> {
+        self.0
+            .try_wait()
+            .map(|status| status.map(|status| status.success()))
+            .map_err(|_| ())
+    }
+
+    fn terminate(&mut self) {
+        terminate_child_tree(self.0);
+    }
+}
+
+fn wait_for_process(
+    process: &mut impl ProcessControl,
+    cancel: &AtomicBool,
+    timeout: Duration,
+    poll_interval: Duration,
+) -> Result<(), &'static str> {
+    let started = Instant::now();
+    loop {
+        if cancel.load(Ordering::SeqCst) {
+            process.terminate();
+            return Err("cancelled");
+        }
+        if started.elapsed() >= timeout {
+            process.terminate();
+            return Err("timeout");
+        }
+        match process.poll() {
+            Ok(Some(true)) => return Ok(()),
+            Ok(Some(false)) => return Err("process_failed"),
+            Ok(None) => std::thread::sleep(poll_interval),
+            Err(()) => {
+                process.terminate();
+                return Err("process_failed");
+            }
+        }
+    }
+}
+
+fn wait_for_child(
+    child: &mut Child,
+    cancel: &AtomicBool,
+    timeout: Duration,
+) -> Result<(), &'static str> {
+    wait_for_process(
+        &mut ChildProcess(child),
+        cancel,
+        timeout,
+        Duration::from_millis(100),
     )
 }
 
-fn run_fingerprint_backlog(app: &AppHandle, cancel: &Arc<AtomicBool>, workers: usize) {
-    // Each worker keeps a file in flight; SQLite is in WAL mode with a busy
-    // timeout, so the short writes at the end of each file serialize without
-    // failing.
-    let batch = (workers * 8).clamp(8, 240) as u32;
-    let total = workspace_repository::count_pending_fingerprints().unwrap_or(0);
-    let done = Arc::new(AtomicI64::new(0));
-    update_run(app, |run| {
-        run.fingerprints_total = total;
-        run.fingerprints_done = 0;
-        run.fingerprint_started_at = Some(Utc::now().to_rfc3339());
-    });
+fn probe_duration_seconds(path: &Path, cancel: &AtomicBool) -> Option<f64> {
+    let ffprobe = media_tool_runtime::ffprobe_executable()?;
+    let output_path = std::env::temp_dir().join(format!(
+        "ninjacrawler-vsig-{}-duration.txt",
+        Uuid::new_v4()
+    ));
+    let output = std::fs::File::create(&output_path).ok()?;
+    let mut command = Command::new(ffprobe);
+    media_tool_runtime::configure_tool_path(&mut command);
+    command
+        .args([
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+        ])
+        .arg(path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(output))
+        .stderr(Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x0800_0000);
+    }
+    let mut child = command.spawn().ok()?;
+    #[cfg(windows)]
+    let _job = KillOnCloseJob::attach(&child);
+    let result = wait_for_child(&mut child, cancel, Duration::from_secs(15));
+    let text = result
+        .ok()
+        .and_then(|_| std::fs::read_to_string(&output_path).ok());
+    let _ = std::fs::remove_file(output_path);
+    text?.trim().parse::<f64>().ok().filter(|value| *value > 0.0)
+}
 
-    loop {
-        if cancel.load(Ordering::SeqCst) {
-            return;
+fn video_signature(
+    path: &Path,
+    duration_ms: Option<i64>,
+    cancel: &AtomicBool,
+) -> Result<String, &'static str> {
+    let ffmpeg = media_tool_runtime::ffmpeg_executable().ok_or("ffmpeg_unavailable")?;
+    let duration_seconds = duration_ms
+        .map(|value| value as f64 / 1000.0)
+        .filter(|value| *value > 0.0)
+        .or_else(|| probe_duration_seconds(path, cancel))
+        .ok_or("probe_failed")?;
+    let temp_dir = std::env::temp_dir().join(format!("ninjacrawler-vsig-{}", Uuid::new_v4()));
+    std::fs::create_dir_all(&temp_dir).map_err(|_| "temporary_directory")?;
+    let sheet_path = temp_dir.join("samples.png");
+
+    let mut command = Command::new(ffmpeg);
+    configure_child(&mut command);
+    command.args(["-hide_banner", "-loglevel", "error", "-y"]);
+    for position in VIDEO_SIGNATURE_POSITIONS {
+        command
+            .arg("-ss")
+            .arg(format!("{:.3}", duration_seconds * position))
+            .arg("-i")
+            .arg(path);
+    }
+    command
+        .arg("-filter_complex")
+        .arg("[0:v]scale=64:64[v0];[1:v]scale=64:64[v1];[2:v]scale=64:64[v2];[3:v]scale=64:64[v3];[4:v]scale=64:64[v4];[v0][v1][v2][v3][v4]hstack=inputs=5[out]")
+        .args(["-map", "[out]", "-frames:v", "1"])
+        .arg(&sheet_path);
+    let result = match command.spawn() {
+        Ok(mut child) => {
+            #[cfg(windows)]
+            let _job = KillOnCloseJob::attach(&child);
+            wait_for_child(&mut child, cancel, PROCESS_TIMEOUT)
         }
-        let Ok(pending) = workspace_repository::load_pending_fingerprints(batch) else {
-            return;
+        Err(_) => Err("process_failed"),
+    };
+    if let Err(error) = result {
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        return Err(error);
+    }
+
+    let sheet = image::open(&sheet_path).map_err(|_| "frame_decode_failed")?;
+    if sheet.width() < 64 * VIDEO_SIGNATURE_POSITIONS.len() as u32 || sheet.height() < 64 {
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        return Err("frame_decode_failed");
+    }
+    let mut hashes = Vec::with_capacity(VIDEO_SIGNATURE_POSITIONS.len());
+    for index in 0..VIDEO_SIGNATURE_POSITIONS.len() {
+        let frame = sheet.crop_imm(index as u32 * 64, 0, 64, 64);
+        let (_, dhash) = media_dedupe_runtime::image_hashes(&frame);
+        hashes.push(dhash);
+    }
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    serde_json::to_string(&hashes).map_err(|_| "signature_encode_failed")
+}
+
+#[derive(Default)]
+struct FingerprintOutcome {
+    settled_jobs: i64,
+    phase_done: i64,
+    phase_failed: i64,
+    bytes: i64,
+}
+
+fn process_fingerprint(
+    item: &workspace_repository::PendingFingerprint,
+    cancel: &AtomicBool,
+) -> FingerprintOutcome {
+    if cancel.load(Ordering::SeqCst) {
+        return FingerprintOutcome::default();
+    }
+    let result = match item.kind.as_str() {
+        "exact" => file_sha256(&item.absolute_path).map(|sha| {
+            (Some(sha), None, None, None, None, None)
+        }),
+        "perceptual_image" => std::fs::read(&item.absolute_path)
+            .map_err(|_| "unreadable")
+            .and_then(|bytes| {
+                let image = image::load_from_memory(&bytes).map_err(|_| "image_decode_failed")?;
+                let (ahash, dhash) = media_dedupe_runtime::image_hashes(&image);
+                let sha = item.also_needs_exact.then(|| bytes_sha256(&bytes));
+                Ok((
+                    sha,
+                    Some(ahash),
+                    Some(dhash),
+                    None,
+                    Some(i64::from(image.width())),
+                    Some(i64::from(image.height())),
+                ))
+            }),
+        "perceptual_video" => video_signature(&item.absolute_path, item.duration_ms, cancel).and_then(
+            |signature| {
+                let sha = if item.also_needs_exact {
+                    Some(file_sha256(&item.absolute_path)?)
+                } else {
+                    None
+                };
+                Ok((sha, None, None, Some(signature), None, None))
+            }),
+        _ => Err("unsupported_job"),
+    };
+
+    match result {
+        Ok((sha, ahash, dhash, signature, width, height)) => {
+            let stored = workspace_repository::complete_media_fingerprint_job(
+                item,
+                sha.as_deref(),
+                ahash.as_deref(),
+                dhash.as_deref(),
+                signature.as_deref(),
+                width,
+                height,
+            )
+            .unwrap_or(false);
+            FingerprintOutcome {
+                settled_jobs: if stored {
+                    1 + i64::from(item.also_needs_exact && sha.is_some())
+                } else {
+                    0
+                },
+                phase_done: i64::from(stored),
+                phase_failed: 0,
+                bytes: if stored { item.size_bytes } else { 0 },
+            }
+        }
+        Err("cancelled") => FingerprintOutcome::default(),
+        Err(error) => {
+            let terminal = workspace_repository::mark_fingerprint_job_failed(item, error)
+                .unwrap_or(false);
+            FingerprintOutcome {
+                settled_jobs: i64::from(terminal),
+                phase_done: i64::from(terminal),
+                phase_failed: i64::from(terminal),
+                bytes: 0,
+            }
+        }
+    }
+}
+
+fn run_phase(
+    app: &AppHandle,
+    cancel: &Arc<AtomicBool>,
+    profile: &Arc<Mutex<String>>,
+    lease_owner: &str,
+    kind: &str,
+    stage: &str,
+    initial_total: i64,
+) {
+    update_run(app, true, |run| {
+        run.stage = stage.to_string();
+        run.phase_total = initial_total;
+        run.phase_done = 0;
+        run.phase_failed = 0;
+        run.last_progress_at = Some(Utc::now().to_rfc3339());
+        run.rate_per_second = 0.0;
+        run.eta_seconds = None;
+    });
+    let phase_started = Instant::now();
+    let mut last_snapshot = Instant::now();
+    let mut phase_done = 0_i64;
+    let mut phase_failed = 0_i64;
+    let mut settled_jobs = 0_i64;
+    let mut bytes = 0_i64;
+
+    while !cancel.load(Ordering::SeqCst) {
+        let workers = worker_count(kind, &current_profile(profile));
+        let batch = (workers * 4).clamp(4, 64) as u32;
+        let Ok(mut pending) = workspace_repository::lease_pending_fingerprints(kind, batch, lease_owner)
+        else {
+            break;
         };
         if pending.is_empty() {
-            return;
+            break;
         }
-
+        pending.reverse();
         let queue = Arc::new(Mutex::new(pending));
+        let (sender, receiver) = mpsc::channel();
         let mut handles = Vec::with_capacity(workers);
-        for _ in 0..workers.max(1) {
+        for _ in 0..workers {
             let queue = Arc::clone(&queue);
             let cancel = Arc::clone(cancel);
-            let done = Arc::clone(&done);
+            let sender = sender.clone();
             handles.push(std::thread::spawn(move || loop {
-                if cancel.load(Ordering::SeqCst) {
-                    return;
-                }
-                let next = {
-                    let Ok(mut queue) = queue.lock() else {
-                        return;
-                    };
-                    queue.pop()
-                };
+                let next = queue.lock().ok().and_then(|mut queue| queue.pop());
                 let Some(item) = next else {
                     return;
                 };
-                if fingerprint_one(&item) {
-                    done.fetch_add(1, Ordering::Relaxed);
+                let outcome = process_fingerprint(&item, &cancel);
+                let _ = sender.send(outcome);
+                if cancel.load(Ordering::SeqCst) {
+                    return;
                 }
             }));
+        }
+        drop(sender);
+
+        while let Ok(outcome) = receiver.recv() {
+            phase_done += outcome.phase_done;
+            phase_failed += outcome.phase_failed;
+            settled_jobs += outcome.settled_jobs;
+            bytes += outcome.bytes;
+            if last_snapshot.elapsed() >= SNAPSHOT_INTERVAL {
+                let elapsed = phase_started.elapsed().as_secs_f64().max(0.001);
+                let rate = phase_done as f64 / elapsed;
+                let remaining = initial_total.saturating_sub(phase_done);
+                update_run(app, false, |run| {
+                    run.phase_done = phase_done;
+                    run.phase_failed = phase_failed;
+                    run.fingerprints_done += settled_jobs;
+                    settled_jobs = 0;
+                    run.bytes_processed += bytes;
+                    bytes = 0;
+                    run.last_progress_at = Some(Utc::now().to_rfc3339());
+                    run.rate_per_second = rate;
+                    run.eta_seconds = (rate > 0.0).then(|| (remaining as f64 / rate) as i64);
+                });
+                last_snapshot = Instant::now();
+            }
         }
         for handle in handles {
             let _ = handle.join();
         }
-
-        let processed = done.load(Ordering::Relaxed);
-        update_run(app, |run| {
-            run.fingerprints_done = processed;
-        });
     }
+
+    update_run(app, true, |run| {
+        run.phase_done = phase_done;
+        run.phase_failed = phase_failed;
+        run.fingerprints_done += settled_jobs;
+        run.bytes_processed += bytes;
+        run.last_progress_at = Some(Utc::now().to_rfc3339());
+        let elapsed = phase_started.elapsed().as_secs_f64().max(0.001);
+        run.rate_per_second = phase_done as f64 / elapsed;
+        run.eta_seconds = None;
+    });
+}
+
+fn finish_fingerprint_run(
+    app: &AppHandle,
+    cancel: &Arc<AtomicBool>,
+    profile: &Arc<Mutex<String>>,
+    _source_ids: Vec<String>,
+) {
+    update_run(app, true, |run| {
+        run.stage = "planning".to_string();
+        run.last_progress_at = Some(Utc::now().to_rfc3339());
+    });
+    let planned = match workspace_repository::plan_media_fingerprint_jobs() {
+        Ok(value) => value,
+        Err(error) => {
+            complete_run(app, false, Some(error));
+            return;
+        }
+    };
+    update_run(app, true, |run| {
+        run.fingerprints_total = planned.pending();
+        run.fingerprints_done = 0;
+        run.fingerprint_started_at = Some(Utc::now().to_rfc3339());
+    });
+    let lease_owner = runtime_state()
+        .lock()
+        .ok()
+        .and_then(|state| state.run.as_ref().map(|run| run.id.clone()))
+        .unwrap_or_else(|| Uuid::new_v4().to_string());
+
+    // Perceptual jobs run first so their single file read can also settle an
+    // exact job for the same media. Exact-only work then drains the remainder.
+    run_phase(
+        app,
+        cancel,
+        profile,
+        &lease_owner,
+        "perceptual_image",
+        "image_similarity",
+        planned.perceptual_image,
+    );
+    run_phase(
+        app,
+        cancel,
+        profile,
+        &lease_owner,
+        "perceptual_video",
+        "video_similarity",
+        planned.perceptual_video,
+    );
+    run_phase(
+        app,
+        cancel,
+        profile,
+        &lease_owner,
+        "exact",
+        "exact",
+        planned.exact,
+    );
+
+    if cancel.load(Ordering::SeqCst) {
+        let _ = workspace_repository::release_media_fingerprint_leases(&lease_owner);
+        complete_run(app, true, None);
+        return;
+    }
+
+    update_run(app, true, |run| {
+        run.stage = "grouping".to_string();
+        run.phase_total = 1;
+        run.phase_done = 0;
+        run.phase_failed = 0;
+    });
+    let failed = workspace_repository::detect_variants_for_all_scopes().is_err();
+    update_run(app, true, |run| {
+        run.phase_done = 1;
+        run.phase_failed = i64::from(failed);
+        run.last_progress_at = Some(Utc::now().to_rfc3339());
+    });
+    let _ = workspace_repository::finalize_media_fingerprint_jobs();
+    refresh_cached_counts();
+    complete_run(app, cancel.load(Ordering::SeqCst), None);
+}
+
+fn complete_run(app: &AppHandle, paused: bool, error: Option<String>) {
+    update_run(app, true, |run| {
+        run.status = if paused {
+            "paused".to_string()
+        } else if error.is_some() {
+            "failed".to_string()
+        } else {
+            "completed".to_string()
+        };
+        if !paused {
+            run.stage = "done".to_string();
+            run.finished_at = Some(Utc::now().to_rfc3339());
+        }
+        run.current_source_handle = None;
+        if error.is_some() {
+            run.error = error;
+        }
+    });
+    if let Ok(mut state) = runtime_state().lock() {
+        state.cancel = None;
+        state.resource_profile = None;
+    }
+    publish(app);
 }
 
 fn run_scan(
     app: AppHandle,
     targets: Vec<(String, String)>,
     cancel: Arc<AtomicBool>,
-    workers: usize,
+    profile: Arc<Mutex<String>>,
 ) {
-    let mut failures: Vec<String> = Vec::new();
-    let source_ids: Vec<String> = targets.iter().map(|(id, _)| id.clone()).collect();
-
+    let mut failures = Vec::new();
+    let source_ids = targets.iter().map(|(id, _)| id.clone()).collect::<Vec<_>>();
     for (source_id, handle) in targets {
         if cancel.load(Ordering::SeqCst) {
             break;
         }
-        update_run(&app, |run| {
+        update_run(&app, false, |run| {
             run.current_source_handle = Some(handle.clone());
+            run.last_progress_at = Some(Utc::now().to_rfc3339());
         });
-
         match workspace_repository::reconcile_source_media_index(&source_id) {
-            Ok(outcome) => update_run(&app, |run| {
+            Ok(outcome) => update_run(&app, false, |run| {
                 run.files_indexed += outcome.indexed as i64;
                 run.files_updated += outcome.updated as i64;
                 run.files_missing += outcome.missing as i64;
@@ -469,51 +893,83 @@ fn run_scan(
                 run.sources_processed += 1;
             }),
             Err(error) => {
-                // One unreadable profile folder (offline drive, permissions)
-                // must not abandon the rest of the library.
                 failures.push(format!("{handle}: {error}"));
-                update_run(&app, |run| {
-                    run.sources_processed += 1;
-                });
+                update_run(&app, false, |run| run.sources_processed += 1);
             }
         }
     }
+    if cancel.load(Ordering::SeqCst) {
+        complete_run(&app, true, None);
+        return;
+    }
+    if !failures.is_empty() {
+        update_run(&app, true, |run| run.error = Some(failures.join("; ")));
+    }
+    finish_fingerprint_run(&app, &cancel, &profile, source_ids);
+}
 
-    if !cancel.load(Ordering::SeqCst) {
-        update_run(&app, |run| {
-            run.stage = "fingerprint".to_string();
-        });
-        run_fingerprint_backlog(&app, &cancel, workers);
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-        // Variant detection only makes sense once fingerprints exist, so it
-        // trails the backlog in the same run.
-        for source_id in &source_ids {
-            if cancel.load(Ordering::SeqCst) {
-                break;
-            }
-            let _ = workspace_repository::detect_variants_for_source(source_id.clone());
+    #[test]
+    fn worker_lanes_limit_storage_pressure() {
+        assert_eq!(worker_count("exact", "quiet"), 1);
+        assert_eq!(worker_count("exact", "balanced"), 1);
+        assert_eq!(worker_count("exact", "fast"), 2);
+        assert_eq!(worker_count("perceptual_video", "fast"), 2);
+    }
+
+    #[test]
+    fn resource_profiles_are_normalized() {
+        assert_eq!(normalize_resource_profile(Some("FAST".to_string())), "fast");
+        assert_eq!(normalize_resource_profile(Some("other".to_string())), "balanced");
+    }
+
+    #[derive(Default)]
+    struct FakeProcess {
+        polls_before_exit: usize,
+        polls: usize,
+        terminated: bool,
+    }
+
+    impl ProcessControl for FakeProcess {
+        fn poll(&mut self) -> Result<Option<bool>, ()> {
+            self.polls += 1;
+            Ok((self.polls > self.polls_before_exit).then_some(true))
+        }
+
+        fn terminate(&mut self) {
+            self.terminated = true;
         }
     }
 
-    let cancelled = cancel.load(Ordering::SeqCst);
-    update_run(&app, |run| {
-        run.status = if cancelled {
-            "cancelled".to_string()
-        } else if failures.is_empty() {
-            "completed".to_string()
-        } else {
-            "failed".to_string()
-        };
-        run.stage = "done".to_string();
-        run.current_source_handle = None;
-        run.finished_at = Some(Utc::now().to_rfc3339());
-        if !failures.is_empty() {
-            run.error = Some(failures.join("; "));
-        }
-    });
-
-    if let Ok(mut state) = runtime_state().lock() {
-        state.cancel = None;
+    #[test]
+    fn fake_process_is_terminated_on_timeout() {
+        let mut process = FakeProcess { polls_before_exit: usize::MAX, ..Default::default() };
+        let cancel = AtomicBool::new(false);
+        let result = wait_for_process(
+            &mut process,
+            &cancel,
+            Duration::ZERO,
+            Duration::ZERO,
+        );
+        assert_eq!(result, Err("timeout"));
+        assert!(process.terminated);
     }
-    publish(&app);
+
+    #[test]
+    fn fake_process_is_terminated_immediately_on_cancel() {
+        let mut process = FakeProcess::default();
+        let cancel = AtomicBool::new(true);
+        let result = wait_for_process(
+            &mut process,
+            &cancel,
+            Duration::from_secs(1),
+            Duration::ZERO,
+        );
+        assert_eq!(result, Err("cancelled"));
+        assert!(process.terminated);
+        assert_eq!(process.polls, 0);
+    }
 }

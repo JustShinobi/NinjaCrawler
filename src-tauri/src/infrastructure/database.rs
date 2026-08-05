@@ -209,6 +209,10 @@ const MIGRATIONS: &[(i64, &str)] = &[
         55,
         include_str!("../../migrations/0055_media_variants.sql"),
     ),
+    (
+        56,
+        include_str!("../../migrations/0056_media_fingerprint_jobs.sql"),
+    ),
 ];
 
 const COLLECTIONS_SCHEMA: &str = include_str!("../../migrations/0054_collections.sql");
@@ -395,6 +399,58 @@ fn ensure_media_index_schema(connection: &Connection) -> rusqlite::Result<()> {
     Ok(())
 }
 
+fn ensure_media_fingerprint_jobs_schema(connection: &Connection) -> rusqlite::Result<()> {
+    connection.execute_batch(
+        "CREATE TABLE IF NOT EXISTS media_fingerprint_jobs (
+            media_id TEXT NOT NULL,
+            kind TEXT NOT NULL CHECK (kind IN ('exact', 'perceptual_image', 'perceptual_video')),
+            status TEXT NOT NULL DEFAULT 'queued'
+                CHECK (status IN ('queued', 'running', 'complete', 'failed')),
+            priority INTEGER NOT NULL DEFAULT 0,
+            attempts INTEGER NOT NULL DEFAULT 0,
+            policy_version INTEGER NOT NULL DEFAULT 1,
+            candidate_context TEXT NOT NULL DEFAULT '',
+            lease_owner TEXT,
+            lease_expires_at TEXT,
+            error TEXT,
+            expected_size_bytes INTEGER NOT NULL,
+            expected_modified_at_ms INTEGER NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (media_id, kind),
+            FOREIGN KEY (media_id) REFERENCES media_index(id) ON DELETE CASCADE
+         );
+         CREATE INDEX IF NOT EXISTS idx_media_fingerprint_jobs_queue
+             ON media_fingerprint_jobs(status, priority DESC, updated_at, media_id, kind);
+         CREATE INDEX IF NOT EXISTS idx_media_fingerprint_jobs_lease
+             ON media_fingerprint_jobs(status, lease_expires_at);",
+    )?;
+    if !table_columns(connection, "media_index")?.is_empty() {
+        connection.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_media_index_variant_candidates
+                 ON media_index(source_id, media_type, media_section, size_bytes, captured_at);",
+        )?;
+    }
+    add_column_if_missing(
+        connection,
+        "media_fingerprint_jobs",
+        "candidate_context",
+        "TEXT NOT NULL DEFAULT ''",
+    )?;
+    for (column, declaration) in [
+        ("phase_total", "INTEGER NOT NULL DEFAULT 0"),
+        ("phase_done", "INTEGER NOT NULL DEFAULT 0"),
+        ("phase_failed", "INTEGER NOT NULL DEFAULT 0"),
+        ("bytes_processed", "INTEGER NOT NULL DEFAULT 0"),
+        ("last_progress_at", "TEXT"),
+        ("rate_per_second", "REAL NOT NULL DEFAULT 0"),
+        ("eta_seconds", "INTEGER"),
+    ] {
+        add_column_if_missing(connection, "media_index_runs", column, declaration)?;
+    }
+    Ok(())
+}
+
 /// `instagram_sync_post_ledger` is created lazily by the sync runtime, so its
 /// copy of the upstream columns can only be added once the table exists.
 /// `add_column_if_missing` no-ops on a missing table and the runtime
@@ -499,7 +555,8 @@ fn reconcile_colliding_development_migrations(connection: &Connection) -> rusqli
     ensure_upstream_presence_schema(connection)?;
     ensure_source_identity_schema(connection)?;
     ensure_collections_schema(connection)?;
-    connection.execute_batch(MEDIA_VARIANTS_SCHEMA)
+    connection.execute_batch(MEDIA_VARIANTS_SCHEMA)?;
+    ensure_media_fingerprint_jobs_schema(connection)
 }
 
 fn apply_migration(
@@ -525,6 +582,9 @@ fn apply_migration(
     if version == 53 {
         return ensure_source_identity_schema(transaction);
     }
+    if version == 56 {
+        return ensure_media_fingerprint_jobs_schema(transaction);
+    }
     transaction.execute_batch(sql)
 }
 
@@ -544,13 +604,7 @@ pub fn open_connection(path: &Path) -> rusqlite::Result<Connection> {
     // processo. A chave por path preserva o suite hermético dos testes (um
     // banco temporário por teste, cada um migrado na 1ª abertura).
     ensure_migrations(&mut connection, path)?;
-    reconcile_colliding_development_migrations(&connection)?;
-
-    // Invariante operacional: migrations de branches de desenvolvimento podem
-    // colidir por versao. A fila nao deve falhar só porque o ledger diz que a
-    // migration passou enquanto as tabelas requeridas estao ausentes. Reparo
-    // barato, mantido por-abertura de propósito.
-    ensure_provider_sync_resume_schema(&connection)?;
+    ensure_runtime_schema(&connection, path)?;
 
     Ok(connection)
 }
@@ -558,6 +612,30 @@ pub fn open_connection(path: &Path) -> rusqlite::Result<Connection> {
 fn migrated_db_paths() -> &'static Mutex<HashSet<PathBuf>> {
     static APPLIED: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
     APPLIED.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+fn reconciled_db_paths() -> &'static Mutex<HashSet<PathBuf>> {
+    static RECONCILED: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
+    RECONCILED.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+fn ensure_runtime_schema(connection: &Connection, path: &Path) -> rusqlite::Result<()> {
+    let key = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let mut reconciled = reconciled_db_paths()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if reconciled.contains(&key) {
+        return Ok(());
+    }
+
+    // Development branches have historically reused migration numbers. Repair
+    // those collisions once per database and process, not on every status read:
+    // the DDL otherwise waits behind the fingerprint planner's write lock and
+    // makes an otherwise responsive window appear frozen.
+    reconcile_colliding_development_migrations(connection)?;
+    ensure_provider_sync_resume_schema(connection)?;
+    reconciled.insert(key);
+    Ok(())
 }
 
 fn ensure_migrations(connection: &mut Connection, path: &Path) -> rusqlite::Result<()> {
@@ -1183,6 +1261,14 @@ mod tests {
             .optional()
             .expect("query");
         assert!(applied_last.is_some(), "last migration should be applied");
+        let fingerprint_columns = table_columns(&connection, "media_fingerprint_jobs")
+            .expect("fingerprint job columns");
+        assert!(fingerprint_columns.contains("candidate_context"));
+        assert!(fingerprint_columns.contains("lease_expires_at"));
+        let run_columns = table_columns(&connection, "media_index_runs")
+            .expect("media index run columns");
+        assert!(run_columns.contains("last_progress_at"));
+        assert!(run_columns.contains("eta_seconds"));
         let backups = std::fs::read_dir(temp.path().join("backups"))
             .expect("backups dir")
             .flatten()
