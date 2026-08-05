@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.31.0](https://github.com/JustShinobi/NinjaCrawler/compare/v0.30.0...v0.31.0) (2026-08-05)
+
+
+### Features
+
+* **library:** optimize fingerprinting and unify media review ([#128](https://github.com/JustShinobi/NinjaCrawler/issues/128)) ([4cbf493](https://github.com/JustShinobi/NinjaCrawler/commit/4cbf493c6b583c1be2b1d4bfba8c05a35592e73b))
+
 ## [0.30.0](https://github.com/JustShinobi/NinjaCrawler/compare/v0.29.0...v0.30.0) (2026-08-01)
 
 
