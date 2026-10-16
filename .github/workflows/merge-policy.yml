@@ -26,7 +26,7 @@ concurrency:
 jobs:
   annotate:
     name: Label and advise merge method
-    runs-on: ubuntu-latest
+    runs-on: arc-k3s-light
     timeout-minutes: 5
 
     steps:
@@ -34,6 +34,9 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
+
+      - name: Setup PowerShell and GitHub CLI
+        uses: ./.github/actions/setup-pwsh
 
       - name: Ensure merge-method labels exist
         env:

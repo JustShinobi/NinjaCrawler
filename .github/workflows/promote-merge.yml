@@ -48,9 +48,16 @@ jobs:
       (github.event_name == 'workflow_run' &&
        github.event.workflow_run.event == 'pull_request' &&
        github.event.workflow_run.head_branch == 'develop')
-    runs-on: ubuntu-latest
+    runs-on: arc-k3s-light
     timeout-minutes: 10
     steps:
+      - name: Setup GitHub CLI
+        shell: bash
+        run: |
+          if ! command -v gh >/dev/null 2>&1; then
+            curl -fsSL https://github.com/cli/cli/releases/download/v2.67.0/gh_2.67.0_linux_amd64.tar.gz | sudo tar -zxf - -C /usr/local/bin --strip-components=2 gh_2.67.0_linux_amd64/bin/gh
+          fi
+
       - name: Merge the develop -> main promotion PR
         env:
           # PAT for parity with the other release workflows; the default

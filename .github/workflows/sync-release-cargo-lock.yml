@@ -22,7 +22,7 @@ jobs:
   sync:
     name: Sync Cargo.lock app version
     if: ${{ github.head_ref == 'release-please--branches--main--components--ninjacrawler' }}
-    runs-on: ubuntu-latest
+    runs-on: arc-k3s-light
     timeout-minutes: 10
 
     steps:
@@ -33,6 +33,9 @@ jobs:
           # GITHUB_TOKEN cannot push when the repo restricts workflow PR creation.
           token: ${{ secrets.GH_TOKEN }}
           fetch-depth: 0
+
+      - name: Setup PowerShell and GitHub CLI
+        uses: ./.github/actions/setup-pwsh
 
       - name: Sync Cargo.lock from Cargo.toml
         shell: pwsh

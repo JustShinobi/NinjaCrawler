@@ -24,7 +24,7 @@ concurrency:
 jobs:
   release-pr:
     name: Sync develop -> main release PR
-    runs-on: ubuntu-latest
+    runs-on: arc-k3s-light
     timeout-minutes: 10
 
     steps:
@@ -32,6 +32,9 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 0
+
+      - name: Setup GitHub CLI
+        uses: ./.github/actions/setup-gh
 
       - name: Create or update the develop -> main release PR
         env:

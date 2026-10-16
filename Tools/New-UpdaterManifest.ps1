@@ -42,7 +42,7 @@ param(
     [string]$Version,
     [Parameter(Mandatory = $true)]
     [string]$ReleaseDir,
-    [string]$Repository = "JustShinobi/NinjaCrawler",
+    [string]$Repository = "Shhinobi/NinjaCrawler",
     [string]$CliVersion = "^2"
 )
 
