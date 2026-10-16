@@ -30,7 +30,7 @@ concurrency:
 jobs:
   prepare:
     name: Resolve Windows release inputs
-    runs-on: ubuntu-latest
+    runs-on: arc-k3s-light
     timeout-minutes: 10
     permissions:
       contents: read
@@ -55,6 +55,9 @@ jobs:
           ref: ${{ inputs.sha || inputs.tag || github.ref }}
           path: .release-source
           persist-credentials: false
+
+      - name: Setup PowerShell and GitHub CLI
+        uses: ./.release-source/.github/actions/setup-pwsh
 
       - name: Validate release version
         id: version
@@ -208,7 +211,7 @@ jobs:
     name: Build Windows release assets
     needs: prepare
     if: ${{ needs.prepare.outputs.reuse_artifact != 'true' }}
-    runs-on: [self-hosted, proxmox-lxc, crossbuild, mode-ephemeral]
+    runs-on: arc-k3s-heavy
     timeout-minutes: 60
     permissions:
       contents: read
@@ -255,6 +258,17 @@ jobs:
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$RELEASE_SHA"
+
+      - name: Setup PowerShell and GitHub CLI
+        uses: ./.release-tooling/.github/actions/setup-pwsh
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Setup Windows Cross-Build Toolchain
+        uses: ./.release-tooling/.github/actions/setup-cross-toolchain
 
       - name: Verify self-hosted golden toolchain
         shell: bash
@@ -391,7 +405,7 @@ jobs:
         (needs.build.result == 'success' ||
          (needs.build.result == 'skipped' && needs.prepare.outputs.reuse_artifact == 'true'))
       }}
-    runs-on: ubuntu-latest
+    runs-on: arc-k3s-light
     timeout-minutes: 30
     permissions:
       contents: write
@@ -404,6 +418,14 @@ jobs:
           fetch-depth: 0
           ref: ${{ needs.prepare.outputs.sha }}
           persist-credentials: false
+
+      - name: Setup PowerShell and GitHub CLI
+        uses: ./.github/actions/setup-pwsh
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
 
       - name: Download verified build artifact
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1

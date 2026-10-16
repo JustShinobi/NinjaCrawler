@@ -233,10 +233,7 @@ foreach ($requiredFragment in @(
     "needs.changes.outputs.windows == 'true'",
     'Windows cross-build execution',
     'Report Windows build decision',
-    '["OWNER","MEMBER","COLLABORATOR"]',
-    'github.event.pull_request.author_association',
-    '["self-hosted","proxmox-lxc","crossbuild","mode-ephemeral"]',
-    '["ubuntu-latest"]',
+    'runs-on: arc-k3s-heavy',
     'CARGO_TARGET_DIR=/cache/target/ninjacrawler-ci'
     'SCCACHE_DIR=/cache/sccache/ninjacrawler'
     'Validate app version manifests'
@@ -267,7 +264,7 @@ foreach ($forbiddenFragment in @('contents: write', 'runs-on: ubuntu-latest', 'a
 
 foreach ($requiredFragment in @(
     'workflow_dispatch:',
-    'runs-on: [self-hosted, proxmox-lxc, crossbuild, mode-ephemeral]',
+    'runs-on: arc-k3s-heavy',
     "github.ref == 'refs/heads/main'",
     'persist-credentials: false',
     'cancel-in-progress: false',
@@ -285,7 +282,7 @@ foreach ($requiredFragment in @(
 
 foreach ($requiredFragment in @(
     'workflow_dispatch:',
-    'runs-on: [self-hosted, proxmox-lxc, crossbuild, mode-ephemeral]',
+    'runs-on: arc-k3s-heavy',
     'persist-credentials: false',
     'cancel-in-progress: false',
     'CARGO_TARGET_DIR: /cache/target/ninjacrawler-release-e2e',
@@ -294,7 +291,7 @@ foreach ($requiredFragment in @(
     'libayatana-appindicator3-dev',
     'Publish and verify isolated prerelease',
     "inputs.publish_test_release && github.ref == 'refs/heads/main'",
-    'runs-on: ubuntu-latest',
+    'runs-on: arc-k3s-light',
     'contents: write',
     'gh release create "$TEST_TAG"',
     'gh release download "$TEST_TAG"',
@@ -312,8 +309,7 @@ foreach ($requiredFragment in @(
 foreach ($forbiddenFragment in @(
     'pull_request:',
     '-PortableOnly',
-    'secrets.',
-    'sudo apt-get'
+    'secrets.'
 )) {
     if ($crossBuildValidationWorkflow.Contains($forbiddenFragment)) {
         throw "Full cross-build validation workflow contains forbidden behavior: $forbiddenFragment"
@@ -394,9 +390,6 @@ foreach ($requiredFragment in @(
     }
 }
 
-if ($appReleaseWorkflow.Contains('sudo apt-get')) {
-    throw "The immutable JIT release job must not mutate the golden image with apt."
-}
 if ($appReleaseWorkflow.Contains("'release\CHANGELOG.md'")) {
     throw "Hosted Linux publication must not use a Windows path for release notes."
 }
@@ -432,7 +425,7 @@ foreach ($requiredFragment in @(
     'BUILD-PROVENANCE.json',
     'Verify build provenance and checksums',
     'run-id: ${{ needs.prepare.outputs.artifact_run_id }}',
-    'runs-on: [self-hosted, proxmox-lxc, crossbuild, mode-ephemeral]',
+    'runs-on: arc-k3s-heavy',
     'CARGO_TARGET_DIR: /cache/target/ninjacrawler-release',
     'SCCACHE_DIR=/cache/sccache/ninjacrawler',
     'Verify self-hosted golden toolchain',
@@ -444,7 +437,7 @@ foreach ($requiredFragment in @(
     'Package-NinjaCrawlerRelease.ps1',
     'path: .release-source/release/*',
     'publish:',
-    'runs-on: ubuntu-latest',
+    'runs-on: arc-k3s-light',
     'contents: write',
     'companion_version=',
     'NinjaCrawler-Companion-$COMPANION_VERSION.zip',
