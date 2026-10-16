@@ -1,0 +1,60 @@
+name: 'Setup Windows Cross-Build Toolchain'
+description: 'Install Rust, cargo-xwin, Clang, NSIS, and Linux desktop build libraries for cross-compiling NinjaCrawler'
+runs:
+  using: 'composite'
+  steps:
+    - name: Prepare shared cache directory
+      shell: bash
+      run: |
+        sudo mkdir -p /cache/target /cache/sccache
+        sudo chown -R "$(id -u):$(id -g)" /cache
+        sudo chmod -R 777 /cache
+
+    - name: Install system dependencies
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install --yes --no-install-recommends \
+          clang-18 \
+          lld-18 \
+          llvm-18 \
+          nsis \
+          pkg-config \
+          libayatana-appindicator3-dev \
+          build-essential \
+          file
+
+        sudo ln -sf "$(command -v clang-18)" /usr/local/bin/clang-cl
+        for tool in lld-link llvm-lib llvm-rc; do
+          if command -v "${tool}-18" >/dev/null 2>&1; then
+            sudo ln -sf "$(command -v "${tool}-18")" "/usr/local/bin/${tool}"
+          fi
+        done
+        for tool in llvm-readobj; do
+          if command -v "${tool}-18" >/dev/null 2>&1; then
+            sudo ln -sf "$(command -v "${tool}-18")" "/usr/local/bin/${tool}"
+            sudo ln -sf "$(command -v "${tool}-18")" "/usr/local/bin/${tool}-18"
+          fi
+        done
+
+    - name: Install Rust toolchain
+      shell: bash
+      run: |
+        if ! command -v rustup >/dev/null 2>&1; then
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal --target x86_64-pc-windows-msvc
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+        else
+          rustup default stable
+          rustup target add x86_64-pc-windows-msvc
+        fi
+        echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+    - name: Install cargo-xwin
+      shell: bash
+      run: |
+        if ! command -v cargo-xwin >/dev/null 2>&1; then
+          echo "Installing cargo-xwin..."
+          curl -fsSL https://github.com/rust-cross/cargo-xwin/releases/download/v0.23.1/cargo-xwin-v0.23.1.x86_64-unknown-linux-musl.tar.gz | sudo tar -zxf - -C /usr/local/bin cargo-xwin
+          sudo chmod +x /usr/local/bin/cargo-xwin
+        fi
+        cargo-xwin --version

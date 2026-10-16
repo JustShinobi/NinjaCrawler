@@ -38,7 +38,7 @@ concurrency:
 jobs:
   release-companion:
     name: Build and publish Companion extension
-    runs-on: ubuntu-latest
+    runs-on: arc-k3s-light
     timeout-minutes: 15
 
     steps:
@@ -49,6 +49,9 @@ jobs:
           # Prefer the commit SHA (the tag may not exist yet for a draft release),
           # then the dispatch tag.
           ref: ${{ inputs.sha || inputs.tag }}
+
+      - name: Setup PowerShell and GitHub CLI
+        uses: ./.github/actions/setup-pwsh
 
       - name: Validate Companion release version
         id: version

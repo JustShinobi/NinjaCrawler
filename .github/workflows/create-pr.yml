@@ -58,7 +58,7 @@ jobs:
         startsWith(github.event.label.name, 'pr-model/') &&
         github.event.pull_request.head.repo.full_name == github.repository
       )
-    runs-on: ubuntu-latest
+    runs-on: arc-k3s-light
     timeout-minutes: 10
 
     env:
@@ -71,6 +71,14 @@ jobs:
         with:
           fetch-depth: 0
           ref: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.base.ref || github.ref }}
+
+      - name: Setup GitHub CLI
+        uses: ./.github/actions/setup-gh
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
 
       - name: Sync Gemini model labels
         run: node .github/scripts/sync-gemini-pr-models.mjs

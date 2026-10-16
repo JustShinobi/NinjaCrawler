@@ -26,7 +26,7 @@ concurrency:
 jobs:
   annotate:
     name: Label and advise merge method
-    runs-on: ubuntu-latest
+    runs-on: arc-k3s-light
     timeout-minutes: 5
 
     steps:
@@ -34,6 +34,9 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
+
+      - name: Setup PowerShell and GitHub CLI
+        uses: ./.github/actions/setup-pwsh
 
       - name: Ensure merge-method labels exist
         env:
@@ -97,14 +100,14 @@ jobs:
           TARGET_LABEL: ${{ steps.policy.outputs.label }}
         run: |
           set -euo pipefail
-          current="$(gh pr view "$PR" --repo "$REPO" --json labels --jq '.labels[].name')"
+          current="$(gh api "/repos/$REPO/issues/$PR/labels" --jq '.[].name')"
           for label in merge:squash merge:merge-commit; do
             if [ "$label" != "$TARGET_LABEL" ] && printf '%s\n' "$current" | grep -Fxq "$label"; then
-              gh pr edit "$PR" --repo "$REPO" --remove-label "$label" || true
+              gh api -X DELETE "/repos/$REPO/issues/$PR/labels/$label" || true
             fi
           done
           if ! printf '%s\n' "$current" | grep -Fxq "$TARGET_LABEL"; then
-            gh pr edit "$PR" --repo "$REPO" --add-label "$TARGET_LABEL"
+            gh api -X POST "/repos/$REPO/issues/$PR/labels" -f "labels[]=$TARGET_LABEL"
           fi
 
       - name: Upsert sticky merge-policy comment

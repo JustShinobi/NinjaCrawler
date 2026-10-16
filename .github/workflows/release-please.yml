@@ -47,12 +47,15 @@ permissions:
 
 jobs:
   release-please:
-    runs-on: ubuntu-latest
+    runs-on: arc-k3s-light
     steps:
       - name: Check out release history
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 0
+
+      - name: Setup PowerShell and GitHub CLI
+        uses: ./.github/actions/setup-pwsh
 
       - name: Detect unpublished draft releases
         id: unpublished
