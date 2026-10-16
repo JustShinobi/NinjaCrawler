@@ -100,14 +100,14 @@ jobs:
           TARGET_LABEL: ${{ steps.policy.outputs.label }}
         run: |
           set -euo pipefail
-          current="$(gh pr view "$PR" --repo "$REPO" --json labels --jq '.labels[].name')"
+          current="$(gh api "/repos/$REPO/issues/$PR/labels" --jq '.[].name')"
           for label in merge:squash merge:merge-commit; do
             if [ "$label" != "$TARGET_LABEL" ] && printf '%s\n' "$current" | grep -Fxq "$label"; then
-              gh pr edit "$PR" --repo "$REPO" --remove-label "$label" || true
+              gh api -X DELETE "/repos/$REPO/issues/$PR/labels/$label" || true
             fi
           done
           if ! printf '%s\n' "$current" | grep -Fxq "$TARGET_LABEL"; then
-            gh pr edit "$PR" --repo "$REPO" --add-label "$TARGET_LABEL"
+            gh api -X POST "/repos/$REPO/issues/$PR/labels" -f "labels[]=$TARGET_LABEL"
           fi
 
       - name: Upsert sticky merge-policy comment
